@@ -66,8 +66,9 @@ SUGGESTED = (
 THINKING_SHOW_SECONDS_AFTER = 3
 THINKING_ORB = 20  # px, the orb next to "thinking…" in a reply
 THINK_KEY = "chat/think_mode"
-THINK_TOOLTIP = ("Thinking mode (Ctrl+T): answer with the reasoning model straight away. "
-                 "Off: a quick answer first, the reasoning model only when it is weak.")
+THINK_TOOLTIP = ("Thinking mode (Ctrl+T, typed questions only): answer with the reasoning "
+                 "model straight away. Off: a quick answer first, the reasoning model only "
+                 "when it is weak.")
 DEEP_REASONS = {
     "think_mode": "thinking mode",
     "planning": "planning question",
@@ -135,12 +136,13 @@ def default_voice_answer(conn: sqlite3.Connection, cfg: Config, question: str, h
                          speaker: Any, on_token: Callable[[str], None], session_id: str, *,
                          mode: str = "auto",
                          on_phase: Callable[[str, dict], None] | None = None) -> Any:
-    """Voice: qwen first; planning questions and weak answers go to gemma (without
-    reasoning in "auto", with it in "think")."""
+    """Voice: qwen first; planning questions and weak answers go to gemma, never
+    with reasoning (too slow to wait for when spoken)."""
     from jarvis.voice import voice_answer
 
     return voice_answer(conn, cfg, question, history, None, speaker, on_token=on_token,
-                        session_id=session_id, mode=mode, on_phase=on_phase)
+                        session_id=session_id, mode=mode, on_phase=on_phase,
+                        deep_think=False)
 
 
 def default_speaker(cfg: Config, on_level: Callable[[float], None],
@@ -1383,7 +1385,7 @@ class ChatPanel(QFrame):
             self._speech_turn = vid
         self._spawn(_run_voice_answer, "jarvis-voice-answer", self.cfg, self.voice_answer_fn,
                     text, list(self.history), self.session_id, self._turn_speaker, self._rid,
-                    vid, self._bridge, self._vbridge, self.mode)
+                    vid, self._bridge, self._vbridge, "auto")  # Think is typed-only
 
     def _on_voice_answer(self, vid: int, answer: Any) -> None:
         if vid != self._vid or self.turn.state not in (vt.THINKING, vt.SPEAKING):

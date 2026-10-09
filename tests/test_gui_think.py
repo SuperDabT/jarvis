@@ -194,6 +194,7 @@ def test_voice_turn_gets_mode_and_deep_orb(app, tmp_path):
                   voice_answer_fn=voice_answer,
                   speaker_factory=lambda *a: FakeSpeaker(*a))
     p.show()
+    p.think_btn.click()  # Think is for typed questions; voice stays "auto"
     p.toggle_voice()
     pump(lambda: p.messages and isinstance(p.messages[-1], BotMessage)
          and p.messages[-1].deep)
@@ -216,3 +217,15 @@ def test_chip_text_reads_like_words():
     assert chip_text("fact:maybe_done:28") == "maybe done #28"
     assert chip_text("check:rail_budget:5V") == "rail budget 5V"
     assert chip_text("milestone:Core demo") == "Core demo"
+
+
+def test_default_voice_answer_never_reasons(monkeypatch):
+    seen = {}
+
+    def fake(*a, **kw):
+        seen.update(kw)
+        return "ok"
+
+    monkeypatch.setattr("jarvis.voice.voice_answer", fake)
+    chat_panel.default_voice_answer(None, None, "q?", [], None, None, "s", mode="think")
+    assert seen["deep_think"] is False
