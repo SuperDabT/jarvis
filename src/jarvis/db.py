@@ -197,6 +197,14 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 
 CREATE INDEX IF NOT EXISTS chat_messages_session ON chat_messages (session_id, id);
+
+-- Small key/value state for sync bookkeeping, e.g. how far back the commit
+-- history has been fetched ("commits_since").
+CREATE TABLE IF NOT EXISTS sync_state (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TEXT
+);
 """
 
 # Columns added after a table first shipped: (table, column, type). Applied with
@@ -349,6 +357,20 @@ def insert_briefing(
     )
     conn.commit()
     return cur.lastrowid
+
+
+def get_sync_state(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_sync_state(conn: sqlite3.Connection, key: str, value: str | None) -> None:
+    conn.execute(
+        "INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, value, now_iso()),
+    )
+    conn.commit()
 
 
 def get_daemon_state(conn: sqlite3.Connection) -> sqlite3.Row | None:

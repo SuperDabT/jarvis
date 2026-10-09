@@ -17,6 +17,7 @@ from jarvis.db import get_etag, set_etag
 
 API_BASE = "https://api.github.com"
 DEFAULT_POLL_INTERVAL = 60
+HISTORY_MAX_PAGES = 20  # commit history backfill: at most 2000 commits
 
 
 class GitHubError(Exception):
@@ -210,6 +211,33 @@ class GitHubClient:
     def commits(self, per_page: int = 30) -> FetchResult:
         """Most recent commits on the default branch, single page."""
         return self.get(f"/repos/{self.repo}/commits", {"per_page": per_page})
+
+    def commit_history(self, since: str, max_pages: int = HISTORY_MAX_PAGES) -> FetchResult:
+        """Every commit on the default branch since ``since`` (ISO 8601), all pages.
+
+        Unconditional (the ``since`` value moves, so an ETag would never match) and
+        bounded to ``max_pages`` pages of 100. Used once to backfill the history
+        and afterwards only when the first page of commits changed.
+        """
+        path = f"/repos/{self.repo}/commits"
+        resp = self._http.get(path, params={"since": since, "per_page": 100})
+        items: list = []
+        pages = 0
+        while True:
+            if resp.status_code == 409:  # empty repository
+                return FetchResult(changed=True, status=200, data=items)
+            if resp.status_code != 200:
+                raise GitHubError(resp.status_code, _error_message(resp), str(resp.url))
+            data = self._parse(resp, str(resp.url))
+            if not isinstance(data, list):
+                raise GitHubError(200, "expected a JSON list of commits", str(resp.url))
+            items.extend(data)
+            pages += 1
+            next_link = resp.links.get("next", {}).get("url")
+            if not next_link or pages >= max_pages:
+                break
+            resp = self._http.get(next_link)
+        return FetchResult(changed=True, status=200, data=items)
 
     def file(self, path: str) -> FetchResult:
         """Contents API payload for one file; status 404 if it does not exist."""

@@ -60,6 +60,30 @@ One line per tick goes to stdout:
 
 Errors (offline, GitHub 5xx, rate limit, Ollama down) are logged and retried with backoff (60 s doubling to 15 min, or until a rate limit resets). While Ollama is down the template wording is shown and the model is asked again on the next tick. Only one refresh runs at a time (`<db>.lock`): the window's Refresh and `jarvis` say a refresh is already running instead of doubling model calls. A second `jarvis watch` refuses to start. The window header shows "watching · checked 2 min ago" while the daemon is alive.
 
+## The window: `jarvis-window`
+
+```sh
+uv run jarvis-window                 # dashboard + chat; refreshes on open
+uv run jarvis-window --no-refresh    # cached data only
+uv run jarvis-window --theme dark    # or light; default follows the system
+```
+
+A Notion-style dashboard over the same database: the briefing as a callout at the top, four
+headline numbers (nearest due milestone, its closed count, the pace needed, time since the last
+commit), a milestone timeline with a "today" line, a commit grid of the last 26 weeks, open
+issues by phase, the power charts per rail (worst-case current against the rating, and each
+part's voltage range against the supply band), and the suggestions as a table. Click a row to
+open the full card with the prompt for Claude, Done and Not useful. Every number is computed in
+Python from the synced data and `hardware.yaml`; the model only writes the briefing sentences
+and chat answers.
+
+"Ask Jarvis" on the right (Ctrl+K to type, Ctrl+J to show or hide) answers questions from the
+synced data with sources (issues, commits, checks), using the local model; answers stream in
+and can take 10-25 s to start. Ctrl+R / F5 refresh, Esc closes the card drawer, Ctrl+Q quits.
+
+Commit history: the first sync after upgrading fetches the last 183 days of commits once
+(paginated, 100 per page); later syncs only fetch more when the newest page of commits changed.
+
 ## Research loop: `jarvis research`
 
 ```sh
