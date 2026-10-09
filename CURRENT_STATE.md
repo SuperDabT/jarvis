@@ -1,6 +1,6 @@
 # Current state
 
-Updated after Phase 1, step 2 (see ROADMAP.md).
+Updated after Phase 1, step 3 (see ROADMAP.md).
 
 ## Database
 
@@ -32,8 +32,23 @@ Updated after Phase 1, step 2 (see ROADMAP.md).
 - The new tables are `STRICT` (SQLite 3.37+) with CHECK constraints and triggers, so bad rows
   are refused by the database itself, not only by Python. Foreign keys are on for every
   `db.connect()` connection (a raw `sqlite3.connect` does not enforce them).
-- Not yet: no Python service for items (step 3), no UI. Courses, notes, recurrence and
+- Not yet: no UI. Courses, notes, recurrence and
   notifications are later phases; they would add tables and `links` types in a new step.
+
+## Item service (`jarvis/items.py`, no Qt)
+
+- Write: `create_item`, `update_item` (`UNSET` = leave, `None` = clear), `complete_item`,
+  `reopen_item`, `delete_item` (soft), `restore_item`. Each validates first and raises
+  `ItemError` (with `.field`) or `ItemNotFound`, then commits; repeating one is harmless.
+- Read: `get_item`, `list_items(status=open|done|all)`, `open_items`, `today_items`,
+  `overdue_items`, each filterable by `project` (id, slug, `#slug` or repo) and `kinds`;
+  `get_project`, `list_projects`.
+- An item's *when* is `due_at`, else `remind_at`. Overdue and today are computed from the
+  clock in `tz` (default the system zone) and never overlap. Open lists sort by when (none
+  last), then priority, then age.
+- `related` links: `link_related`, `unlink_related`, `related_items`. Two-way, one row per pair
+  (smaller id first); a reverse row written elsewhere still counts.
+- External links (an item about a GitHub issue) have no helper yet; the table supports them.
 
 ## The real database
 
@@ -45,7 +60,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 545 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 596 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
-`tests/test_life_os_schema.py` the version 2 tables.
+`tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service.
