@@ -186,6 +186,7 @@ def _answer(text="Core demo has 9 open issues.", **kw):
                 unverified_numbers=[], notes=["Note: 12 is not in the synced data."],
                 model="gemma4:26b", duration=12.0)
     base.update(kw)
+    base.setdefault("cited_sources", list(base["sources"]))  # what the answer cited
     return Answer(**base)
 
 
@@ -276,20 +277,25 @@ def test_chat_toggle_and_shortcuts(setup, app):
 
 
 def test_real_ask_is_wired_with_session(app, tmp_path, monkeypatch):
-    """The default ask_fn calls jarvis.chat.ask with on_token and the session id."""
+    """The default ask_fn goes through escalate.answer_with_escalation with no
+    fast tier (typed chat), on_token, the mode, on_phase and the session id."""
     from jarvis.gui import chat_panel
 
     seen = {}
 
-    def fake(conn, cfg, question, history, client, on_token=None, now=None, *,
-             session_id=None, use_embeddings=False):
-        seen.update(question=question, session=session_id, client=client)
+    def fake(conn, cfg, question, history, *, mode, fast_client, deep_client, on_token,
+             on_phase, session_id):
+        seen.update(question=question, session=session_id, mode=mode, fast=fast_client,
+                    deep=deep_client, phase=on_phase)
         on_token("hi")
         return _answer(text="hi")
 
-    monkeypatch.setattr("jarvis.chat.ask", fake)
-    out = chat_panel.default_ask(None, _cfg(tmp_path), "q?", [], lambda t: None, "window-1")
-    assert out.text == "hi" and seen == {"question": "q?", "session": "window-1", "client": None}
+    monkeypatch.setattr("jarvis.escalate.answer_with_escalation", fake)
+    out = chat_panel.default_ask(None, _cfg(tmp_path), "q?", [], lambda t: None, "window-1",
+                                 mode="think", on_phase=print)
+    assert out.text == "hi"
+    assert seen == {"question": "q?", "session": "window-1", "mode": "think", "fast": None,
+                    "deep": None, "phase": print}
 
 
 # ---------------------------------------------------------------- refresh

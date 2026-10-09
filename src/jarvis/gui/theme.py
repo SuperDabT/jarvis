@@ -395,6 +395,16 @@ QPushButton#srcChip {{
     background: {t.fill};
 }}
 QPushButton#srcChip:hover {{ color: {t.text}; border-color: {ring}; }}
+QPushButton#srcChip[more="true"] {{ background: transparent; border-style: dashed; }}
+QPushButton#thinkToggle {{
+    border: 1px solid {t.btn_line}; border-radius: 11px; padding: 3px 10px;
+    font-family: {mono}; font-size: 11px; font-weight: 600; color: {t.muted};
+    background: transparent;
+}}
+QPushButton#thinkToggle:hover {{ color: {t.text}; border-color: {t.text}; }}
+QPushButton#thinkToggle:checked {{
+    color: {t.on_accent}; background: {t.accent}; border-color: {t.accent};
+}}
 QPushButton#send {{
     border: none; border-radius: 14px; background: {t.accent}; color: {t.on_accent};
     font-size: 15px; font-weight: 700; padding: 0;

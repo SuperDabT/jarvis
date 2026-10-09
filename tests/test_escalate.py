@@ -327,3 +327,32 @@ def test_thinking_budget_cut_reanswers_without_reasoning(tmp_path):
     assert log[2][1] == {"thinking_s": 20.4}
     assert a.tier == "deep" and a.error is None and a.thinking_s == 20.4
     assert a.text.startswith("Core demo is due Oct 18") and "re-check" not in "".join(shown)
+
+
+# ---------------------------------------------------------------- deep without reasoning
+
+
+def test_deep_think_false_runs_deep_without_reasoning(tmp_path):
+    deep = ThinkClient(DEEP_PLAN)
+    log, on_phase = phases_log()
+    a = escalate.answer_with_escalation(
+        seeded(), cfg(tmp_path), "What should I do today?", [], mode="auto",
+        fast_client=FakeClient(["never used"]), deep_client=deep, on_phase=on_phase,
+        now=NOW, brevity="voice", deep_think=False)
+    assert [(c["think"], c["max_thinking_s"]) for c in deep.calls] == [(False, None)]
+    assert [n for n, _ in log] == ["deep", "done"]  # no thinking / answering events
+    assert log[0][1] == {"model": "gemma-fake", "reason": "planning"}
+    assert a.tier == "deep" and a.escalated and a.thinking_s is None and "#31" in a.text
+
+
+def test_voice_auto_deep_has_no_reasoning_think_mode_has(tmp_path):
+    def run(mode, **kw):
+        deep = ThinkClient(DEEP_PLAN)
+        voice.voice_answer(seeded(), cfg(tmp_path), "What should I do today?", [],
+                           FakeClient(["never used"]), RecordingSpeaker([]), now=NOW,
+                           mode=mode, deep_client=deep, **kw)
+        return [c["think"] for c in deep.calls]
+
+    assert run("auto") == [False]
+    assert run("think") == [True]
+    assert run("auto", deep_think=True) == [True]  # explicit override

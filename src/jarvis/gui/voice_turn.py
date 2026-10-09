@@ -43,6 +43,7 @@ CAPTIONS = {
     THINKING: "Thinking…",
     SPEAKING: "Speaking · Esc or the mic to interrupt",
 }
+DEEP_CAPTION = "Thinking deeper…"  # THINKING on the reasoning model
 NO_SPEECH = "Didn't catch that."
 MIC_TOOLTIP = "Talk to Jarvis (Ctrl+Space)"
 AUTO_LISTEN_KEY = "voice/auto_listen"
@@ -258,5 +259,5 @@ class MicGlyph(QWidget):
 
 __all__ = ["VoiceTurn", "InvalidTransition", "TRANSITIONS", "STATES", "barge_in_action",
            "TurnSpeaker", "MicButton", "MicGlyph", "paint_mic", "ui_settings", "read_bool",
-           "CAPTIONS", "NO_SPEECH", "MIC_TOOLTIP", "AUTO_LISTEN_KEY", "AUTO_LISTEN_LABEL",
+           "CAPTIONS", "DEEP_CAPTION", "NO_SPEECH", "MIC_TOOLTIP", "AUTO_LISTEN_KEY", "AUTO_LISTEN_LABEL",
            "IDLE", "LISTENING", "TRANSCRIBING", "THINKING", "SPEAKING"]

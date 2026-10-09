@@ -5,8 +5,10 @@ A QPainter widget: a soft radial glow, an outer ring of rotating arc segments
 core. It is drawn in the ink of the two-colour pair (cream rings on green in
 dark mode, green rings on cream in light mode); while it is live (listening,
 speaking) the sweep arcs take on the signal colour, the site's colour for live
-data. An error is a brief signal flash. It has
-a ``state`` (idle / listening / thinking / speaking / error) and an input
+data. An error is a brief signal flash. "deep" (the reasoning model is
+working) stays in the ink: slower, heavier arcs on wider rings with a broad
+breathing glow, set apart from the quick, light "thinking" spin. It has
+a ``state`` (idle / listening / thinking / deep / speaking / error) and an input
 ``level`` (0..1, mic or speech loudness), smoothed with a fast attack and a
 slower decay.
 
@@ -40,7 +42,7 @@ from shiboken6 import isValid
 from jarvis.gui import motion
 from jarvis.gui.theme import Tokens
 
-STATES = ("idle", "listening", "thinking", "speaking", "error")
+STATES = ("idle", "listening", "thinking", "deep", "speaking", "error")
 ACTIVE_FPS = 60
 IDLE_FPS = 12
 ERROR_MS = 900  # the signal flash, then back to idle
@@ -61,6 +63,7 @@ class OrbParams:
     fps: int  # frame rate this state needs
     trail: float = 0.35  # 0..1, how long the arcs' fading tails are (speed cue)
     live: float = 0.0  # 0..1, mix of the signal colour into the sweep (listening, speaking)
+    weight: float = 0.0  # 0..1, heavier: thicker, longer arcs and a denser coil (deep)
 
 
 BASE_RINGS = (0.80, 0.62, 0.45)
@@ -89,6 +92,12 @@ def params_for(state: str, level: float = 0.0, t: float = 0.0,
         shimmer = 0.06 * math.sin(t * 5.0)
         return OrbParams(230.0, -320.0, 0.55 + shimmer, BASE_CORE + 0.015 * math.sin(t * 7.0),
                          BASE_RINGS, 0.0, ACTIVE_FPS, trail=1.0)
+    if state == "deep":
+        # heavy and slow: a broad glow breathing on a ~4 s cycle, wider rings
+        breath = math.sin(t * 1.6)
+        return OrbParams(64.0, -42.0, 0.86 + 0.10 * breath, BASE_CORE + 0.035 + 0.015 * breath,
+                         (o + 0.03, c + 0.04, i + 0.03), 0.0, ACTIVE_FPS, trail=0.8,
+                         weight=1.0)
     if state == "speaking":
         # the glow and core pulse with the voice
         return OrbParams(36.0, -24.0, 0.40 + 0.60 * lv, BASE_CORE + 0.09 * lv,
@@ -187,7 +196,7 @@ class Orb(QWidget):
             self._error_timer.start()
         elif self._state == "error":
             self._error_timer.stop()
-        if state in ("idle", "thinking"):
+        if state in ("idle", "thinking", "deep"):
             self._target = 0.0
         changed = state != self._state
         self._state = state
@@ -410,27 +419,40 @@ class Orb(QWidget):
 
         # 3. outer rotating arc segments (unequal lengths: a "scanner" look)
         a0 = self._a_outer
-        w_out = lw * (1.7 if small else 1.35)
+        hv = prm.weight
+        w_out = lw * (1.7 if small else 1.35) * (1 + 0.75 * hv)
         segs = ((0, 100, 0.95), (180, 70, 0.8)) if small else \
             ((0, 96, 0.95), (128, 54, 0.75), (214, 26, 0.6), (262, 64, 0.85))
         for start, span, alpha in segs:
-            comet(r_out, a0 + start + span, span, sweep, alpha, w_out, 1)
+            span = span * (1 + 0.32 * hv)
+            comet(r_out, a0 + start + span, span, sweep, min(1.0, alpha + 0.1 * hv), w_out, 1)
+        if hv and not small:
+            # the outer hairline becomes a second, slower counter-turning track:
+            # the rings read "full" while it reasons
+            rt = r_out + lw * 2.4
+            p.setPen(pen(_alpha(ring, (0.30 if dark else 0.26) * hv), lw * 0.9))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(c, rt, rt)
+            for start, span in ((40, 70), (220, 70)):
+                arc(rt, -a0 * 0.35 + start, span, pen(_alpha(ring, 0.75 * hv), lw * 1.3))
 
         # 4. coil ring: ten segments, slowly turning with the outer ring
         if not small:
             n = 10
             ac = a0 * 0.25
             coil = _mix(ring, core, 0.25 if dark else 0.1)
+            gap = 10 - 6 * hv  # a denser coil when heavy
             for k in range(n):
-                arc(r_coil, ac + k * 360 / n + 5, 360 / n - 10,
-                    pen(_alpha(coil, (0.32 if dark else 0.26) + 0.24 * g), lw * 2.2))
+                arc(r_coil, ac + k * 360 / n + gap / 2, 360 / n - gap,
+                    pen(_alpha(coil, (0.32 if dark else 0.26) + 0.24 * g + 0.12 * hv),
+                        lw * (2.2 + 0.8 * hv)))
             p.setPen(pen(_alpha(core if dark else ring, 0.45 if dark else 0.35), max(0.8, lw * 0.35)))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(c, r_coil - lw * 1.7, r_coil - lw * 1.7)
 
         # 5. inner counter-rotating arcs
         ai = self._a_inner
-        w_in = lw * (1.3 if small else 1.0)
+        w_in = lw * (1.3 if small else 1.0) * (1 + 0.5 * hv)
         for start, span in ((0, 120), (180, 120)):
             comet(r_in, ai + start, span, core, 0.95, w_in, -1)
         if not small:

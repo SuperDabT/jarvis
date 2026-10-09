@@ -6,7 +6,10 @@ Two tiers:
   (gemma4:26b without reasoning) for typed chat;
 - deep: gemma4:26b with its native reasoning on (Ollama ``think: true``). The
   reasoning arrives in a separate stream field and is never shown or spoken; only
-  its duration is reported (``Answer.thinking_s``).
+  its duration is reported (``Answer.thinking_s``). ``deep_think=False`` runs the
+  deep tier without reasoning (voice auto mode: measured on the grounded prompt,
+  gemma's reasoning never finished inside the 20 s voice cap, while plain gemma
+  answered planning questions well in ~10 s).
 
 ``answer_with_escalation`` picks the tier:
 
@@ -220,7 +223,8 @@ def answer_with_escalation(
         brevity: Brevity = "text", session_id: str | None = None,
         now: datetime | None = None, fast_budget: int = chat.CONTEXT_TOKEN_BUDGET,
         deep_budget: int = chat.CONTEXT_TOKEN_BUDGET, stable_prefix: bool = False,
-        use_embeddings: bool = False, think_budget_s: float | None = None) -> Answer:
+        use_embeddings: bool = False, think_budget_s: float | None = None,
+        deep_think: bool = True) -> Answer:
     """Answer ``question`` on the fast tier, escalating to the reasoning model when
     needed (see the module docstring). Never raises for model failures.
 
@@ -233,7 +237,9 @@ def answer_with_escalation(
     and ``first_token_s`` is the final pass's first token, from the start.
     ``think_budget_s`` caps the reasoning (default DEEP_THINK_BUDGET_S[brevity]);
     when it runs out, ``on_phase("thinking_cut", {"thinking_s"})`` and the deep
-    model answers again without reasoning.
+    model answers again without reasoning. ``deep_think=False``: the deep pass
+    runs without reasoning (no "thinking" / "answering" / "thinking_cut" events,
+    ``thinking_s`` None); the voice auto mode uses this.
     """
     t0 = time.monotonic()
     question = question.strip()
@@ -310,9 +316,9 @@ def answer_with_escalation(
             deep_reason = "escalated"
 
         phase("deep", model=getattr(deep_client, "model", None), reason=deep_reason)
-        deep, deep_ctx, deep_start = run(deep_client, think=True, budget=deep_budget,
-                                         tier="deep")
-        if deep.error and THINKING_BUDGET_MSG in deep.error:
+        deep, deep_ctx, deep_start = run(deep_client, think=bool(deep_think),
+                                         budget=deep_budget, tier="deep")
+        if deep_think and deep.error and THINKING_BUDGET_MSG in deep.error:
             cut_s = deep.thinking_s
             phase("thinking_cut", thinking_s=round(cut_s, 1) if cut_s is not None else None)
             deep, deep_ctx, deep_start = run(deep_client, think=False, budget=deep_budget,

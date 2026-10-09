@@ -5,6 +5,13 @@ sources); this module is only its UI. A question runs on a background thread
 with its own SQLite connection; streamed tokens come back through a queued Qt
 signal. One question at a time: Send is disabled while Jarvis answers.
 
+Thinking mode (``jarvis.escalate``): typed and spoken questions go through
+``answer_with_escalation``. In "auto" a weak first answer is replaced by the
+reasoning model's; the THINK toggle (Ctrl+T, remembered) goes straight to it.
+Its phase events come back like the tokens: the first answer fades out, the
+reply shows "Thinking deeper — <why>" with the orb in its "deep" state, and the
+meta line says which tier answered and how long the model thought.
+
 Voice (mic button / Ctrl+Space): a ``voice_turn.VoiceTurn`` walks listening ->
 transcribing -> thinking -> speaking. Recording, speech-to-text and the spoken
 answer run on worker threads (``jarvis.voice``); every callback comes back as a
@@ -14,6 +21,7 @@ one turn (typed or spoken) runs at a time.
 """
 from __future__ import annotations
 
+import inspect
 import re
 import shutil
 import sqlite3
@@ -25,7 +33,7 @@ from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent
+from PySide6.QtGui import QDesktopServices, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
     QMenu,
@@ -57,16 +65,42 @@ SUGGESTED = (
 )
 THINKING_SHOW_SECONDS_AFTER = 3
 THINKING_ORB = 20  # px, the orb next to "thinking…" in a reply
+THINK_KEY = "chat/think_mode"
+THINK_TOOLTIP = ("Thinking mode (Ctrl+T): answer with the reasoning model straight away. "
+                 "Off: a quick answer first, the reasoning model only when it is weak.")
+DEEP_REASONS = {
+    "think_mode": "thinking mode",
+    "planning": "planning question",
+    "escalated": "first answer was weak",
+}
+NO_ANSWER = "I couldn't put an answer together from the synced data. Try rephrasing the question."
 
-# ask_fn(conn, cfg, question, history, on_token, session_id) -> chat.Answer
-AskFn = Callable[[sqlite3.Connection, Config, str, list, Callable[[str], None], str], Any]
+# ask_fn(conn, cfg, question, history, on_token, session_id[, mode=, on_phase=]) -> chat.Answer
+# (``mode`` and ``on_phase`` are passed only to functions that accept them)
+AskFn = Callable[..., Any]
 
 
 def default_ask(conn: sqlite3.Connection, cfg: Config, question: str, history: list,
-                on_token: Callable[[str], None], session_id: str) -> Any:
-    from jarvis.chat import ask
+                on_token: Callable[[str], None], session_id: str, *, mode: str = "auto",
+                on_phase: Callable[[str, dict], None] | None = None) -> Any:
+    """Typed chat: gemma without reasoning first, with reasoning when that is weak
+    (``mode="think"``: with reasoning straight away)."""
+    from jarvis.escalate import answer_with_escalation
 
-    return ask(conn, cfg, question, history, None, on_token=on_token, session_id=session_id)
+    return answer_with_escalation(conn, cfg, question, history, mode=mode, fast_client=None,
+                                  deep_client=None, on_token=on_token, on_phase=on_phase,
+                                  session_id=session_id)
+
+
+def accepted_kw(fn: Callable[..., Any], **kw: Any) -> dict[str, Any]:
+    """The keyword arguments of ``kw`` that ``fn`` takes (all of them for **kwargs)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kw
+    return {k: v for k, v in kw.items() if k in params}
 
 
 # Voice seams, injectable for tests (nothing real is recorded or played there).
@@ -98,11 +132,15 @@ def default_transcribe(wav: bytes, cfg: Config) -> str:
 
 
 def default_voice_answer(conn: sqlite3.Connection, cfg: Config, question: str, history: list,
-                         speaker: Any, on_token: Callable[[str], None], session_id: str) -> Any:
+                         speaker: Any, on_token: Callable[[str], None], session_id: str, *,
+                         mode: str = "auto",
+                         on_phase: Callable[[str, dict], None] | None = None) -> Any:
+    """Voice: qwen first; planning questions and weak answers go to gemma (without
+    reasoning in "auto", with it in "think")."""
     from jarvis.voice import voice_answer
 
     return voice_answer(conn, cfg, question, history, None, speaker, on_token=on_token,
-                        session_id=session_id)
+                        session_id=session_id, mode=mode, on_phase=on_phase)
 
 
 def default_speaker(cfg: Config, on_level: Callable[[float], None],
@@ -131,6 +169,14 @@ def new_session_id() -> str:
     return f"window-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
 
 
+def thought_text(seconds: float | None, cut: bool = False) -> str:
+    """"thought for 12 s" (the reasoning's duration), "" when it didn't reason."""
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return ""
+    n = f"{seconds:.0f} s" if seconds >= 10 else f"{seconds:.1f} s"
+    return f"thought for {n}" + (", cut short" if cut else "")
+
+
 def chip_text(ref: str, label: str = "") -> str:
     """"#31" stays, "commit:02fb2d2" -> "02fb2d2", "milestone:Core demo" -> "Core demo"."""
     if ref.startswith("#"):
@@ -142,6 +188,13 @@ def chip_text(ref: str, label: str = "") -> str:
         return rest[:7]
     if kind == "card":
         return f"card {rest}"
+    if kind in ("fact", "check"):
+        # "fact:maybe_done:28" -> "maybe done #28", "check:rail_budget:5V" -> "rail budget 5V"
+        name, _, arg = rest.partition(":")
+        name = name.replace("_", " ")
+        if not arg:
+            return name
+        return f"{name} #{arg}" if arg.isdigit() else f"{name} {arg}"
     return rest
 
 
@@ -291,7 +344,11 @@ class VoiceNote(QWidget):
 
 
 class BotMessage(QWidget):
-    """Jarvis's reply: thinking state, streamed text, then the validated answer."""
+    """Jarvis's reply: thinking state, streamed text, then the validated answer.
+
+    ``phase`` takes the escalation events (``jarvis.escalate``): a discarded
+    first answer fades out and the indicator becomes "Thinking deeper — <why>"
+    with the orb in its "deep" state."""
 
     def __init__(self, tokens: Tokens, parent: QWidget | None = None):
         super().__init__(parent)
@@ -299,6 +356,11 @@ class BotMessage(QWidget):
         self.streamed = ""
         self.answer = None
         self.started = time.monotonic()
+        self.deep_reason: str | None = None   # set once the deep pass started
+        self.thought_s: float | None = None
+        self.thinking_cut = False
+        self.fallback = False
+        self._discarding = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 8, 0)
         lay.setSpacing(5)
@@ -346,10 +408,60 @@ class BotMessage(QWidget):
     def is_thinking(self) -> bool:
         return self.thinking.isVisible() if self.isVisible() else not self.thinking.isHidden()
 
+    @property
+    def deep(self) -> bool:
+        return self.deep_reason is not None
+
     def _tick(self) -> None:
         secs = int(time.monotonic() - self.started)
         extra = f"  ·  {secs} s" if secs >= THINKING_SHOW_SECONDS_AFTER else ""
-        self.thinking_text.setText("thinking…" + extra)
+        if self.deep:
+            why = DEEP_REASONS.get(self.deep_reason or "", "")
+            head = "Thinking deeper" + (f" — {why}" if why else "…")
+        else:
+            head = "thinking…"
+        self.thinking_text.setText(head + extra)
+
+    def phase(self, name: str, info: dict) -> None:
+        """An escalation event for this reply (see ``jarvis.escalate``)."""
+        if name == "discard_fast":
+            self._discard_streamed()
+        elif name == "deep":
+            self.deep_reason = str(info.get("reason") or "escalated")
+            self._show_thinking()
+        elif name == "answering":
+            self.thought_s = info.get("thinking_s")
+        elif name == "thinking_cut":
+            self.thought_s = info.get("thinking_s")
+            self.thinking_cut = True
+        elif name == "fallback":
+            self.fallback = True
+
+    def _show_thinking(self) -> None:
+        self.thinking.show()
+        self.thinking_orb.set_state("deep" if self.deep else "thinking")
+        if not self._timer.isActive():
+            self._timer.start()
+        self._tick()
+
+    def _discard_streamed(self) -> None:
+        """The first answer was weak: fade its text out, back to the indicator."""
+        self.streamed = ""
+        if self.body.isHidden():
+            self._show_thinking()
+            return
+        self._discarding = True
+
+        def gone() -> None:
+            if not self._discarding:      # the deep answer already started
+                return
+            self._discarding = False
+            self.body.setGraphicsEffect(None)
+            self.body.hide()
+            self.body.setText("")
+            self._show_thinking()
+
+        motion.fade_out(self.body, motion.BASE, on_done=gone)
 
     def _stop_thinking(self) -> None:
         self._timer.stop()
@@ -359,6 +471,9 @@ class BotMessage(QWidget):
     def add_token(self, text: str) -> None:
         if not text:
             return
+        if self._discarding:              # cut the fade short: new text is coming
+            self._discarding = False
+            self.body.setGraphicsEffect(None)
         if not self.thinking.isHidden():
             self._stop_thinking()
         self.body.show()
@@ -368,6 +483,9 @@ class BotMessage(QWidget):
 
     def finish(self, answer: Any) -> None:
         self._stop_thinking()
+        if self._discarding:
+            self._discarding = False
+            self.body.setGraphicsEffect(None)
         self.answer = answer
         self.body.show()
         error = getattr(answer, "error", None)
@@ -379,19 +497,38 @@ class BotMessage(QWidget):
             repolish(self.body)
         else:
             self.body.setTextFormat(Qt.TextFormat.RichText)
-            self.body.setText(markdown_html(text or "(no answer)"))
+            self.body.setText(markdown_html(text or NO_ANSWER))
         notes = [n for n in getattr(answer, "notes", None) or [] if n]
         if notes:
             self.notes.setText("\n".join(notes))
             self.notes.show()
-        self._set_sources(getattr(answer, "sources", None) or [])
+        if hasattr(answer, "cited_sources"):
+            # only what the answer itself cited (chat.Answer), at most a handful
+            self._set_sources(list(answer.cited_sources or []),
+                              int(getattr(answer, "cited_more_count", 0) or 0))
+        else:
+            self._set_sources(getattr(answer, "sources", None) or [])
+        self.meta.setText(" · ".join(self.meta_bits(answer)))
+
+    def meta_bits(self, answer: Any) -> list[str]:
+        """Model, tier, reasoning time and duration for the reply's meta line."""
         bits = []
         if getattr(answer, "model", None):
             bits.append(str(answer.model))
+        tier = getattr(answer, "tier", None)
+        if tier == "fallback" or self.fallback:
+            bits.append("fallback")
+        elif (tier == "deep" and getattr(answer, "escalated", False)) or self.deep:
+            bits.append("deep")
+        thought = getattr(answer, "thinking_s", None)
+        if thought is None:
+            thought = self.thought_s
+        if t := thought_text(thought, self.thinking_cut):
+            bits.append(t)
         dur = getattr(answer, "duration", None)
         if isinstance(dur, (int, float)) and dur > 0:
             bits.append(f"{dur:.0f} s" if dur >= 10 else f"{dur:.1f} s")
-        self.meta.setText(" · ".join(bits))
+        return bits
 
     def fail(self, message: str) -> None:
         self._stop_thinking()
@@ -401,9 +538,10 @@ class BotMessage(QWidget):
         repolish(self.body)
         self.body.show()
 
-    def _set_sources(self, sources: list) -> None:
+    def _set_sources(self, sources: list, more: int = 0) -> None:
         _clear(self.chips)
         self.chip_buttons = []
+        self.more_chip: QPushButton | None = None
         for s in sources:
             ref = getattr(s, "ref", str(s))
             label = getattr(s, "label", "") or ref
@@ -416,6 +554,13 @@ class BotMessage(QWidget):
                 b.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
             self.chips.addWidget(b)
             self.chip_buttons.append(b)
+        if more > 0 and sources:
+            m = QPushButton(f"+{more} more")
+            m.setObjectName("srcChip")
+            m.setProperty("more", "true")
+            m.setToolTip(f"The answer cited {more} more source{'s' if more != 1 else ''}.")
+            self.chips.addWidget(m)
+            self.more_chip = m
         self.chips_box.setVisible(bool(sources))
 
 
@@ -504,6 +649,7 @@ class _Silent:
 
 class _ChatBridge(QObject):
     token = Signal(int, str)
+    phase = Signal(int, str, object)        # escalation event name, info dict
     finished = Signal(int, object)
     failed = Signal(int, str)
 
@@ -528,13 +674,20 @@ def _emit(sig, *args) -> None:
         pass
 
 
+def _phase_kw(fn: Callable[..., Any], mode: str, rid: int, bridge: _ChatBridge) -> dict:
+    return accepted_kw(fn, mode=mode,
+                       on_phase=lambda name, info: _emit(bridge.phase, rid, str(name),
+                                                         dict(info or {})))
+
+
 def _run_ask(cfg: Config, ask_fn: AskFn, question: str, history: list, session_id: str,
-             rid: int, bridge: _ChatBridge) -> None:
+             rid: int, bridge: _ChatBridge, mode: str = "auto") -> None:
     conn = None
     try:
         conn = db.connect(cfg.db_path)
         answer = ask_fn(conn, cfg, question, history,
-                        lambda t: _emit(bridge.token, rid, t), session_id)
+                        lambda t: _emit(bridge.token, rid, t), session_id,
+                        **_phase_kw(ask_fn, mode, rid, bridge))
     except Exception as e:  # noqa: BLE001 - shown inline, never crashes the window
         _emit(bridge.failed, rid, f"Something went wrong: {type(e).__name__}: {e}")
     else:
@@ -573,12 +726,14 @@ def _run_transcribe(fn: TranscribeFn, wav: bytes, cfg: Config, vid: int,
 
 def _run_voice_answer(cfg: Config, fn: VoiceAnswerFn, question: str, history: list,
                       session_id: str, speaker: Any, rid: int, vid: int,
-                      chat_bridge: _ChatBridge, bridge: _VoiceBridge) -> None:
+                      chat_bridge: _ChatBridge, bridge: _VoiceBridge,
+                      mode: str = "auto") -> None:
     conn = None
     try:
         conn = db.connect(cfg.db_path)
         answer = fn(conn, cfg, question, history, speaker,
-                    lambda t: _emit(chat_bridge.token, rid, t), session_id)
+                    lambda t: _emit(chat_bridge.token, rid, t), session_id,
+                    **_phase_kw(fn, mode, rid, chat_bridge))
     except Exception as e:  # noqa: BLE001
         _emit(bridge.failed, vid, "answer", f"Something went wrong: {type(e).__name__}: {e}")
     else:
@@ -617,6 +772,7 @@ class ChatPanel(QFrame):
         self._thread: threading.Thread | None = None
         self._bridge = _ChatBridge(self)
         self._bridge.token.connect(self._on_token)
+        self._bridge.phase.connect(self._on_phase)
         self._bridge.finished.connect(self._on_finished)
         self._bridge.failed.connect(self._on_failed)
         self.setFixedWidth(PANEL_WIDTH)
@@ -629,6 +785,7 @@ class ChatPanel(QFrame):
         self.mic_ok = mic_available() if mic_ok is None else bool(mic_ok)
         self.settings = settings if settings is not None else vt.ui_settings()
         self.turn = vt.VoiceTurn()
+        self._deep = False                 # the current turn reached the deep tier
         self._vid = 0                      # current voice turn id
         self._speech_turn = 0              # turn whose speaker events count (0 = none)
         self._recorder: Any = None
@@ -666,15 +823,32 @@ class ChatPanel(QFrame):
         self.orb.setToolTip("Jarvis")
         hl.addWidget(self.orb)
         self._head_lay = hl
-        title = _label("Ask Jarvis", "chatTitle")
-        title.setFont(theme.display_font(17, 800, 82, caps=True, spacing_em=0.01))
-        hl.addWidget(title)
+        # title over the model name, so the title never gets squeezed
+        names = QVBoxLayout()
+        names.setContentsMargins(0, 6, 0, 6)
+        names.setSpacing(0)
+        self.title = _label("Ask Jarvis", "chatTitle")
+        self.title.setFont(theme.display_font(17, 800, 82, caps=True, spacing_em=0.01))
+        self.title.setMinimumWidth(self.title.sizeHint().width())
+        names.addWidget(self.title)
         self.sub = _label(model_name or cfg.model, "chatSub")
         self.sub.setFont(theme.mono_font(10, caps=False, spacing_em=0.04))
         self.sub.setToolTip("Answers are written by the local model from the synced repo data "
                             "only; numbers and references are checked afterwards.")
-        hl.addWidget(self.sub)
+        names.addWidget(self.sub)
+        hl.addLayout(names)
         hl.addStretch(1)
+        self.think_btn = QPushButton("Think")
+        self.think_btn.setObjectName("thinkToggle")
+        self.think_btn.setCheckable(True)
+        self.think_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.think_btn.setToolTip(THINK_TOOLTIP)
+        self.think_btn.setChecked(vt.read_bool(self.settings, THINK_KEY))
+        self.think_btn.toggled.connect(self.set_think_mode)
+        hl.addWidget(self.think_btn)
+        self._think_shortcut = QShortcut(QKeySequence("Ctrl+T"), self)
+        self._think_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._think_shortcut.activated.connect(self.think_btn.toggle)
         self.menu_btn = QPushButton("⋯")
         self.menu_btn.setObjectName("ghost")
         self.menu_btn.setToolTip("Voice options")
@@ -686,7 +860,7 @@ class ChatPanel(QFrame):
         self.auto_listen_action.toggled.connect(self.set_auto_listen)
         self.menu_btn.setMenu(self.menu)
         hl.addWidget(self.menu_btn)
-        self.new_btn = QPushButton("New chat")
+        self.new_btn = QPushButton("New")
         self.new_btn.setObjectName("ghost")
         self.new_btn.setToolTip("Start a new conversation")
         self.new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -819,6 +993,25 @@ class ChatPanel(QFrame):
     def busy(self) -> bool:
         return self._busy
 
+    @property
+    def think_mode(self) -> bool:
+        return self.think_btn.isChecked()
+
+    @property
+    def mode(self) -> str:
+        """The escalation mode for the next question: "think" or "auto"."""
+        return "think" if self.think_mode else "auto"
+
+    def set_think_mode(self, on: bool) -> None:
+        """THINK toggle / Ctrl+T: answer with the reasoning model straight away.
+        Remembered across restarts; applies from the next question."""
+        on = bool(on)
+        if self.think_btn.isChecked() != on:
+            self.think_btn.setChecked(on)  # re-enters via toggled
+            return
+        self.settings.setValue(THINK_KEY, on)
+        self.settings.sync()
+
     def focus_input(self) -> None:
         self.composer.edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
@@ -849,10 +1042,11 @@ class ChatPanel(QFrame):
         self._stick = True
         self._rid += 1
         self._question = question
+        self._deep = False
         self._thread = threading.Thread(
             target=_run_ask, name="jarvis-chat", daemon=True,
             args=(self.cfg, self.ask_fn, question, list(self.history), self.session_id,
-                  self._rid, self._bridge))
+                  self._rid, self._bridge, self.mode))
         self._thread.start()
 
     def wait(self, timeout: float = 10.0) -> None:
@@ -884,6 +1078,15 @@ class ChatPanel(QFrame):
     def _on_token(self, rid: int, text: str) -> None:
         if rid == self._rid and self._current is not None:
             self._current.add_token(text)
+
+    def _on_phase(self, rid: int, name: str, info: Any) -> None:
+        if rid != self._rid or self._current is None:
+            return
+        self._current.phase(name, info if isinstance(info, dict) else {})
+        if name == "deep":
+            self._deep = True
+            if self.turn.state != vt.IDLE:
+                self._render_voice()
 
     def _done(self) -> None:
         self._busy = False
@@ -1022,9 +1225,10 @@ class ChatPanel(QFrame):
         """Orb, caption and controls for the current voice state."""
         state = self.turn.state
         if state != vt.IDLE and not self.turn.muted:
+            deep = self._deep and state == vt.THINKING
             self.orb.set_state({vt.LISTENING: "listening", vt.SPEAKING: "speaking"}
-                               .get(state, "thinking"))
-            self.caption.setText(vt.CAPTIONS.get(state, ""))
+                               .get(state, "deep" if deep else "thinking"))
+            self.caption.setText(vt.DEEP_CAPTION if deep else vt.CAPTIONS.get(state, ""))
             self.caption.show()
         else:
             self.caption.hide()
@@ -1164,6 +1368,7 @@ class ChatPanel(QFrame):
         self._stick = True
         self._rid += 1
         self._question = text
+        self._deep = False
         try:
             speaker = self._ensure_speaker()
         except Exception as e:  # noqa: BLE001 - no speech, the text answer still comes
@@ -1178,7 +1383,7 @@ class ChatPanel(QFrame):
             self._speech_turn = vid
         self._spawn(_run_voice_answer, "jarvis-voice-answer", self.cfg, self.voice_answer_fn,
                     text, list(self.history), self.session_id, self._turn_speaker, self._rid,
-                    vid, self._bridge, self._vbridge)
+                    vid, self._bridge, self._vbridge, self.mode)
 
     def _on_voice_answer(self, vid: int, answer: Any) -> None:
         if vid != self._vid or self.turn.state not in (vt.THINKING, vt.SPEAKING):

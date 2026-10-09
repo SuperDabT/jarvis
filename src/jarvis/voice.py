@@ -802,7 +802,8 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
                  budget_tokens: int | None = None,
                  stable_prefix: bool = VOICE_STABLE_PREFIX,
                  mode: str | None = None, deep_client: Any | None = None,
-                 on_phase: Callable[[str, dict], None] | None = None) -> Any:
+                 on_phase: Callable[[str, dict], None] | None = None,
+                 deep_think: bool | None = None) -> Any:
     """Answer ``question`` aloud: chat.ask(brevity="voice") with sentence-by-sentence speech.
 
     Streamed display text goes to ``on_token`` (as with typed chat; replace it
@@ -823,6 +824,9 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
     fast answer was already spoken, else "Let me think about that properly.". The
     fast answer's unspoken remainder is dropped. A template fallback answer is
     spoken as a whole. ``mode`` None = one plain pass on ``client`` (as before).
+    ``deep_think`` is whether the deep tier reasons (None = only in "think" mode:
+    voice auto escalates to gemma without reasoning, which answers in ~10 s where
+    its reasoning never finished inside the 20 s voice cap).
     """
     from jarvis import chat
 
@@ -831,7 +835,9 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
                                 on_token=on_token, now=now, session_id=session_id,
                                 on_sentence=on_sentence, budget_tokens=budget_tokens,
                                 stable_prefix=stable_prefix, mode=mode,
-                                deep_client=deep_client, on_phase=on_phase)
+                                deep_client=deep_client, on_phase=on_phase,
+                                deep_think=(mode == "think") if deep_think is None
+                                else bool(deep_think))
 
     splitter = SentenceSplitter()
     spoke = False
@@ -877,7 +883,8 @@ def _voice_escalated(conn: sqlite3.Connection, cfg: Config, question: str,
                      session_id: str | None, on_sentence: Callable[[str], None] | None,
                      budget_tokens: int | None, stable_prefix: bool, mode: str,
                      deep_client: Any | None,
-                     on_phase: Callable[[str, dict], None] | None) -> Any:
+                     on_phase: Callable[[str, dict], None] | None,
+                     deep_think: bool = True) -> Any:
     from jarvis import chat, escalate
 
     state = {"splitter": SentenceSplitter(), "spoke": False, "spoke_pass": False}
@@ -923,7 +930,8 @@ def _voice_escalated(conn: sqlite3.Connection, cfg: Config, question: str,
             deep_client=deep_client, on_token=token, on_phase=phase, brevity="voice",
             session_id=session_id, now=now,
             fast_budget=budget_tokens or VOICE_CONTEXT_TOKEN_BUDGET,
-            deep_budget=chat.CONTEXT_TOKEN_BUDGET, stable_prefix=stable_prefix)
+            deep_budget=chat.CONTEXT_TOKEN_BUDGET, stable_prefix=stable_prefix,
+            deep_think=deep_think)
     finally:
         if own:
             client.close()

@@ -65,6 +65,7 @@ def _answer(text="Core demo has 9 open issues.", **kw):
                                     Source("commit:02fb2d2abc", "commit 02fb2d2", None)],
                 unverified_numbers=[], notes=[], model="qwen3:14b", duration=3.0)
     base.update(kw)
+    base.setdefault("cited_sources", list(base["sources"]))  # what the answer cited
     return Answer(**base)
 
 
