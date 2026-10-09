@@ -108,7 +108,29 @@ CREATE TABLE IF NOT EXISTS electrical_findings (
     model TEXT,
     updated_at TEXT
 );
+
+-- Phase 5: the fast loop's heartbeat and change-detection state (one row, id = 1).
+-- pid/started_at/interval_s/next_tick_at belong to a running `jarvis watch` and are
+-- cleared when it exits; the hashes are shared by `jarvis watch --once`.
+CREATE TABLE IF NOT EXISTS daemon_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    pid INTEGER,
+    started_at TEXT,
+    last_tick_at TEXT,
+    last_change_at TEXT,
+    last_error TEXT,
+    interval_s INTEGER,
+    next_tick_at TEXT,
+    hardware_hash TEXT,
+    facts_hash TEXT,
+    model_pending INTEGER DEFAULT 0
+);
 """
+
+DAEMON_STATE_COLUMNS = (
+    "pid", "started_at", "last_tick_at", "last_change_at", "last_error", "interval_s",
+    "next_tick_at", "hardware_hash", "facts_hash", "model_pending",
+)
 
 ISSUE_COLUMNS = (
     "number", "title", "state", "labels", "milestone_number", "body",
@@ -233,3 +255,19 @@ def insert_briefing(
     )
     conn.commit()
     return cur.lastrowid
+
+
+def get_daemon_state(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM daemon_state WHERE id = 1").fetchone()
+
+
+def update_daemon_state(conn: sqlite3.Connection, **fields: Any) -> None:
+    """Set some columns of the single daemon_state row (created if missing)."""
+    bad = set(fields) - set(DAEMON_STATE_COLUMNS)
+    if bad:
+        raise ValueError(f"unknown daemon_state columns: {sorted(bad)}")
+    conn.execute("INSERT OR IGNORE INTO daemon_state (id) VALUES (1)")
+    if fields:
+        sets = ", ".join(f"{k} = :{k}" for k in fields)
+        conn.execute(f"UPDATE daemon_state SET {sets} WHERE id = 1", fields)
+    conn.commit()

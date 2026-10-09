@@ -8,11 +8,12 @@ import time
 from jarvis import cards as cardlib
 from jarvis.briefing import build_briefing, render_briefing
 from jarvis.checks import STATUS_ORDER
-from jarvis.electrical import active_counts, carded_findings
 from jarvis.config import Config
 from jarvis.db import connect
+from jarvis.electrical import active_counts, carded_findings
 from jarvis.facts import compute_facts
 from jarvis.github import GitHubClient
+from jarvis.lock import RefreshBusy, refresh_lock
 from jarvis.ollama import OllamaClient
 from jarvis.pipeline import load_checks, refresh, run_checks
 from jarvis.summary import render_summary
@@ -64,10 +65,32 @@ def _electrical_line(conn) -> str:
     return f"{n} electrical card{'s' if n != 1 else ''} active" + (f" ({detail})" if detail else "")
 
 
+BUSY = "A refresh is already running in the background (jarvis watch or the window)"
+
+
+def _show_stored_briefing(conn) -> None:
+    """Print the newest stored briefing without syncing or calling the model."""
+    from jarvis.briefing import _from_row
+    from jarvis.gui.data import latest_briefing_row
+
+    row = latest_briefing_row(conn)
+    if row is None:
+        print("No briefing stored yet.")
+        return
+    print(render_briefing(_from_row(row, len(compute_facts(conn)))), end="")
+    print("\n" + _electrical_line(conn))
+
+
 def _run_default(cfg: Config, conn) -> None:
     if not cfg.token:
         print("GITHUB_TOKEN not set; continuing unauthenticated", file=sys.stderr)
-    r = refresh(conn, cfg)
+    try:
+        with refresh_lock(cfg.db_path):
+            r = refresh(conn, cfg)
+    except RefreshBusy:
+        print(f"{BUSY}; showing the stored briefing.", file=sys.stderr)
+        _show_stored_briefing(conn)
+        return
     for name, outcome in r.sync.items():
         print(f"{name}: {outcome}", file=sys.stderr)
     for note in r.notes:
@@ -152,20 +175,37 @@ def main(argv: list[str] | None = None) -> int:
     gp.add_argument("id", type=int)
     dp = sub.add_parser("done", help="mark a card done (it never comes back)")
     dp.add_argument("id", type=int)
+    wp = sub.add_parser("watch", help="keep the database current (the fast loop daemon)")
+    wp.add_argument("--interval", type=int, default=None,
+                    help="seconds between GitHub checks (default $JARVIS_INTERVAL or 180; "
+                         "never below 60 or GitHub's X-Poll-Interval)")
+    wp.add_argument("--once", action="store_true", help="run one tick and exit")
+    wp.add_argument("--verbose", action="store_true", help="per-tick detail")
     args = parser.parse_args(argv)
 
     cfg = Config.from_env()
+    if args.cmd == "watch":
+        from jarvis.daemon import run_watch
+
+        return run_watch(cfg, interval=args.interval, once=args.once, verbose=args.verbose)
     conn = connect(cfg.db_path)
     try:
         if args.cmd == "summary":
             print(render_summary(conn, days=args.days, repo=cfg.repo), end="")
-        elif args.cmd == "sync":
-            _run_sync(cfg, conn)
-        elif args.cmd == "brief":
-            _run_brief(cfg, conn, force=args.force, no_model=args.no_model,
-                       show_facts=args.show_facts, verbose=args.verbose)
-        elif args.cmd == "checks":
-            return _run_checks(cfg, conn, no_model=args.no_model)
+        elif args.cmd in ("sync", "brief", "checks"):
+            # These write what a refresh writes (and may call the model): one at a time.
+            try:
+                with refresh_lock(cfg.db_path):
+                    if args.cmd == "sync":
+                        _run_sync(cfg, conn)
+                    elif args.cmd == "brief":
+                        _run_brief(cfg, conn, force=args.force, no_model=args.no_model,
+                                   show_facts=args.show_facts, verbose=args.verbose)
+                    else:
+                        return _run_checks(cfg, conn, no_model=args.no_model)
+            except RefreshBusy:
+                print(f"{BUSY}; try again in a moment.", file=sys.stderr)
+                return 75  # EX_TEMPFAIL
         elif args.cmd == "cards":
             _run_cards(conn, args.all)
         elif args.cmd in ("card", "done"):

@@ -159,3 +159,44 @@ def test_shortcuts_exist(setup):
     assert {"Ctrl+R", "Ctrl+Q", "Esc"} <= keys
     assert QApplication.instance().desktopFileName() == "jarvis"
     assert Qt.ScrollBarPolicy.ScrollBarAlwaysOff == win.scroll.horizontalScrollBarPolicy()
+
+
+def test_refresh_while_daemon_holds_lock_reports_busy(app, tmp_path):
+    from jarvis.gui.window import BUSY_TEXT
+    from jarvis.lock import refresh_lock
+
+    cfg = Config(repo=REPO, db_path=tmp_path / "jarvis.db")
+    conn = db.connect(cfg.db_path)
+    calls = []
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False,
+                     refresh_fn=lambda c, _cfg: calls.append(1))
+    with refresh_lock(cfg.db_path):  # e.g. `jarvis watch` mid-tick
+        win.refresh()
+        win.wait_for_refresh()
+    assert calls == []  # never ran a second refresh
+    assert win.status_label.text() == BUSY_TEXT
+    assert win.refresh_btn.isEnabled() and not win.refreshing
+    win.refresh()  # lock free again: runs
+    win.wait_for_refresh()
+    assert calls == [1]
+    win.close()
+    conn.close()
+
+
+def test_header_shows_watch_heartbeat(app, tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    cfg = Config(repo=REPO, db_path=tmp_path / "jarvis.db")
+    conn = db.connect(cfg.db_path)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False)
+    assert not win.watch_label.isVisibleTo(win)  # never watched: nothing shown
+    tick_at = (datetime.now(UTC) - timedelta(minutes=2)).isoformat(timespec="seconds")
+    db.update_daemon_state(conn, pid=1234, interval_s=180, last_tick_at=tick_at)
+    win.reload()
+    assert win.watch_label.text() == "watching · checked 2 min ago"
+    assert win.watch_label.isVisibleTo(win)
+    db.update_daemon_state(conn, pid=None)  # daemon stopped
+    win.reload()
+    assert win.watch_label.text() == "not watching"
+    win.close()
+    conn.close()

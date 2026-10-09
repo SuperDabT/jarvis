@@ -166,3 +166,34 @@ def test_describe_error():
 
     assert "Could not reach GitHub" in data.describe_error(httpx.ConnectError("boom"))
     assert data.describe_error(RuntimeError("x" * 300)).endswith("...")
+
+
+def _hb(**kw):
+    row = {"pid": 42, "interval_s": 180, "last_tick_at": "2026-10-08T15:58:00+00:00",
+           "last_change_at": None, "next_tick_at": None, "last_error": None}
+    row.update(kw)
+    return row
+
+
+def test_watch_status():
+    assert data.watch_status(None, NOW) is None
+    assert data.watch_status(_hb(last_tick_at=None), NOW) is None
+    w = data.watch_status(_hb(), NOW)
+    assert (w.watching, w.text) == (True, "watching · checked 2 min ago")
+    assert data.watch_status(_hb(last_tick_at="2026-10-08T15:59:40+00:00"), NOW).text \
+        == "watching · checked just now"
+    # stale: older than 2 x interval
+    stale = data.watch_status(_hb(last_tick_at="2026-10-08T15:53:00+00:00"), NOW)
+    assert (stale.watching, stale.text) == (False, "not watching")
+    # stopped daemon (pid cleared) or a --once run
+    assert data.watch_status(_hb(pid=None), NOW).text == "not watching"
+    err = data.watch_status(_hb(last_error="issues: GitHub 502"), NOW)
+    assert "Last error: issues: GitHub 502" in err.tooltip
+
+
+def test_window_data_includes_heartbeat():
+    conn = db.connect(":memory:")
+    assert data.load_window_data(conn, REPO, NOW).watch is None
+    db.update_daemon_state(conn, pid=7, interval_s=180,
+                           last_tick_at="2026-10-08T15:57:00+00:00")
+    assert data.load_window_data(conn, REPO, NOW).watch.text == "watching · checked 3 min ago"

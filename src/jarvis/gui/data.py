@@ -69,12 +69,22 @@ class CardGroup:
 
 
 @dataclass(frozen=True)
+class WatchView:
+    """The daemon heartbeat line in the header ("watching · checked 2 min ago")."""
+
+    watching: bool
+    text: str
+    tooltip: str = ""
+
+
+@dataclass(frozen=True)
 class WindowData:
     repo: str
     briefing: BriefingView | None
     groups: tuple[CardGroup, ...]
     last_sync: str | None  # ISO 8601 UTC of the newest sync_log row
     errors: tuple[str, ...] = field(default_factory=tuple)
+    watch: WatchView | None = None
 
     @property
     def card_count(self) -> int:
@@ -227,6 +237,45 @@ def last_sync(conn: sqlite3.Connection) -> str | None:
     return row[0] if row else None
 
 
+def ago(delta: timedelta) -> str:
+    s = max(0, int(delta.total_seconds()))
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return f"{s // 60} min ago"
+    if s < 86400:
+        return f"{s // 3600} h ago"
+    return f"{s // 86400} d ago"
+
+
+def watch_status(row: sqlite3.Row | dict | None, now: datetime | None = None) -> WatchView | None:
+    """Heartbeat of ``jarvis watch`` from the daemon_state row.
+
+    Watching = a daemon is registered (pid set) and its last tick is newer than
+    twice its interval. None when no daemon ever ticked (nothing is shown).
+    """
+    if row is None or not row["last_tick_at"]:
+        return None
+    now = now or datetime.now(UTC)
+    try:
+        age = now - _parse(row["last_tick_at"])
+    except ValueError:
+        return None
+    interval = row["interval_s"] or 0
+    fresh = row["pid"] is not None and interval > 0 and age.total_seconds() < 2 * interval
+    tips = [f"Last background check: {local_stamp(row['last_tick_at'], now)}"]
+    if row["last_change_at"]:
+        tips.append(f"Last change found: {local_stamp(row['last_change_at'], now)}")
+    if fresh and row["next_tick_at"]:
+        tips.append(f"Next check: {local_stamp(row['next_tick_at'], now)}")
+    if row["last_error"]:
+        tips.append(f"Last error: {row['last_error']}")
+    if fresh:
+        return WatchView(True, f"watching · checked {ago(age)}", "\n".join(tips))
+    tips.insert(0, "jarvis watch is not running")
+    return WatchView(False, "not watching", "\n".join(tips))
+
+
 def load_window_data(conn: sqlite3.Connection, repo: str,
                      now: datetime | None = None) -> WindowData:
     errors: list[str] = []
@@ -244,7 +293,13 @@ def load_window_data(conn: sqlite3.Connection, repo: str,
         synced = last_sync(conn)
     except sqlite3.Error:
         synced = None
-    return WindowData(repo, briefing, groups, synced, tuple(errors))
+    try:
+        from jarvis.db import get_daemon_state
+
+        watch = watch_status(get_daemon_state(conn), now)
+    except sqlite3.Error:
+        watch = None
+    return WindowData(repo, briefing, groups, synced, tuple(errors), watch)
 
 
 # ---------------------------------------------------------------- refresh outcome

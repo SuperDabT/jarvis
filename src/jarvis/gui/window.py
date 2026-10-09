@@ -10,8 +10,15 @@ from typing import Any
 from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
 )
 
 from jarvis import cards as cards_mod
@@ -19,9 +26,22 @@ from jarvis import db
 from jarvis.config import Config
 from jarvis.gui import theme
 from jarvis.gui.data import (
-    CardGroup, WindowData, describe_error, load_window_data, local_stamp, refresh_message,
+    CardGroup,
+    WindowData,
+    describe_error,
+    load_window_data,
+    local_stamp,
+    refresh_message,
 )
-from jarvis.gui.widgets import TEMPLATE_TIP, BriefingView, CardWidget, _clear, _label, repolish
+from jarvis.gui.widgets import (
+    TEMPLATE_TIP,
+    BriefingView,
+    CardWidget,
+    _clear,
+    _label,
+    repolish,
+)
+from jarvis.lock import RefreshBusy, refresh_lock
 
 DEFAULT_SIZE = (720, 860)
 CONTENT_MAX_WIDTH = 760
@@ -30,6 +50,7 @@ DEBOUNCE_MS = 400
 STATUS_CLEAR_MS = 8_000
 IDLE_HINT = "Ctrl+R refresh  ·  Esc close"
 EMPTY_CARDS = "No open suggestions."
+BUSY_TEXT = "A refresh is already running in the background"
 
 RefreshFn = Callable[[sqlite3.Connection, Config], Any]
 
@@ -45,14 +66,22 @@ class _Bridge(QObject):
 
     succeeded = Signal(object)
     failed = Signal(str)
+    busy = Signal()
 
 
 def _run_refresh(cfg: Config, fn: RefreshFn, bridge: _Bridge) -> None:
-    """Worker body. Uses its own SQLite connection: connections are per-thread."""
+    """Worker body. Uses its own SQLite connection: connections are per-thread.
+
+    Holds the refresh lock (``<db>.lock``) so it never overlaps ``jarvis watch``;
+    if the daemon is mid-tick, it reports busy and the DB watcher shows its result.
+    """
     conn = None
     try:
-        conn = db.connect(cfg.db_path)
-        result = fn(conn, cfg)
+        with refresh_lock(cfg.db_path):
+            conn = db.connect(cfg.db_path)
+            result = fn(conn, cfg)
+    except RefreshBusy:
+        bridge.busy.emit()
     except Exception as e:  # noqa: BLE001 - any failure goes to the status line
         bridge.failed.emit(describe_error(e))
     else:
@@ -87,6 +116,7 @@ class MainWindow(QMainWindow):
         self._bridge = _Bridge(self)
         self._bridge.succeeded.connect(self._on_refresh_ok)
         self._bridge.failed.connect(self._on_refresh_failed)
+        self._bridge.busy.connect(self._on_refresh_busy)
 
         self.setWindowTitle(f"Jarvis · {self.cfg.repo.split('/')[-1]}")
         self.resize(*DEFAULT_SIZE)
@@ -158,6 +188,9 @@ class MainWindow(QMainWindow):
         titles.addLayout(name_row)
         self.meta_label = _label("", "meta")
         titles.addWidget(self.meta_label)
+        self.watch_label = _label("", "meta")
+        self.watch_label.setVisible(False)
+        titles.addWidget(self.watch_label)
         header.addLayout(titles, 1)
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setObjectName("refresh")
@@ -244,6 +277,10 @@ class MainWindow(QMainWindow):
                 tips.append(TEMPLATE_TIP)
         self.meta_label.setText("  ·  ".join(parts) if parts else "not synced yet")
         self.meta_label.setToolTip("\n".join(tips))
+        watch = d.watch if d else None
+        self.watch_label.setText(watch.text if watch else "")
+        self.watch_label.setToolTip(watch.tooltip if watch else "")
+        self.watch_label.setVisible(bool(watch and watch.text))
 
     def _render_cards(self, groups: tuple[CardGroup, ...]) -> None:
         _clear(self.cards_box)
@@ -365,6 +402,11 @@ class MainWindow(QMainWindow):
         self.reload()
         level, text = refresh_message(result)
         self.set_status(text, level, sticky=level == "warn")
+
+    def _on_refresh_busy(self) -> None:
+        self._end_refresh()
+        self.reload()
+        self.set_status(BUSY_TEXT, "idle")
 
     def _on_refresh_failed(self, message: str) -> None:
         self._end_refresh()

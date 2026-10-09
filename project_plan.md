@@ -100,11 +100,11 @@ The backend (loops, GitHub, Ollama, database) lives in its own package and runs 
 
 Each phase ends with something you can run and check, so a broken phase is caught before the next one builds on it.
 
-1. **Project state reader.** Pull issues, milestones and commits from the pan-tilt repo into SQLite and print a plain summary of what is open, what is done and what changed recently. No AI yet.
-2. **Briefing.** Python computes the facts with evidence, Gemma phrases them, uncited sentences are dropped, and the result is cached in SQLite. `jarvis` prints it in the terminal.
-3. **The window.** The briefing at the top, then the cards (empty until phase 4), with a copy-prompt button, a done button and a "not useful" button with a reason. Done writes the fingerprint to the database.
-4. **Electrical cards.** Add `hardware.yaml` to the repo listing each part with its voltage and current limits from the datasheets, and fetch it via the contents API. Python runs every check and produces deterministic findings with template text, no model yet. Then add Gemma only to link each finding to a related issue and polish the wording. Cards appear in the window below the briefing.
-5. **Fast loop.** Poll the repo events endpoint and `hardware.yaml` with ETags, re-run checks only when something changed, and auto-resolve electrical cards whose check now passes.
+1. **Project state reader (done).** Pull issues, milestones and commits from the pan-tilt repo into SQLite and print a plain summary of what is open, what is done and what changed recently. No AI yet.
+2. **Briefing (done).** Python computes the facts with evidence, Gemma phrases them, uncited sentences are dropped, and the result is cached in SQLite. `jarvis` prints it in the terminal.
+3. **The window (done).** The briefing at the top, then the cards (empty until phase 4), with a copy-prompt button, a done button and a "not useful" button with a reason. Done writes the fingerprint to the database.
+4. **Electrical cards (done).** Add `hardware.yaml` to the repo listing each part with its voltage and current limits from the datasheets, and fetch it via the contents API. Python runs every check and produces deterministic findings with template text, no model yet. Then add Gemma only to link each finding to a related issue and polish the wording. Cards appear in the window below the briefing.
+5. **Fast loop (done).** Poll the repo events endpoint and `hardware.yaml` with ETags, re-run checks only when something changed, and auto-resolve electrical cards whose check now passes.
 6. **Research loop.** Every few hours, fetch from the research sources, dedupe by arXiv id, have Ollama keep only what relates to open issues, and make research cards. Auto-resolve them when their issue closes.
 7. **Daily use.** Headless daemon as a systemd user service, `notify-send` notifications for new cards, and a Hyprland keybind to open the window. Add a tray icon only if your bar shows one.
 8. **Tune.** Use it for a week, then fix the cards that annoyed you: repeats, vague titles or wrong math. This phase decides whether you keep using it.
@@ -143,4 +143,4 @@ Rules:
 Phase 1 only: fetch issues, milestones, recent commits and hardware.yaml (if present) for the repo into SQLite, then print a plain summary of what is open, what is closed and what changed recently. No AI and no window yet. Include a README with setup steps and tests for the ETag handling.
 ```
 
-Phase 1 is done. Phase 2 is the briefing.
+Phases 1 to 5 are done. Next is phase 6, the research loop.
