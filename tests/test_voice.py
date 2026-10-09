@@ -110,7 +110,7 @@ def test_recorder_stops_after_silence_following_speech():
     rec = voice.Recorder(on_level=levels.append, proc_factory=reader_factory(proc))
     wav = rec.record()
     assert rec.reason == "silence"
-    assert proc.cmd == ["pw-record", "--format", "s16", "--rate", "16000", "--channels", "1", "-"]
+    assert proc.cmd == ["pw-record", "--raw", "--format", "s16", "--rate", "16000", "--channels", "1", "-"]
     assert proc.killed
     with wave.open(io.BytesIO(wav)) as w:
         secs = w.getnframes() / w.getframerate()
@@ -307,7 +307,7 @@ def test_speaker_plays_in_order_with_levels_and_states():
     assert sp.spoken == synthed
     assert len(players.made) == 1          # one pw-play for the whole stretch
     p = players.made[0]
-    assert p.cmd == ["pw-play", "--format", "s16", "--rate", "24000", "--channels", "1", "-"]
+    assert p.cmd == ["pw-play", "--raw", "--format", "s16", "--rate", "24000", "--channels", "1", "-"]
     assert p.data == b"".join(pcm_for(s) for s in synthed)
     assert p.stdin.closed and not p.killed
     assert states == ["speaking", "idle"]

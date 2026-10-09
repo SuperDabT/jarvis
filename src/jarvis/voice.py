@@ -193,7 +193,7 @@ class Recorder:
 
     @property
     def command(self) -> list[str]:
-        return ["pw-record", "--format", "s16", "--rate", str(self.rate),
+        return ["pw-record", "--raw", "--format", "s16", "--rate", str(self.rate),
                 "--channels", "1", "-"]
 
     def stop(self) -> None:
@@ -392,7 +392,7 @@ class Speaker:
 
     @property
     def command(self) -> list[str]:
-        return ["pw-play", "--format", "s16", "--rate", str(self.rate), "--channels", "1", "-"]
+        return ["pw-play", "--raw", "--format", "s16", "--rate", str(self.rate), "--channels", "1", "-"]
 
     @property
     def speaking(self) -> bool:
