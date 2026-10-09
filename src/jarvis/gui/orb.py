@@ -1,7 +1,11 @@
-"""The arc-reactor orb: Jarvis's presence in the chat panel.
+"""The orb: Jarvis's presence in the chat panel, drawn as the site's radar.
 
-A QPainter widget: a soft radial glow, an outer ring of rotating arc segments,
-a ring of "coil" segments, counter-rotating inner arcs and a bright core. It has
+A QPainter widget: a soft radial glow, an outer ring of rotating arc segments
+(the sweep), a ring of "coil" segments, counter-rotating inner arcs and a warm
+core. It is drawn in the ink of the two-colour pair (cream rings on green in
+dark mode, green rings on cream in light mode); while it is live (listening,
+speaking) the sweep arcs take on the signal colour, the site's colour for live
+data. An error is a brief signal flash. It has
 a ``state`` (idle / listening / thinking / speaking / error) and an input
 ``level`` (0..1, mic or speech loudness), smoothed with a fast attack and a
 slower decay.
@@ -39,7 +43,7 @@ from jarvis.gui.theme import Tokens
 STATES = ("idle", "listening", "thinking", "speaking", "error")
 ACTIVE_FPS = 60
 IDLE_FPS = 12
-ERROR_MS = 900  # the amber flash, then back to idle
+ERROR_MS = 900  # the signal flash, then back to idle
 COMPACT = 30  # px, in the chat header
 EXPANDED = 160  # px, voice mode
 ATTACK_S = 0.04  # level rises this fast (time constant)
@@ -53,9 +57,10 @@ class OrbParams:
     glow: float  # 0..1, halo strength
     core: float  # core radius as a fraction of the orb radius
     rings: tuple[float, float, float]  # radii (outer arcs, coils, inner arcs), fractions
-    warm: float  # 0..1, mix towards amber (error)
+    warm: float  # 0..1, mix towards the signal colour (error flash)
     fps: int  # frame rate this state needs
     trail: float = 0.35  # 0..1, how long the arcs' fading tails are (speed cue)
+    live: float = 0.0  # 0..1, mix of the signal colour into the sweep (listening, speaking)
 
 
 BASE_RINGS = (0.80, 0.62, 0.45)
@@ -63,7 +68,7 @@ BASE_CORE = 0.25
 
 
 def error_warmth(elapsed_ms: float) -> float:
-    """Amber amount of the error flash: up fast, then fading out by ``ERROR_MS``."""
+    """Signal amount of the error flash: up fast, then fading out by ``ERROR_MS``."""
     if elapsed_ms < 0 or elapsed_ms >= ERROR_MS:
         return 0.0
     x = elapsed_ms / ERROR_MS
@@ -79,7 +84,7 @@ def params_for(state: str, level: float = 0.0, t: float = 0.0,
         # the rings breathe outwards with the mic level
         return OrbParams(28.0, -18.0, 0.42 + 0.45 * lv, BASE_CORE + 0.05 * lv,
                          (o + 0.07 * lv, c + 0.05 * lv, i + 0.035 * lv), 0.0, ACTIVE_FPS,
-                         trail=0.5)
+                         trail=0.5, live=1.0)
     if state == "thinking":
         shimmer = 0.06 * math.sin(t * 5.0)
         return OrbParams(230.0, -320.0, 0.55 + shimmer, BASE_CORE + 0.015 * math.sin(t * 7.0),
@@ -87,7 +92,7 @@ def params_for(state: str, level: float = 0.0, t: float = 0.0,
     if state == "speaking":
         # the glow and core pulse with the voice
         return OrbParams(36.0, -24.0, 0.40 + 0.60 * lv, BASE_CORE + 0.09 * lv,
-                         (o + 0.02 * lv, c, i + 0.02 * lv), 0.0, ACTIVE_FPS)
+                         (o + 0.02 * lv, c, i + 0.02 * lv), 0.0, ACTIVE_FPS, live=1.0)
     if state == "error":
         w = error_warmth(error_elapsed_ms)
         return OrbParams(12.0, -8.0, 0.35 + 0.35 * w, BASE_CORE, BASE_RINGS, w, ACTIVE_FPS)
@@ -335,9 +340,12 @@ class Orb(QWidget):
         t = self.tokens
         prm = self.params()
         dark = t.name == "dark"
-        amber = QColor(t.amber)
-        ring = _mix(QColor(t.orb_ring), amber, prm.warm)
-        core = _mix(QColor(t.orb_core), amber, prm.warm)
+        signal = QColor(t.signal)
+        ring = _mix(QColor(t.orb_ring), signal, prm.warm)
+        core = _mix(QColor(t.orb_core), signal, prm.warm)
+        # live: the sweep arcs (and a little of the halo) turn to the signal colour
+        sweep = _mix(ring, signal, 0.9 * prm.live)
+        halo_c = _mix(ring, signal, 0.35 * prm.live)
         c = rect.center()
         R = min(rect.width(), rect.height()) / 2
         small = R < 22
@@ -347,9 +355,9 @@ class Orb(QWidget):
         halo = QRadialGradient(c, R)
         g = prm.glow
         halo.setColorAt(0.0, _alpha(core, (0.55 if dark else 0.30) * g))
-        halo.setColorAt(0.42, _alpha(ring, (0.30 if dark else 0.16) * g))
-        halo.setColorAt(0.75, _alpha(ring, (0.10 if dark else 0.05) * g))
-        halo.setColorAt(1.0, _alpha(ring, 0.0))
+        halo.setColorAt(0.42, _alpha(halo_c, (0.26 if dark else 0.14) * g))
+        halo.setColorAt(0.75, _alpha(halo_c, (0.09 if dark else 0.05) * g))
+        halo.setColorAt(1.0, _alpha(halo_c, 0.0))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(halo)
         p.drawEllipse(c, R, R)
@@ -406,7 +414,7 @@ class Orb(QWidget):
         segs = ((0, 100, 0.95), (180, 70, 0.8)) if small else \
             ((0, 96, 0.95), (128, 54, 0.75), (214, 26, 0.6), (262, 64, 0.85))
         for start, span, alpha in segs:
-            comet(r_out, a0 + start + span, span, ring, alpha, w_out, 1)
+            comet(r_out, a0 + start + span, span, sweep, alpha, w_out, 1)
 
         # 4. coil ring: ten segments, slowly turning with the outer ring
         if not small:
@@ -439,7 +447,7 @@ class Orb(QWidget):
         p.setBrush(bloom)
         p.drawEllipse(c, rc * 1.9, rc * 1.9)
         disc = QRadialGradient(c, rc)
-        hot = QColor("#ffffff")
+        hot = QColor("#fffaf0")  # warm cream-white, never pure white
         disc.setColorAt(0.0, hot)
         disc.setColorAt(0.35 if dark else 0.25, _mix(core, hot, 0.55 if dark else 0.35))
         disc.setColorAt(0.85, core)

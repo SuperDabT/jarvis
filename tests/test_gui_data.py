@@ -426,8 +426,8 @@ def test_table_rows_status_tags_and_order():
     rows = data.build_rows(data.load_card_groups(conn), data.finding_statuses(conn))
     assert [r.id for r in rows] == [ids[2], ids[0], ids[1]]  # fail, needs value, research
     assert [(r.status_label, r.status_color) for r in rows] == [
-        ("fail", "red"), ("needs value", "yellow"), ("new", "blue")]
-    assert rows[0].type_label == "⚡ Electrical" and rows[2].type_label == "📄 Research"
+        ("fail", "fail"), ("needs value", "needs"), ("new", "new")]
+    assert rows[0].type_label == "Electrical" and rows[2].type_label == "Research"
     later = datetime.now(UTC) + timedelta(days=3)
     rows = data.build_rows(data.load_card_groups(conn, now=later), {})
     assert {r.status_label for r in rows} == {"open"}

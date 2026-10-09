@@ -43,11 +43,11 @@ from PySide6.QtWidgets import (
 
 from jarvis import db
 from jarvis.config import Config
-from jarvis.gui import motion
+from jarvis.gui import motion, theme
 from jarvis.gui import voice_turn as vt
 from jarvis.gui.orb import COMPACT, Orb
 from jarvis.gui.theme import LIGHT, Tokens
-from jarvis.gui.widgets import _clear, _label, repolish
+from jarvis.gui.widgets import _clear, _label, repolish, set_font
 
 PANEL_WIDTH = 380
 SUGGESTED = (
@@ -305,8 +305,10 @@ class BotMessage(QWidget):
         head = QHBoxLayout()
         head.setSpacing(6)
         self.name = _label("✦ Jarvis", "botName")
+        self.name.setFont(theme.mono_font(11))
         head.addWidget(self.name)
         self.meta = _label("", "botMeta")
+        self.meta.setFont(theme.mono_font(10, caps=False, spacing_em=0.04))
         head.addWidget(self.meta)
         head.addStretch(1)
         lay.addLayout(head)
@@ -664,8 +666,11 @@ class ChatPanel(QFrame):
         self.orb.setToolTip("Jarvis")
         hl.addWidget(self.orb)
         self._head_lay = hl
-        hl.addWidget(_label("Ask Jarvis", "chatTitle"))
+        title = _label("Ask Jarvis", "chatTitle")
+        title.setFont(theme.display_font(17, 800, 82, caps=True, spacing_em=0.01))
+        hl.addWidget(title)
         self.sub = _label(model_name or cfg.model, "chatSub")
+        self.sub.setFont(theme.mono_font(10, caps=False, spacing_em=0.04))
         self.sub.setToolTip("Answers are written by the local model from the synced repo data "
                             "only; numbers and references are checked afterwards.")
         hl.addWidget(self.sub)
@@ -760,7 +765,8 @@ class ChatPanel(QFrame):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 18, 0, 0)
         lay.setSpacing(8)
-        lay.addWidget(_label("Ask about the project", "emptyTitle"))
+        lay.addWidget(set_font(_label("Ask about the project", "emptyTitle"),
+                               theme.display_font(24, 800, 82, caps=True, spacing_em=-0.01)))
         hint = _label("Answers come only from the synced issues, commits, milestones and "
                       "checks, with their sources.", "emptyHint", wrap=True)
         lay.addWidget(hint)

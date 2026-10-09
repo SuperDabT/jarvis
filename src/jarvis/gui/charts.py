@@ -4,6 +4,11 @@ Each chart takes one pure view model from ``gui/data.py`` (``set_data``) and the
 theme tokens (``set_tokens``). Marks are thin with rounded ends, hairlines are
 1px, labels use text tokens (never the series colour), and every mark has a
 hover tooltip. Charts size their own height from their data.
+
+Colour follows the site's two-colour system: marks are the ink (cream on green,
+green on cream) at stepped lightness, tracks and grids are faint tints of it,
+and the signal colour marks only live data (today, limit violations). Axis and
+legend labels are in the mono label voice; headline numbers in Archivo.
 """
 from __future__ import annotations
 
@@ -34,6 +39,7 @@ from jarvis.gui.data import (
 )
 from jarvis.gui import motion
 from jarvis.gui.motion import ease_out, phase, stagger
+from jarvis.gui import theme
 from jarvis.gui.theme import Tokens
 
 
@@ -41,6 +47,12 @@ def qc(hex_: str, alpha: float = 1.0) -> QColor:
     c = QColor(hex_)
     c.setAlphaF(max(0.0, min(1.0, alpha)))
     return c
+
+
+def on_color(fill: QColor | str, t: Tokens) -> str:
+    """Readable text on ``fill``: the page colour on light marks, the text on dark."""
+    c = QColor(fill)
+    return t.bg if c.lightnessF() > 0.5 else t.text if t.name == "dark" else t.on_accent
 
 
 def blend(a: str, b: str, t: float) -> QColor:
@@ -102,7 +114,14 @@ class Chart(QWidget):
         return 120
 
     # -- helpers
-    def font_px(self, px: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+    def font_px(self, px: int, weight: QFont.Weight = QFont.Weight.Normal,
+                voice: str = "ui") -> QFont:
+        """``voice``: "ui" (Plex Sans), "mono" (uppercase labels), "num" (Archivo)."""
+        if voice == "mono":
+            return theme.mono_font(px, caps=True, spacing_em=0.08)
+        if voice == "num":
+            return theme.display_font(px, 700 if weight <= QFont.Weight.DemiBold else 800, 86,
+                                      spacing_em=0)
         f = QFont(self.font())
         f.setPixelSize(px)
         f.setWeight(weight)
@@ -110,9 +129,9 @@ class Chart(QWidget):
 
     def text(self, p: QPainter, x: float, y: float, s: str, color: str | QColor, px: int = 12,
              align: str = "left", weight: QFont.Weight = QFont.Weight.Normal,
-             valign: str = "middle") -> float:
+             valign: str = "middle", voice: str = "ui") -> float:
         """Draw ``s`` with its vertical centre (or baseline) at ``y``; returns its width."""
-        f = self.font_px(px, weight)
+        f = self.font_px(px, weight, voice)
         fm = QFontMetricsF(f)
         w = fm.horizontalAdvance(s)
         if align == "right":
@@ -125,8 +144,9 @@ class Chart(QWidget):
         p.drawText(QPointF(x, base), s)
         return w
 
-    def text_width(self, s: str, px: int = 12, weight: QFont.Weight = QFont.Weight.Normal) -> float:
-        return QFontMetricsF(self.font_px(px, weight)).horizontalAdvance(s)
+    def text_width(self, s: str, px: int = 12, weight: QFont.Weight = QFont.Weight.Normal,
+                   voice: str = "ui") -> float:
+        return QFontMetricsF(self.font_px(px, weight, voice)).horizontalAdvance(s)
 
     def elide(self, s: str, width: float, px: int = 12,
               weight: QFont.Weight = QFont.Weight.Normal) -> str:
@@ -174,12 +194,12 @@ class Chart(QWidget):
                align_right: bool = False) -> None:
         """Swatch + label pairs on one line, vertically centred on ``y``."""
         t = self.tokens
-        widths = [14 + self.text_width(label, 12) + 16 for label, _ in items]
+        widths = [14 + self.text_width(label, 10, voice="mono") + 18 for label, _ in items]
         if align_right:
-            x -= sum(widths) - 16
+            x -= sum(widths) - 18
         for (label, swatch), w in zip(items, widths, strict=True):
             swatch(p, QRectF(x, y - 4.5, 9, 9))
-            self.text(p, x + 14, y, label, t.muted, 12)
+            self.text(p, x + 14, y, label, t.muted, 10, voice="mono")
             x += w
 
     # -- events
@@ -265,14 +285,14 @@ class MilestoneTimelineChart(Chart):
 
         # week gridlines + tick labels (a label under the "Today" pill is skipped)
         today_x = self.x_of(tl.today)
-        pill_half = (self.text_width("Today", 11, QFont.Weight.DemiBold) + 10) / 2
+        pill_half = (self.text_width("Today", 10, voice="mono") + 14) / 2
         for d in tl.ticks:
             x = round(self.x_of(d)) + 0.5
             p.setPen(QPen(qc(t.border), 1))
             p.drawLine(QPointF(x, top - 4), QPointF(x, bottom))
-            half = self.text_width(fmt_day(d), 11) / 2
+            half = self.text_width(fmt_day(d), 10, voice="mono") / 2
             if abs(x - today_x) > pill_half + half + 4:
-                self.text(p, x, top - 15, fmt_day(d), t.faint, 11, "center")
+                self.text(p, x, top - 15, fmt_day(d), t.faint, 10, "center", voice="mono")
 
         if not tl.bars:
             self.text(p, x0, top + self.ROW_H / 2, "No open milestones.", t.muted, 13)
@@ -332,7 +352,7 @@ class MilestoneTimelineChart(Chart):
                 p.setOpacity(1.0)
             label_x = (end_x + 12) if not faded else x1 + 12
             p.setOpacity(phase(pi, 0.6, 1.0))
-            self.text(p, label_x, cy, b.label, t.faint if faded else t.muted, 12)
+            self.text(p, label_x, cy, b.label, t.faint if faded else t.muted, 10, voice="mono")
             p.setOpacity(1.0)
             when = ("no due date" if b.due is None else
                     f"due {fmt_day(b.due)} ({_days_phrase((b.due - tl.today).days)})")
@@ -355,14 +375,14 @@ class MilestoneTimelineChart(Chart):
         p.setOpacity(0.35 + 0.65 * phase(prog, 0.0, 0.25))
         p.setPen(self.dashed(t.red, 1.2, (4, 3)))
         p.drawLine(QPointF(tx, top - 6), QPointF(tx, bottom + 2))
-        tw = self.text_width("Today", 11, QFont.Weight.DemiBold) + 10
+        tw = self.text_width("Today", 10, voice="mono") + 14
         pill = QRectF(tx - tw / 2, top - 24, tw, 16)
         if glow > 0:
             g = 3 * glow
-            self.rounded(p, pill.adjusted(-g, -g, g, g), qc(t.red, 0.22 * glow), 4 + g)
-        self.rounded(p, pill, qc(t.red), 4)
-        self.text(p, tx, pill.center().y(), "Today", "#ffffff", 11, "center",
-                  QFont.Weight.DemiBold)
+            self.rounded(p, pill.adjusted(-g, -g, g, g), qc(t.red, 0.22 * glow), 8 + g)
+        self.rounded(p, pill, qc(t.red), 8)
+        self.text(p, tx, pill.center().y(), "Today", t.bg if t.name == "dark" else t.on_accent,
+                  10, "center", voice="mono")
         p.setOpacity(1.0)
 
         # legend
@@ -429,11 +449,11 @@ class ContributionGridChart(Chart):
         right_edge = self.LEFT + g.weeks * step - self.GAP
         for col, name in g.months:
             x = self.LEFT + col * step
-            if x + self.text_width(name, 11) > right_edge:
-                x = right_edge - self.text_width(name, 11)
-            self.text(p, x, self.TOP - 9, name, t.faint, 11)
+            if x + self.text_width(name, 10, voice="mono") > right_edge:
+                x = right_edge - self.text_width(name, 10, voice="mono")
+            self.text(p, x, self.TOP - 9, name, t.faint, 10, voice="mono")
         for row, name in ((0, "Mon"), (2, "Wed"), (4, "Fri")):
-            self.text(p, 0, self.TOP + row * step + c / 2, name, t.faint, 11)
+            self.text(p, 0, self.TOP + row * step + c / 2, name, t.faint, 10, voice="mono")
         prog = self._progress
         cols = max(1, g.weeks)
         for d in g.days:
@@ -449,8 +469,8 @@ class ContributionGridChart(Chart):
                     inner = QRectF(r.center().x() - c * k / 2, r.center().y() - c * k / 2,
                                    c * k, c * k)
                     self.rounded(p, inner, qc(t.grid[d.level], pc), 2.5)
-            if d.day == g.today:
-                p.setPen(QPen(qc(t.text, 0.85), 1.4))
+            if d.day == g.today:  # today is live: the signal ring
+                p.setPen(QPen(qc(t.signal, 0.95), 1.5))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 3, 3)
             if self.hover_key == d.day:
@@ -461,9 +481,9 @@ class ContributionGridChart(Chart):
         # legend: Less [] [] [] [] [] More, right-aligned under the grid
         right = self.LEFT + g.weeks * step - self.GAP
         y = self.TOP + 7 * step + self.LEGEND_H / 2 + 1
-        mw = self.text_width("More", 11)
+        mw = self.text_width("More", 10, voice="mono")
         x = right - mw
-        self.text(p, x, y, "More", t.faint, 11)
+        self.text(p, x, y, "More", t.faint, 10, voice="mono")
         x -= 6
         sw = 10
         for lvl in range(4, -1, -1):
@@ -473,14 +493,14 @@ class ContributionGridChart(Chart):
                                  ("No commits", "1 commit", "2–3 commits", "4–5 commits",
                                   "6 or more commits")[lvl] + " per day", ("legend", lvl)))
             x -= 3
-        self.text(p, x - 3, y, "Less", t.faint, 11, "right")
+        self.text(p, x - 3, y, "Less", t.faint, 10, "right", voice="mono")
 
 
 # ================================================================ issues by phase
 
 
 class PhaseBarsChart(Chart):
-    """Horizontal stacked bars: open (accent) then closed (soft green) per phase."""
+    """Horizontal stacked bars: open (the ink) then closed (a soft tint of it) per phase."""
 
     ROW_H = 30
     LABEL_W = 84
@@ -498,7 +518,7 @@ class PhaseBarsChart(Chart):
         scale = (x1 - x0) / max(1, pb.max_total)
         if not pb.bars:
             self.text(p, 0, self.ROW_H / 2, "No issues synced yet.", t.muted, 13)
-        open_c, closed_c = qc(t.series[0]), blend(t.green, t.bg, 0.55)
+        open_c, closed_c = qc(t.series[0]), qc(t.tint(0.36))
         nb = len(pb.bars)
         for i, b in enumerate(pb.bars):
             cy = i * self.ROW_H + self.ROW_H / 2
@@ -507,7 +527,7 @@ class PhaseBarsChart(Chart):
             if self.hover_key == b.label:
                 self.rounded(p, QRectF(0, cy - self.ROW_H / 2 + 2, self.width(), self.ROW_H - 4),
                              qc(t.fill), 4)
-            self.text(p, 0, cy, b.label, t.text, 13)
+            self.text(p, 0, cy, b.label, t.text, 11, voice="mono")
             x = x0
             w_open, w_closed = b.open * scale * grow, b.closed * scale * grow
             gap = 2 if w_open and w_closed else 0
@@ -522,8 +542,8 @@ class PhaseBarsChart(Chart):
                 self.rounded(p, QRectF(x0, cy - 1, 4, 2), qc(t.fill2), 1)
             vx = x + 8
             p.setOpacity(phase(pi, 0.45, 1.0))
-            w = self.text(p, vx, cy, f"{b.open}", t.text, 13, weight=QFont.Weight.DemiBold)
-            self.text(p, vx + w + 4, cy, "open" + (f" · {b.closed} closed" if b.closed else ""),
+            w = self.text(p, vx, cy, f"{b.open}", t.text, 16, voice="num")
+            self.text(p, vx + w + 5, cy, "open" + (f" · {b.closed} closed" if b.closed else ""),
                       t.faint, 12)
             p.setOpacity(1.0)
             nums = ", ".join(f"#{n}" for n in b.open_issues[:14])
@@ -586,7 +606,7 @@ class RailBudgetChart(Chart):
             p.setBrush(qc(t.fill, 0.6))
             p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
             self.text(p, box.right() - 8, y - 14, f"rating ?  ·  needs ≥ {fmt_num(b.need_80_a)} A "
-                      "for 80%", t.muted, 11, "right", QFont.Weight.Medium)
+                      "for 80%", t.muted, 10, "right", voice="mono")
             self.hits.append(Hit(box, f"The {b.rail} supply's current rating isn't in "
                                  f"hardware.yaml.\nTo keep the worst case at or under 80% it needs "
                                  f"at least {fmt_num(b.need_80_a)} A.", "rating"))
@@ -614,8 +634,8 @@ class RailBudgetChart(Chart):
             self.hits.append(Hit(r, tip, s.part))
             if w > 60 and grow > 0.9:
                 p.setOpacity(phase(prog, 0.65, 0.95))
-                self.text(p, r.left() + 7, r.center().y(), fmt_num(s.amps) + " A", "#ffffff", 11,
-                          weight=QFont.Weight.DemiBold)
+                self.text(p, r.left() + 7, r.center().y(), fmt_num(s.amps) + " A",
+                          on_color(col, t), 13, voice="num")
                 p.setOpacity(1.0)
             x += w
 
@@ -625,16 +645,15 @@ class RailBudgetChart(Chart):
                 mx = round(self.x_of(amps)) + 0.5
                 p.setPen(QPen(qc(t.text), 1.6) if solid else self.dashed(t.muted, 1.2))
                 p.drawLine(QPointF(mx, y - 6), QPointF(mx, y + self.BAR_H + 6))
-                self.text(p, mx, y - 14, label, t.text if solid else t.muted, 11, "center",
-                          QFont.Weight.Medium if solid else QFont.Weight.Normal)
+                self.text(p, mx, y - 14, label, t.text if solid else t.muted, 10, "center",
+                          voice="mono")
         total = b.worst_case_a
         p.setOpacity(phase(prog, 0.7, 1.0))
         if total:
             tx = self.x_of(total + b.planned_a) + 8
             label = f"{fmt_num(total)} A"
-            if tx + self.text_width(label, 13, QFont.Weight.DemiBold) < self.width() - self.RIGHT:
-                self.text(p, tx, y + self.BAR_H / 2, label, t.text, 13,
-                          weight=QFont.Weight.DemiBold)
+            if tx + self.text_width(label, 18, voice="num") < self.width() - self.RIGHT:
+                self.text(p, tx, y + self.BAR_H / 2, label, t.text, 18, voice="num")
 
         p.setOpacity(1.0)
         # axis
@@ -642,8 +661,8 @@ class RailBudgetChart(Chart):
         step = _nice_step(b.scale_max, 6)
         v = 0.0
         while v <= b.scale_max + 1e-9:
-            self.text(p, self.x_of(v), ay, f"{fmt_num(v)} A", t.faint, 11,
-                      "left" if v == 0 else "center")
+            self.text(p, self.x_of(v), ay, f"{fmt_num(v)} A", t.faint, 10,
+                      "left" if v == 0 else "center", voice="mono")
             v += step
         # legend
         ly = y + self.BAR_H + self.AXIS_H + self.LEGEND_H / 2
@@ -713,17 +732,17 @@ class VoltageWindowChart(Chart):
             x = round(self.x_of(v)) + 0.5
             p.setPen(QPen(qc(t.border), 1))
             p.drawLine(QPointF(x, top - 2), QPointF(x, bottom))
-            self.text(p, x, bottom + 12, f"{fmt_num(v)} V", t.faint, 11, "center")
+            self.text(p, x, bottom + 12, f"{fmt_num(v)} V", t.faint, 10, "center", voice="mono")
         prog = self._progress
         # supply band (fades in first)
         p.setOpacity(ease_out(phase(prog, 0.0, 0.4)))
         bl, bh = self.x_of(w.band_lo), self.x_of(w.band_hi)
         band = QRectF(bl, top - 4, bh - bl, bottom - top + 6)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(qc(t.amber, 0.16 if t.name == "light" else 0.18))
+        p.setBrush(qc(t.ink, 0.07 if t.name == "light" else 0.08))
         p.drawRect(band)
         if w.example:
-            p.setPen(self.dashed(qc(t.amber, 0.9), 1.0, (3, 3)))
+            p.setPen(self.dashed(qc(t.ink, 0.45), 1.0, (3, 3)))
             p.drawLine(QPointF(bl + 0.5, top - 4), QPointF(bl + 0.5, bottom + 2))
             p.drawLine(QPointF(bh - 0.5, top - 4), QPointF(bh - 0.5, bottom + 2))
         nx = round(self.x_of(w.nominal_v)) + 0.5
@@ -731,7 +750,7 @@ class VoltageWindowChart(Chart):
         p.drawLine(QPointF(nx, top - 6), QPointF(nx, bottom + 2))
         tol = fmt_num(w.tolerance_pct) if w.tolerance_pct is not None else "5"
         label = (f"{fmt_num(w.nominal_v)} V ± {tol}%" + (" (example)" if w.example else ""))
-        self.text(p, nx, top - 14, label, t.muted, 11, "center", QFont.Weight.Medium)
+        self.text(p, nx, top - 14, label, t.muted, 10, "center", voice="mono")
         self.hits.append(Hit(band, (
             f"Supply band {fmt_num(w.band_lo)}–{fmt_num(w.band_hi)} V "
             + (f"(an example ±{tol}%: the {w.rail} tolerance isn't in hardware.yaml)"
@@ -750,7 +769,7 @@ class VoltageWindowChart(Chart):
             xr = QRectF(self.x_of(lo), cy - self.BAR_H / 2,
                         max(0.5, (self.x_of(hi) - self.x_of(lo)) * grow), self.BAR_H)
             col = QColor(self.colors.get(r.part) or t.series[i % len(t.series)])
-            fill = blend(col.name(), t.bg, 0.45)
+            fill = blend(col.name(), t.bg, 0.15)
             if r.planned:
                 self.hatch(p, xr, col, blend(col.name(), t.bg, 0.78), 3)
             else:
@@ -772,12 +791,12 @@ class VoltageWindowChart(Chart):
                 lx = xr.left()
                 if r.low_gap is not None and r.low_gap > 0:
                     lx = self.x_of(w.band_lo)
-                self.text(p, lx - 6, cy, fmt_num(r.v_min), t.muted, 11, "right")
+                self.text(p, lx - 6, cy, fmt_num(r.v_min), t.muted, 10, "right", voice="mono")
             if r.v_max is not None:
                 rx = full_right
                 if r.high_gap is not None and r.high_gap > 0:
                     rx = self.x_of(w.band_hi)
-                self.text(p, rx + 6, cy, fmt_num(r.v_max), t.muted, 11)
+                self.text(p, rx + 6, cy, fmt_num(r.v_max), t.muted, 10, voice="mono")
             p.setOpacity(1.0)
             if self.hover_key == r.part:
                 p.setPen(QPen(qc(t.text, 0.6), 1.2))

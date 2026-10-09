@@ -979,15 +979,15 @@ def load_power(conn: sqlite3.Connection, hardware_path: str | Path | None
 
 # ---------------------------------------------------------------- suggestions table
 
-STATUS_TAGS = {  # finding status -> (tag text, Notion tag color)
-    "fail": ("fail", "red"),
-    "warn": ("warning", "orange"),
-    "unknown": ("needs value", "yellow"),
-    "pass": ("passing", "green"),
+STATUS_TAGS = {  # finding status -> (tag text, tag role; see theme.TAG_NAMES)
+    "fail": ("fail", "fail"),
+    "warn": ("warning", "warning"),
+    "unknown": ("needs value", "needs"),
+    "pass": ("passing", "ok"),
 }
 TYPE_TAGS = {
-    "electrical": ("⚡ Electrical", "yellow"),
-    "research": ("📄 Research", "purple"),
+    "electrical": ("Electrical", "electrical"),
+    "research": ("Research", "research"),
 }
 
 
@@ -1023,10 +1023,10 @@ def build_rows(groups: tuple[CardGroup, ...], status_by_check: dict[str, str]
             if st in STATUS_TAGS:
                 label, color = STATUS_TAGS[st]
             elif v.is_new:
-                label, color = "new", "blue"
+                label, color = "new", "new"
             else:
-                label, color = "open", "gray"
-            tl, tc = TYPE_TAGS.get(c.type, (c.type.capitalize(), "gray"))
+                label, color = "open", "open"
+            tl, tc = TYPE_TAGS.get(c.type, (c.type.capitalize(), "open"))
             rows.append((rank.get(st, 3), 0 if c.type == "electrical" else 1, c.created_at or "",
                          SuggestionRow(c, tl, tc, label, color, v.is_new)))
     rows.sort(key=lambda r: (r[0], r[1], _neg(r[2]), r[3].card.id))

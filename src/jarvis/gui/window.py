@@ -1,4 +1,4 @@
-"""The main window: a Notion-like project dashboard plus the "Ask Jarvis" chat.
+"""The main window: the project dashboard plus the "Ask Jarvis" chat.
 
 Layout, top to bottom in the page column: title and watch status, the briefing
 callout, four KPI tiles, the milestone timeline, the commit grid next to issues
@@ -65,11 +65,14 @@ from jarvis.gui.widgets import (
     KpiRow,
     PulseDot,
     SuggestionsTable,
+    TitleBlock,
     _clear,
     _label,
     repolish,
     refresh_icon,
     section_header,
+    set_font,
+    sub_header,
 )
 from jarvis.lock import RefreshBusy, refresh_lock
 
@@ -269,9 +272,13 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(16, 0, 12, 0)
         lay.setSpacing(4)
-        lay.addWidget(_label("Jarvis", "crumb"))
-        lay.addWidget(_label("  /  ", "crumb"))
-        self.crumb = _label(f"📡  {self.cfg.repo.split('/')[-1]}", "crumbStrong")
+        lay.setContentsMargins(22, 0, 12, 0)
+        logo = _label("Jarvis", "logo")
+        logo.setFont(theme.display_font(15, 800, 100, caps=True, spacing_em=0.14))
+        lay.addWidget(logo)
+        lay.addSpacing(18)
+        self.crumb = set_font(_label(self.cfg.repo.split("/")[-1], "crumbStrong"),
+                              theme.mono_font(11))
         lay.addWidget(self.crumb)
         lay.addStretch(1)
         self.refresh_btn = QPushButton(REFRESH_TEXT)
@@ -295,23 +302,30 @@ class MainWindow(QMainWindow):
     def _build_page(self) -> None:
         c = self.col
         repo_name = self.cfg.repo.split("/")[-1]
-        self.title_label = _label(f"📡 {repo_name}", "pageTitle")
+        self.title_block = TitleBlock("Jarvis", self.tokens)
+        tb = self.title_block.lay
+        self.title_label = _label(repo_name, "pageTitle")
+        self.title_label.setFont(theme.display_font(theme.TITLE_PX, 800, 82, caps=True,
+                                                    spacing_em=-0.02))
         self.title_label.setToolTip(self.cfg.repo)
-        c.addWidget(self.title_label)
-        c.addSpacing(6)
+        tb.addWidget(self.title_label)
+        tb.addSpacing(10)
 
         meta = QHBoxLayout()
         meta.setSpacing(8)
         self.watch_dot = PulseDot()
-        self.watch_label = _label("", "meta")
-        self.watch_sep = _label("·", "metaSep")
-        self.meta_label = _label("", "meta")
+        self.watch_label = set_font(_label("", "meta"), theme.mono_font(11))
+        self.watch_sep = set_font(_label("·", "metaSep"), theme.mono_font(11))
+        self.meta_label = set_font(_label("", "meta"), theme.mono_font(11))
         for w in (self.watch_dot, self.watch_label, self.watch_sep, self.meta_label):
             meta.addWidget(w)
         meta.addStretch(1)
-        c.addLayout(meta)
-        c.addSpacing(22)
+        tb.addLayout(meta)
+        c.addWidget(self.title_block)
+        c.addSpacing(SECTION_GAP)
 
+        c.addWidget(section_header("Briefing", "written from the synced repo data", 1))
+        c.addSpacing(16)
         self.briefing_view = BriefingCallout(self.tokens)
         c.addWidget(self.briefing_view)
         c.addSpacing(16)
@@ -320,7 +334,7 @@ class MainWindow(QMainWindow):
         c.addWidget(self.kpi_row)
         c.addSpacing(SECTION_GAP)
 
-        c.addWidget(section_header("🗓  Milestones", "open milestones on a shared date axis"))
+        c.addWidget(section_header("Milestones", "open milestones on a shared date axis", 2))
         c.addSpacing(12)
         self.timeline = MilestoneTimelineChart(self.tokens)
         c.addWidget(self.timeline)
@@ -328,7 +342,7 @@ class MainWindow(QMainWindow):
 
         self.two = Columns(narrow=820)
         left, right = self.two.column(52), self.two.column(48)
-        self.grid_head = section_header("Activity", "commits per day")
+        self.grid_head = section_header("Activity", "commits per day", 3)
         left.addWidget(self.grid_head)
         left.addSpacing(12)
         self.grid_chart = ContributionGridChart(self.tokens)
@@ -337,8 +351,9 @@ class MainWindow(QMainWindow):
         self.grid_caption = _label("", "caption", wrap=True)
         left.addWidget(self.grid_caption)
         left.addStretch(1)
-        right.addWidget(section_header("Open issues by phase"))
-        right.addSpacing(12)
+        right.addSpacing(4)
+        right.addWidget(sub_header("Open issues by phase"))
+        right.addSpacing(27)
         self.phase_chart = PhaseBarsChart(self.tokens)
         right.addWidget(self.phase_chart)
         right.addSpacing(6)
@@ -348,7 +363,7 @@ class MainWindow(QMainWindow):
         c.addWidget(self.two)
         c.addSpacing(SECTION_GAP)
 
-        c.addWidget(section_header("⚡  Power", "every number from hardware.yaml"))
+        c.addWidget(section_header("Power", "every number from hardware.yaml", 4))
         c.addSpacing(12)
         self.power_box = QVBoxLayout()
         self.power_box.setSpacing(0)
@@ -356,7 +371,7 @@ class MainWindow(QMainWindow):
         self.power_widgets: list[QWidget] = []
         c.addSpacing(SECTION_GAP)
 
-        self.suggestions_head = section_header("Suggestions")
+        self.suggestions_head = section_header("Suggestions", number=5)
         c.addWidget(self.suggestions_head)
         c.addSpacing(8)
         self.table = SuggestionsTable(self.tokens)
@@ -460,7 +475,8 @@ class MainWindow(QMainWindow):
         self.watch_label.setToolTip(watch.tooltip if watch else "")
         self.watch_dot.setToolTip(watch.tooltip if watch else "")
         watching = bool(watch and watch.watching)
-        self.watch_dot.set_color(self.tokens.green if watching else self.tokens.faint)
+        # live status: the one place the signal colour sits in the page head
+        self.watch_dot.set_color(self.tokens.signal if watching else self.tokens.faint)
         self.watch_dot.set_breathing(watching)
         for w in (self.watch_label, self.watch_dot, self.watch_sep):
             w.setVisible(bool(watch and watch.text))
@@ -495,7 +511,9 @@ class MainWindow(QMainWindow):
             colors = part_colors(self.tokens, r.budget, r.window)
             head = QHBoxLayout()
             head.setSpacing(10)
-            head.addWidget(_label(f"{r.rail} rail", "railHead"), 0, Qt.AlignmentFlag.AlignBaseline)
+            head.addWidget(set_font(_label(f"{r.rail} rail", "railHead"),
+                                    theme.display_font(18, 700, 88, caps=True, spacing_em=0)),
+                           0, Qt.AlignmentFlag.AlignBaseline)
             b = r.budget
             facts = [f"{fmt_num(r.nominal_v)} V nominal"]
             if b is not None:
@@ -506,14 +524,15 @@ class MainWindow(QMainWindow):
                              if r.window.tolerance_pct is not None else "tolerance unknown")
             if b and all(s.planned for s in b.segments):
                 facts.append("planned parts only")
-            head.addWidget(_label("  ·  ".join(facts), "railSub"), 0, Qt.AlignmentFlag.AlignBaseline)
+            head.addWidget(set_font(_label("  ·  ".join(facts), "railSub"), theme.mono_font(11)),
+                           0, Qt.AlignmentFlag.AlignBaseline)
             head.addStretch(1)
             self.power_box.addLayout(head)
             self.power_box.addSpacing(10)
             cols = Columns(narrow=820)
             if b is not None:
                 lay = cols.column()
-                lay.addWidget(_label("Worst-case current", "sectionHint"))
+                lay.addWidget(sub_header("Worst-case current"))
                 lay.addSpacing(6)
                 ch = RailBudgetChart(self.tokens, colors)
                 ch.set_data(b, animate=animate)
@@ -524,7 +543,7 @@ class MainWindow(QMainWindow):
                 self.budget_charts.append(ch)
             if r.window is not None:
                 lay = cols.column()
-                lay.addWidget(_label("Voltage window", "sectionHint"))
+                lay.addWidget(sub_header("Voltage window"))
                 lay.addSpacing(6)
                 vc = VoltageWindowChart(self.tokens, colors)
                 vc.set_data(r.window, animate=animate)
@@ -664,7 +683,7 @@ class MainWindow(QMainWindow):
             self._status_timer.start()
 
     def _retheme(self) -> None:
-        for w in (self.timeline, self.grid_chart, self.phase_chart):
+        for w in (self.timeline, self.grid_chart, self.phase_chart, self.title_block):
             w.set_tokens(self.tokens)
         self.peek.tokens = self.tokens
         self.peek.shadow.tokens = self.tokens

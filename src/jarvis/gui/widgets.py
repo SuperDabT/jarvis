@@ -1,5 +1,5 @@
-"""Building blocks of the dashboard page: briefing callout, KPI tiles, section
-headers, Notion-style tags and the suggestions table."""
+"""Building blocks of the dashboard page: briefing callout, KPI tiles, numbered
+section headers, tags, the title watermark and the suggestions table."""
 from __future__ import annotations
 
 import re
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from jarvis.gui.data import BriefingView as BriefingData
 from jarvis.gui.data import EvidenceLink, Kpi, SentenceView, SuggestionRow
 from jarvis.gui import motion
+from jarvis.gui import theme
 from jarvis.gui.theme import Tokens
 
 UNSURE_TIP = (
@@ -109,31 +110,124 @@ def repolish(w: QWidget) -> None:
     w.style().polish(w)
 
 
-def tag(text: str, color: str, tokens: Tokens, tip: str = "") -> QLabel:
-    """A Notion tag: small rounded label on one of the tag colours."""
-    bg, fg = tokens.tag(color)
+def tag(text: str, role: str, tokens: Tokens, tip: str = "") -> QLabel:
+    """A small pill in one of the tag roles (tints of the pair; signal for live)."""
+    bg, fg, border = tokens.tag(role)
     lb = _label(text, "tag")
-    lb.setStyleSheet(f"#tag {{ background: {bg}; color: {fg}; }}")
+    lb.setStyleSheet(f"#tag {{ background: {bg}; color: {fg}; border: {border}; "
+                     f"border-radius: 8px; padding: 1px 8px; }}")
     lb.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     if tip:
         lb.setToolTip(tip)
     return lb
 
 
-def section_header(title: str, hint: str = "") -> QWidget:
+def set_font(w: QWidget, font) -> QWidget:
+    w.setFont(font)
+    return w
+
+
+def section_header(title: str, hint: str = "", number: int | None = None) -> QWidget:
+    """The site's section index: "02  MILESTONES" in letter-spaced mono with a
+    short rule under it; an optional hint on the right."""
     w = QWidget()
-    lay = QHBoxLayout(w)
-    lay.setContentsMargins(2, 0, 2, 0)
+    col = QVBoxLayout(w)
+    col.setContentsMargins(0, 0, 2, 0)
+    col.setSpacing(9)
+    lay = QHBoxLayout()
+    lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(10)
-    head = _label(title.upper(), "sectionHead")
+    if number is not None:
+        num = set_font(_label(f"{number:02d}", "sectionNum"), theme.mono_font(11))
+        lay.addWidget(num, 0, Qt.AlignmentFlag.AlignBottom)
+        w.num = num
+    head = set_font(_label(title.upper(), "sectionHead"), theme.mono_font(11))
     lay.addWidget(head, 0, Qt.AlignmentFlag.AlignBottom)
     lay.addStretch(1)
     if hint:
         h = _label(hint, "sectionHint")
         lay.addWidget(h, 0, Qt.AlignmentFlag.AlignBottom)
         w.hint = h
+    col.addLayout(lay)
+    if number is not None:
+        rule = QFrame()
+        rule.setObjectName("sectionRule")
+        rule.setFixedSize(48, 2)
+        col.addWidget(rule)
     w.head = head
     return w
+
+
+def sub_header(title: str) -> QLabel:
+    """An unnumbered mono label (a block inside a section)."""
+    return set_font(_label(title.upper(), "subHead"), theme.mono_font(11))
+
+
+class TitleBlock(QWidget):
+    """The page head with the site's oversized, faint section word behind it."""
+
+    PX = 128
+
+    def __init__(self, word: str, tokens: Tokens, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.word = word.upper()
+        self.tokens = tokens
+        self.lay = QVBoxLayout(self)
+        self.font_ = theme.display_font(self.PX, 800, 82, spacing_em=-0.03)
+        from PySide6.QtGui import QFontMetricsF
+
+        self.cap = QFontMetricsF(self.font_).capHeight()
+        # the word sits on top; the title starts just under it, overlapping a little
+        self.lay.setContentsMargins(0, round(self.cap * 0.78), 0, 0)
+        self.lay.setSpacing(0)
+
+    def set_tokens(self, tokens: Tokens) -> None:
+        self.tokens = tokens
+        self.update()
+
+    def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setFont(self.font_)
+        c = QColor(self.tokens.ink)
+        c.setAlphaF(self.tokens.watermark)
+        p.setPen(c)
+        # caps from the top edge; a hair left to cancel the first capital's bearing
+        p.drawText(QPointF(-5, self.cap + 1), self.word)
+        p.end()
+
+
+class RadarGlyph(QWidget):
+    """A small static radar (rings and a sweep) in the ink: the callout's icon."""
+
+    def __init__(self, tokens: Tokens, size: int = 22, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.tokens = tokens
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QPointF(self.width() / 2, self.height() / 2)
+        r = self.width() / 2 - 1
+        ink = QColor(self.tokens.ink)
+        for k, a in ((1.0, 0.55), (0.62, 0.35)):
+            ink.setAlphaF(a)
+            p.setPen(QPen(ink, 1.1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(c, r * k, r * k)
+        sweep = QPainterPath()
+        sweep.moveTo(c)
+        sweep.arcTo(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), 60, 50)
+        sweep.closeSubpath()
+        ink.setAlphaF(0.28)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawPath(sweep)
+        ink.setAlphaF(0.95)
+        p.setBrush(ink)
+        p.drawEllipse(c, 1.8, 1.8)
+        p.end()
 
 
 def hairline() -> QFrame:
@@ -151,11 +245,12 @@ def sentence_html(s: SentenceView, tokens: Tokens) -> str:
     extra = ""
     if s.uncertain:
         extra += (f'&nbsp;&nbsp;<span style="background-color:{tokens.unsure_bg}; '
-                  f'color:{tokens.unsure}; font-size:11px; font-weight:600">'
+                  f'color:{tokens.unsure}; font-family:\'{theme.family("mono")}\'; '
+                  f'font-size:10px; letter-spacing:1px; text-transform:uppercase">'
                   f"&nbsp;unconfirmed&nbsp;</span>")
     if s.links:
-        extra += (f'&nbsp;&nbsp;<span style="font-size:12px">'
-                  f"{links_html(s.links, tokens.faint)}</span>")
+        extra += (f'&nbsp;&nbsp;<span style="font-family:\'{theme.family("mono")}\'; '
+                  f'font-size:11px">{links_html(s.links, tokens.faint)}</span>')
     return f'<p style="line-height:{LINE_HEIGHT}%; margin:0">{body}{extra}</p>'
 
 
@@ -182,7 +277,8 @@ class SentenceRow(QWidget):
 
 
 class BriefingCallout(QFrame):
-    """The briefing as a Notion callout: 💡, bold headline, sentences as bullets."""
+    """The briefing as a card: a radar glyph, the headline in Archivo, the
+    sentences in Newsreader as bullets."""
 
     def __init__(self, tokens: Tokens, parent: QWidget | None = None):
         super().__init__(parent)
@@ -191,12 +287,10 @@ class BriefingCallout(QFrame):
         self.data: BriefingData | None = None
         self.rows: list[SentenceRow] = []
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(18, 16, 22, 18)
-        outer.setSpacing(12)
-        icon = _label("💡", "calloutIcon")
-        icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-        icon.setFixedWidth(26)
-        outer.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        outer.setContentsMargins(22, 20, 26, 22)
+        outer.setSpacing(14)
+        self.icon = RadarGlyph(tokens)
+        outer.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignTop)
         self._lay = QVBoxLayout()
         self._lay.setContentsMargins(0, 2, 0, 0)
         self._lay.setSpacing(7)
@@ -206,16 +300,20 @@ class BriefingCallout(QFrame):
     def set_data(self, data: BriefingData | None, tokens: Tokens | None = None,
                  animate: bool = False) -> None:
         self.tokens = tokens or self.tokens
+        self.icon.tokens = self.tokens
+        self.icon.update()
         self.data = data
         _clear(self._lay)
         self.rows = []
         if data is None:
             self.headline = _label("No briefing yet", "headline", wrap=True)
+            self.headline.setFont(theme.display_font(24, 700, 88, spacing_em=0))
             self._lay.addWidget(self.headline)
             self._lay.addWidget(_label(
                 "Refresh to fetch the repo and write the first briefing.", "emptyText", wrap=True))
             return
         self.headline = _label(data.headline or "Project status", "headline", wrap=True)
+        self.headline.setFont(theme.display_font(24, 700, 88, spacing_em=0))
         self.headline.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._lay.addWidget(self.headline)
         self._lay.addSpacing(2)
@@ -242,10 +340,10 @@ class KpiTile(QFrame):
         self.setObjectName("kpi")
         self.kpi = kpi
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 13, 16, 14)
+        lay.setContentsMargins(20, 16, 18, 16)
         lay.setSpacing(2)
-        self.label = _label(kpi.label, "kpiLabel")
-        self.value = _label(kpi.value, "kpiValue")
+        self.label = set_font(_label(kpi.label, "kpiLabel"), theme.mono_font(11))
+        self.value = set_font(_label(kpi.value, "kpiValue"), theme.display_font(38, 800, 82))
         self.value.setProperty("tone", kpi.tone)
         self.sub = _label(kpi.sub, "kpiSub")
         self.sub.setProperty("unsure", "true" if "may be done" in kpi.sub else "false")
@@ -253,7 +351,7 @@ class KpiTile(QFrame):
             w.setMinimumWidth(0)
             w.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         lay.addWidget(self.label)
-        lay.addSpacing(2)
+        lay.addSpacing(6)
         lay.addWidget(self.value)
         lay.addWidget(self.sub)
         if kpi.tooltip:
@@ -364,7 +462,7 @@ class TableRow(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setProperty("selected", "false")
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 9, 6, 9)
+        lay.setContentsMargins(12, 11, 10, 11)
         lay.setSpacing(12)
 
         tcell = QWidget()
@@ -463,19 +561,30 @@ class TableRow(QFrame):
         selected = self.property("selected") == "true"
         amount = 1.0 if selected else self._tint
         if amount > 0.001 or self._glow > 0.001:
+            # hover / selected: the site's card hover, a faint ink wash and a
+            # thin ink ring; "new": a fading signal wash with a signal edge
             p = QPainter(self)
-            r = self.rect().adjusted(0, 0, 0, -1)  # keep the bottom hairline
-            if amount > 0.001:
-                c = QColor(self.tokens.fill)
-                c.setAlphaF(min(1.0, amount))
-                p.fillRect(r, c)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            r = QRectF(self.rect()).adjusted(1.5, 2.5, -1.5, -3.5)
+            a = min(1.0, amount)
+            if a > 0.001:
+                wash = QColor(self.tokens.ink)
+                wash.setAlphaF(0.045 * a)
+                ring = QColor(self.tokens.ink)
+                ring.setAlphaF(0.34 * a)
+                p.setPen(QPen(ring, 1.0))
+                p.setBrush(wash)
+                p.drawRoundedRect(r, 10, 10)
             if self._glow > 0.001:
-                c = QColor(self.tokens.accent)
-                c.setAlphaF(0.14 * self._glow)
-                p.fillRect(r, c)
-                bar = QColor(self.tokens.accent)
-                bar.setAlphaF(0.85 * self._glow)
-                p.fillRect(QRectF(0, 0, 2.5, r.height()), bar)
+                c = QColor(self.tokens.signal)
+                c.setAlphaF(0.13 * self._glow)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(c)
+                p.drawRoundedRect(r, 10, 10)
+                bar = QColor(self.tokens.signal)
+                bar.setAlphaF(0.9 * self._glow)
+                p.setBrush(bar)
+                p.drawRoundedRect(QRectF(r.left(), r.top() + 6, 2.5, r.height() - 12), 1.2, 1.2)
             p.end()
         super().paintEvent(e)
 
@@ -540,11 +649,11 @@ class SuggestionsTable(QWidget):
         head = QFrame()
         head.setObjectName("tableHead")
         hl = QHBoxLayout(head)
-        hl.setContentsMargins(6, 7, 6, 7)
+        hl.setContentsMargins(12, 9, 10, 9)
         hl.setSpacing(12)
-        for text, width in (("◉  Type", TYPE_W), ("Aa  Suggestion", None),
-                            ("◎  Status", STATUS_W), ("", ACTION_W - 6)):
-            lb = _label(text, "colHead")
+        for text, width in (("Type", TYPE_W), ("Suggestion", None),
+                            ("Status", STATUS_W), ("", ACTION_W - 6)):
+            lb = set_font(_label(text, "colHead"), theme.mono_font(11))
             if width:
                 lb.setFixedWidth(width)
                 hl.addWidget(lb)
@@ -576,7 +685,7 @@ class SuggestionsTable(QWidget):
         self.empty_label = None
         if not rows:
             self.empty_label = _label(self.EMPTY, "emptyText", wrap=True)
-            self.empty_label.setContentsMargins(6, 14, 6, 6)
+            self.empty_label.setContentsMargins(12, 14, 6, 6)
             self.body.addWidget(self.empty_label)
             return
         k = 0

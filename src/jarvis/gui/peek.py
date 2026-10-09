@@ -1,4 +1,4 @@
-"""The suggestion "peek": a Notion-style side drawer with the full card.
+"""The suggestion "peek": a side drawer with the full card.
 
 Shows title, properties (type, status, source, created), why, and the full
 prompt for Claude, with Copy / Done / Not useful actions. The window owns the
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from jarvis.cards import FEEDBACK_REASONS
 from jarvis.gui import motion
 from jarvis.gui.data import SuggestionRow, local_stamp
+from jarvis.gui import theme
 from jarvis.gui.theme import Tokens, mono_family
 from jarvis.gui.widgets import (
     COPY_LABEL,
@@ -34,6 +35,8 @@ from jarvis.gui.widgets import (
     hairline,
     paragraph,
     repolish,
+    set_font,
+    sub_header,
     tag,
 )
 
@@ -122,7 +125,7 @@ class PeekPanel(QFrame):
         self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.close_btn.clicked.connect(self.hide_panel)
         bar.addWidget(self.close_btn)
-        self.kind_label = _label("", "crumb")
+        self.kind_label = set_font(_label("", "crumb"), theme.mono_font(11))
         bar.addWidget(self.kind_label)
         bar.addStretch(1)
         self.source_btn = QPushButton("Open source ↗")
@@ -198,6 +201,7 @@ class PeekPanel(QFrame):
         self.source_btn.setToolTip(c.source_url or "")
 
         self.title = _label(c.title, "peekTitle", wrap=True)
+        self.title.setFont(theme.display_font(27, 800, 82, spacing_em=-0.01))
         self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.body.addWidget(self.title)
         self.body.addSpacing(16)
@@ -208,12 +212,12 @@ class PeekPanel(QFrame):
         props.setColumnMinimumWidth(0, 96)
 
         def prop(r: int, key: str, w: QWidget) -> None:
-            k = _label(key, "propKey")
+            k = set_font(_label(key, "propKey"), theme.mono_font(11))
             props.addWidget(k, r, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             props.addWidget(w, r, 1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-        prop(0, "◉  Type", tag(row.type_label, row.type_color, t))
-        prop(1, "◎  Status", tag(row.status_label, row.status_color, t))
+        prop(0, "Type", tag(row.type_label, row.type_color, t))
+        prop(1, "Status", tag(row.status_label, row.status_color, t))
         ref = c.source_ref or "source"
         if c.source_url:
             src = _label(f'<a href="{escape(c.source_url, quote=True)}" style="color:{t.text}">'
@@ -221,11 +225,11 @@ class PeekPanel(QFrame):
             src.setToolTip(c.source_url)
         else:
             src = _label(ref, "propVal")
-        prop(2, "↗  Source", src)
-        prop(3, "◷  Created", _label(local_stamp(c.created_at) or "–", "propVal"))
+        prop(2, "Source", src)
+        prop(3, "Created", _label(local_stamp(c.created_at) or "–", "propVal"))
         if c.check_id or c.paper_id:
-            prop(4, "#  " + ("Check" if c.check_id else "Paper"),
-                 _label(c.check_id or c.paper_id, "propVal"))
+            prop(4, "Check" if c.check_id else "Paper",
+                 set_font(_label(c.check_id or c.paper_id, "propVal"), theme.mono_font(12, caps=False, spacing_em=0)))
         props.setColumnStretch(1, 1)
         self.body.addLayout(props)
         self.body.addSpacing(18)
@@ -239,7 +243,7 @@ class PeekPanel(QFrame):
             self.body.addWidget(why)
             self.body.addSpacing(22)
 
-        head = _label("PROMPT FOR CLAUDE", "sectionHead")
+        head = sub_header("Prompt for Claude")
         self.body.addWidget(head)
         self.body.addSpacing(8)
         self.prompt = QPlainTextEdit()

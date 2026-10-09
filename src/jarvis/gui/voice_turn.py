@@ -220,9 +220,9 @@ class MicButton(QAbstractButton):
         hover = self.underMouse() and self.isEnabled()
         if self._active:
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(t.red))
+            p.setBrush(QColor(t.signal))  # recording is live: the signal colour
             p.drawEllipse(r)
-            icon = QColor("#ffffff")
+            icon = QColor(t.bg if t.name == "dark" else t.on_accent)
         else:
             if hover or self.isDown():
                 p.setPen(Qt.PenStyle.NoPen)
