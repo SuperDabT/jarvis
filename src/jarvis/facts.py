@@ -343,7 +343,39 @@ def compute_facts(
             evidence=[f"#{i['number']}" for i in loose],
         ))
 
+    # 10: electrical (active electrical cards, by their finding's status)
+    elec = electrical_fact(conn)
+    if elec is not None:
+        facts.append(elec)
+
     return sorted(facts, key=lambda f: (f.priority, f.id))
+
+
+ELECTRICAL_STATUS_ORDER = ("fail", "warn", "unknown")
+
+
+def electrical_fact(conn: sqlite3.Connection) -> Fact | None:
+    """Count active electrical cards by finding status; None if there are none."""
+    rows = conn.execute(
+        """SELECT c.id, c.title, COALESCE(e.status, 'unknown') AS status FROM cards c
+           LEFT JOIN electrical_findings e ON e.check_id = c.check_id
+           WHERE c.type = 'electrical' AND c.status = 'active' ORDER BY c.id"""
+    ).fetchall()
+    if not rows:
+        return None
+    counts = Counter(r["status"] for r in rows)
+    by = {k: counts[k] for k in ELECTRICAL_STATUS_ORDER if counts[k]}
+    words = {"fail": "over a limit", "warn": "close to a limit",
+             "unknown": "unconfirmed because a hardware.yaml value is missing"}
+    parts = [f"{k} {words[s]}" for s, k in by.items()]
+    n = len(rows)
+    return Fact(
+        id="electrical", kind="electrical", priority=2 if by.get("fail") else 3,
+        text=f"{plural(n, 'electrical check card')} {'is' if n == 1 else 'are'} active: "
+             f"{', '.join(parts)}.",
+        data={"active": n, "by_status": by},
+        evidence=["cards:electrical"],
+    )
 
 
 # ---------------------------------------------------------------- matching

@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 import time
 
+from jarvis import cards as cardlib
 from jarvis.briefing import build_briefing, render_briefing
+from jarvis.checks import STATUS_ORDER
+from jarvis.electrical import active_counts, carded_findings
 from jarvis.config import Config
 from jarvis.db import connect
 from jarvis.facts import compute_facts
 from jarvis.github import GitHubClient
 from jarvis.ollama import OllamaClient
+from jarvis.pipeline import load_checks, refresh, run_checks
 from jarvis.summary import render_summary
 from jarvis.sync import sync
 
@@ -52,6 +57,81 @@ def _run_brief(cfg: Config, conn, force: bool = False, no_model: bool = False,
             print("[no sentences dropped]", file=err)
 
 
+def _electrical_line(conn) -> str:
+    counts = active_counts(conn)
+    n = sum(counts.values())
+    detail = ", ".join(f"{counts[s]} {s}" for s in STATUS_ORDER if counts.get(s))
+    return f"{n} electrical card{'s' if n != 1 else ''} active" + (f" ({detail})" if detail else "")
+
+
+def _run_default(cfg: Config, conn) -> None:
+    if not cfg.token:
+        print("GITHUB_TOKEN not set; continuing unauthenticated", file=sys.stderr)
+    r = refresh(conn, cfg)
+    for name, outcome in r.sync.items():
+        print(f"{name}: {outcome}", file=sys.stderr)
+    for note in r.notes:
+        print(note, file=sys.stderr)
+    print(render_briefing(r.briefing), end="")
+    extra = []
+    if r.cards_new:
+        extra.append(f"{r.cards_new} new")
+    if r.cards_resolved:
+        extra.append(f"{r.cards_resolved} auto-resolved this run")
+    print("\n" + _electrical_line(conn) + (f"; {', '.join(extra)}" if extra else ""))
+
+
+def _run_checks(cfg: Config, conn, no_model: bool = False) -> int:
+    loaded = load_checks(conn, cfg)
+    if isinstance(loaded, str):
+        print(loaded)
+        return 1
+    src, _hw, findings = loaded
+    client = None if no_model else OllamaClient(cfg.ollama_url, cfg.model)
+    try:
+        new, resolved, notes = run_checks(conn, cfg, client)
+    finally:
+        if client:
+            client.close()
+    print(f"hardware: {src.label}")
+    carded = {f.check_id for f in carded_findings(findings)}
+    for status in STATUS_ORDER:
+        group = [f for f in findings if f.status == status]
+        if not group:
+            continue
+        print(f"\n{status.upper()} ({len(group)})")
+        for f in group:
+            mark = "*" if f.check_id in carded else " "
+            print(f" {mark} {f.check_id}")
+            print(f"     {f.title}")
+            print(textwrap.fill(f.why, width=88, initial_indent="     ",
+                                subsequent_indent="     "))
+            nums = ", ".join(f"{k}={_fmt_num(v)}" for k, v in f.numbers.items())
+            if nums:
+                print(textwrap.fill(nums, width=88, initial_indent="     numbers: ",
+                                    subsequent_indent="       "))
+    print("\n* = has a card.  " + _electrical_line(conn)
+          + f"; {new} new, {resolved} auto-resolved this run")
+    for note in notes[1:]:
+        print(f"note: {note}", file=sys.stderr)
+    return 0
+
+
+def _fmt_num(v) -> str:
+    from jarvis.checks import fmt
+    return fmt(v) if isinstance(v, float) else ("null" if v is None else str(v))
+
+
+def _run_cards(conn, show_all: bool) -> None:
+    statuses = ("active", "done", "auto_resolved") if show_all else ("active",)
+    rows = [c for st in statuses for c in cardlib.list_cards(conn, st)]
+    if not rows:
+        print("No cards." if show_all else "No active cards.")
+        return
+    for c in rows:
+        print(f"{c.id:>4}  {c.status:<13} {c.type:<10} {c.title}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="jarvis")
     sub = parser.add_subparsers(dest="cmd")
@@ -64,6 +144,14 @@ def main(argv: list[str] | None = None) -> int:
     bp.add_argument("--show-facts", action="store_true", help="also list the facts")
     bp.add_argument("--verbose", action="store_true",
                     help="print timing, fallback reason and dropped sentences to stderr")
+    cp = sub.add_parser("checks", help="run the electrical checks and update the cards")
+    cp.add_argument("--no-model", action="store_true", help="template card text only")
+    lp = sub.add_parser("cards", help="list cards")
+    lp.add_argument("--all", action="store_true", help="include done and auto-resolved")
+    gp = sub.add_parser("card", help="print a card's ready-to-paste Claude prompt")
+    gp.add_argument("id", type=int)
+    dp = sub.add_parser("done", help="mark a card done (it never comes back)")
+    dp.add_argument("id", type=int)
     args = parser.parse_args(argv)
 
     cfg = Config.from_env()
@@ -76,9 +164,24 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "brief":
             _run_brief(cfg, conn, force=args.force, no_model=args.no_model,
                        show_facts=args.show_facts, verbose=args.verbose)
+        elif args.cmd == "checks":
+            return _run_checks(cfg, conn, no_model=args.no_model)
+        elif args.cmd == "cards":
+            _run_cards(conn, args.all)
+        elif args.cmd in ("card", "done"):
+            card = cardlib.get_card(conn, args.id)
+            if card is None:
+                print(f"no card {args.id}", file=sys.stderr)
+                return 1
+            if args.cmd == "done":
+                cardlib.mark_done(conn, card.id)
+                print(f"card {card.id} done: {card.title}")
+            else:
+                print(f"# card {card.id} [{card.status}] {card.title}\n# {card.why}\n",
+                      file=sys.stderr)
+                print(card.claude_prompt, end="")
         else:
-            _run_sync(cfg, conn, quiet=True)
-            _run_brief(cfg, conn)
+            _run_default(cfg, conn)
     finally:
         conn.close()
     return 0

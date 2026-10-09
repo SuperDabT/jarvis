@@ -102,6 +102,7 @@ def test_hardware_file_and_missing(conn):
     assert conn.execute("SELECT content, sha FROM repo_files").fetchone()[:] == ("servos: 2\n", "s1")
     out = sync(conn, FakeClient(conn, **{"hardware.yaml": FetchResult(False, 404, None)}))
     assert out["hardware.yaml"] == "missing"
+    assert conn.execute("SELECT COUNT(*) FROM repo_files").fetchone()[0] == 0
 
 
 def test_error_does_not_stop_others(conn):

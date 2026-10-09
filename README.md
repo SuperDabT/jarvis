@@ -24,6 +24,18 @@ Without a token Jarvis runs unauthenticated (fine for a public repo, lower rate 
 - `JARVIS_REPO`: repo to watch as `owner/name` (default `SuperDabT/stm32-lidar-scanner`)
 - `JARVIS_DB`: SQLite path (default `~/.local/share/jarvis/jarvis.db`)
 - `GITHUB_TOKEN`: GitHub token
+- `JARVIS_HARDWARE`: local `hardware.yaml` (default `~/.config/jarvis/hardware.yaml`). A `hardware.yaml` in the repo root takes precedence; Jarvis never writes to the repo. See `docs/hardware.example.yaml` for the schema.
+
+## Electrical checks
+
+```sh
+uv run jarvis checks [--no-model]   # run checks on hardware.yaml, print findings, update cards
+uv run jarvis cards [--all]         # list cards
+uv run jarvis card <id>             # print the ready-to-paste Claude prompt
+uv run jarvis done <id>             # close a card for good
+```
+
+Python computes every number; the model (if reachable) only links an open issue and rewrites the card text, and its output is validated.
 
 ## Tests
 

@@ -1,0 +1,134 @@
+# hardware.yaml: the electrical facts Jarvis checks.
+#
+# Jarvis reads this file and does every calculation in Python; the language
+# model never does arithmetic. Edit by hand. Rules:
+#   - Units are in the field names: _v = volts, _a = amps, _pct = percent.
+#   - Unknown values are `null` with a note under `todo:`. Never guess a value:
+#     a null makes the matching check report "unknown" instead of a false pass.
+#   - `verify: true` marks typical datasheet or seller figures worth confirming.
+#   - `planned: true` parts and signals are not wired yet; they are left out of
+#     the main checks and reported separately.
+#
+# Lookup order (the watched repo is never written to):
+#   1. hardware.yaml in the repo root, if you ever add it there (synced by Jarvis)
+#   2. the path in $JARVIS_HARDWARE
+#   3. ~/.config/jarvis/hardware.yaml
+
+version: 1
+
+project:
+  name: STM32 pan-tilt LiDAR tracker
+  description: >-
+    STM32F446RE (NUCLEO-F446RE) pan-tilt tracker: two MG90S servos aim a
+    Benewake TF-Luna LiDAR over UART; a custom Nucleo shield powers them.
+
+rails:
+  5V:
+    nominal_v: 5.0
+    tolerance_pct: null
+    max_current_a: null
+    ground_common: null
+    source: >-
+      Dedicated 5 V supply for the servos and the TF-Luna. Previously a buck
+      converter, now a 5 V jack on the custom Nucleo shield, with bulk and
+      decoupling capacitors at the servo connectors.
+    todo:
+      tolerance_pct: Supply accuracy and ripple are unknown; check the adapter label or measure under servo load.
+      max_current_a: Current rating of the 5 V supply on the shield jack is unknown; read the adapter label.
+      ground_common: Confirm the shield ties the 5 V supply ground to the Nucleo GND.
+
+  USB_5V:
+    nominal_v: 5.0
+    tolerance_pct: null
+    max_current_a: 0.5
+    ground_common: true
+    source: NUCLEO-F446RE powered from USB through the ST-Link (USB 2.0 port, 500 mA).
+    notes: Feeds the Nucleo itself; no external loads are listed on it.
+
+  3V3:
+    nominal_v: 3.3
+    tolerance_pct: null
+    max_current_a: 0.5
+    ground_common: true
+    source: NUCLEO-F446RE on-board 3.3 V regulator (500 mA), also feeds the MCU.
+    notes: The MCU's own draw is not listed, so budgets here count only the parts below.
+
+parts:
+  NUCLEO-F446RE:
+    rail: null
+    source: ST NUCLEO-F446RE user manual; STM32F446RE datasheet
+    verify: false
+    notes: >-
+      The board is the source of USB_5V and 3V3, not a load on them. GPIO are
+      3.3 V; PA9/PA10 are 5 V tolerant (FT); max 25 mA per pin.
+
+  MG90S:
+    rail: 5V
+    count: 2
+    v_min: 4.8
+    v_max: 6.0
+    current_typ_a: 0.25
+    current_peak_a: 0.7
+    source: >-
+      MG90S seller datasheets: 4.8-6.0 V; stall ~0.7 A at 4.8 V (some sellers
+      list up to ~0.9 A at 6 V); running/no-load ~0.12-0.25 A.
+    verify: true
+    notes: Pan on PA1 (TIM2_CH2), tilt on PA0 (TIM2_CH1); 50 Hz PWM, 500-2500 us pulses.
+
+  TF-Luna:
+    rail: 5V
+    count: 1
+    v_min: 3.7
+    v_max: 5.2
+    current_typ_a: 0.07
+    current_peak_a: 0.15
+    source: Benewake TF-Luna datasheet; supply 3.7-5.2 V, average <=70 mA, peak 150 mA, UART logic 3.3 V.
+    verify: true
+    notes: The Luna's ceiling is 5.2 V with no over-voltage protection.
+
+  SSD1306-OLED:
+    rail: 3V3
+    count: 1
+    planned: true
+    v_min: 3.3
+    v_max: 5.0
+    current_typ_a: 0.02
+    current_peak_a: 0.025
+    source: Typical 0.96 in SSD1306 I2C module listings; 3.3-5 V, ~20-25 mA.
+    verify: true
+    notes: Planned display (issue #29), not wired yet. Rail and I2C pins not decided.
+    todo:
+      rail: Rail not decided; 3V3 assumed so the module's I2C pull-ups sit at 3.3 V.
+
+signals:
+  - from: NUCLEO-F446RE.PA9
+    to: TF-Luna.RX
+    function: USART1_TX at 115200 baud
+    logic_v: 3.3
+    to_max_v: 3.3
+    source: TF-Luna datasheet, UART logic 3.3 V
+    verify: true
+
+  - from: TF-Luna.TX
+    to: NUCLEO-F446RE.PA10
+    function: USART1_RX at 115200 baud
+    logic_v: 3.3
+    to_max_v: 5.0
+    source: STM32F446RE datasheet, PA10 is 5 V tolerant (FT)
+    verify: false
+
+  - from: NUCLEO-F446RE.PA1
+    to: MG90S.SIG
+    function: Pan servo PWM, TIM2_CH2, 50 Hz, 500-2500 us
+    logic_v: 3.3
+    to_max_v: 5.0
+    source: Typical hobby-servo signal input, referenced to the servo supply
+    verify: true
+
+  - from: NUCLEO-F446RE.PA0
+    to: MG90S.SIG
+    function: Tilt servo PWM, TIM2_CH1, 50 Hz, 500-2500 us
+    logic_v: 3.3
+    to_max_v: 5.0
+    source: Typical hobby-servo signal input, referenced to the servo supply
+    verify: true

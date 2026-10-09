@@ -90,6 +90,24 @@ CREATE TABLE IF NOT EXISTS briefings (
 );
 
 CREATE INDEX IF NOT EXISTS briefings_hash ON briefings (facts_hash, id);
+
+-- Latest electrical findings (phase 4), one row per check_id, plus the cached
+-- model wording for that exact finding (keyed by finding_hash).
+CREATE TABLE IF NOT EXISTS electrical_findings (
+    check_id TEXT PRIMARY KEY,
+    finding_hash TEXT,
+    status TEXT,
+    title TEXT,
+    why TEXT,
+    numbers_json TEXT,
+    model_hash TEXT,
+    model_result TEXT,
+    model_title TEXT,
+    model_why TEXT,
+    model_issue INTEGER,
+    model TEXT,
+    updated_at TEXT
+);
 """
 
 ISSUE_COLUMNS = (

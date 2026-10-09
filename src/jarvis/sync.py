@@ -76,6 +76,8 @@ def _sync_one(
     except GitHubError as e:
         return f"error: {e}"
     if result.status == 404:
+        # A file deleted from the repo must not leave a stale copy behind.
+        conn.execute("DELETE FROM repo_files WHERE path = ?", (name,))
         db.log_sync(conn, name, 404, False)
         return "missing"
     if not result.changed:
