@@ -9,11 +9,15 @@ open file, so they are released when the holder closes it or its process dies
   Refresh, CLI refresh). A second refresher gets ``RefreshBusy``.
 - ``<db>.daemon.lock``: held for the whole life of ``jarvis watch``; it holds
   the daemon's pid so a second ``jarvis watch`` can say who is running.
+- ``<db>.migrate.lock``: held while the schema is upgraded (``db.migrate``) or a
+  backup is restored. Unlike the others it waits (up to a timeout): a second
+  process opening the database waits for the first one's migration to finish.
 """
 from __future__ import annotations
 
 import fcntl
 import os
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,6 +25,10 @@ from pathlib import Path
 
 class RefreshBusy(RuntimeError):
     """Another process (or thread) is running a refresh right now."""
+
+
+class MigrationLockTimeout(RuntimeError):
+    """Another process held the migration lock for longer than the timeout."""
 
 
 class DaemonRunning(RuntimeError):
@@ -38,6 +46,10 @@ def refresh_lock_path(db_path: str | Path) -> Path:
 
 def daemon_lock_path(db_path: str | Path) -> Path:
     return Path(f"{Path(db_path).expanduser()}.daemon.lock")
+
+
+def migration_lock_path(db_path: str | Path) -> Path:
+    return Path(f"{Path(db_path).expanduser()}.migrate.lock")
 
 
 def _try_lock(path: Path) -> int | None:
@@ -68,6 +80,24 @@ def refresh_lock(db_path: str | Path) -> Iterator[None]:
     fd = _try_lock(refresh_lock_path(db_path))
     if fd is None:
         raise RefreshBusy("A refresh is already running in the background")
+    try:
+        yield
+    finally:
+        _release(fd)
+
+
+@contextmanager
+def migration_lock(db_path: str | Path, timeout: float = 60.0) -> Iterator[None]:
+    """Hold the migration lock for the block, waiting up to ``timeout`` seconds for
+    it; raise ``MigrationLockTimeout`` if it stays taken."""
+    path = migration_lock_path(db_path)
+    deadline = time.monotonic() + timeout
+    while (fd := _try_lock(path)) is None:
+        if time.monotonic() >= deadline:
+            raise MigrationLockTimeout(
+                f"another process has been upgrading the database for over {timeout:g}s "
+                f"(lock {path})")
+        time.sleep(0.05)
     try:
         yield
     finally:

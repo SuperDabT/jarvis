@@ -115,8 +115,26 @@ Calibration notes (October 2026, this repo's issues): arXiv has little recent wo
 ## Tests
 
 ```sh
-uv run pytest -q
+QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q
 ```
+
+## Database upgrades and backups
+
+The schema version is SQLite's `user_version`; the steps are `db.MIGRATIONS`. Whatever opens the
+database first (`jarvis watch`, the window, the CLI) upgrades it. Before an existing database is
+changed, it is copied with SQLite's backup API to `jarvis.db.bak-v<old version>-<UTC time>` next
+to it (mode 600) and the copy is checked (integrity check, same rows per table). All steps run in
+one transaction, so a failed upgrade leaves the database at its old version. Two processes never
+upgrade at once (`jarvis.db.migrate.lock`). A database from a newer Jarvis is refused, not touched.
+
+To put a backup back, stop the service and close the window, then:
+
+```sh
+systemctl --user stop jarvis.service
+uv run python -c "from jarvis import db; print(db.restore_backup('$HOME/.local/share/jarvis/jarvis.db.bak-v0-…', '$HOME/.local/share/jarvis/jarvis.db'))"
+```
+
+Backups are never deleted automatically.
 
 ## Phase status
 

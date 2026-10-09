@@ -1167,23 +1167,7 @@ def validate_answer(raw: str, ctx: Context, question: str,
 
 
 # ---------------------------------------------------------------- history + persistence
-
-_CHAT_SCHEMA = """
-CREATE TABLE IF NOT EXISTS chat_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    role TEXT CHECK (role IN ('user', 'assistant')),
-    content TEXT,
-    sources_json TEXT,
-    created_at TEXT
-);
-CREATE INDEX IF NOT EXISTS chat_messages_session ON chat_messages (session_id, id);
-"""
-
-
-def _ensure_table(conn: sqlite3.Connection) -> None:
-    """Same DDL as db.SCHEMA; a guard for connections opened by older code."""
-    conn.executescript(_CHAT_SCHEMA)
+# chat_messages is created by db.connect (db.BASELINE_SCHEMA).
 
 
 def trim_history(history: Sequence[tuple[str, str]],
@@ -1198,7 +1182,6 @@ def trim_history(history: Sequence[tuple[str, str]],
 
 def save_message(conn: sqlite3.Connection, session_id: str, role: str, content: str,
                  meta: dict[str, Any] | None = None) -> int:
-    _ensure_table(conn)
     cur = conn.execute(
         "INSERT INTO chat_messages (session_id, role, content, sources_json, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -1210,7 +1193,6 @@ def save_message(conn: sqlite3.Connection, session_id: str, role: str, content: 
 def load_history(conn: sqlite3.Connection, session_id: str,
                  turns: int = HISTORY_TURNS) -> list[tuple[str, str]]:
     """(role, content) of a session's last ``turns`` exchanges, oldest first."""
-    _ensure_table(conn)
     rows = conn.execute(
         "SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
         (session_id, 4 * turns)).fetchall()
