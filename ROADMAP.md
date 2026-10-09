@@ -12,9 +12,9 @@ existing project cockpit.
 | 2 | Core data: `projects` (LiDAR repo as project 1), `items` (task / idea / reminder), `links` | done |
 | 3 | `jarvis/items.py`: item service (CRUD, complete, soft delete, open / today / overdue) | done |
 | 4 | `jarvis/capture.py`: natural-language capture (local model fills a form; Python checks every field) | done |
-| 5 | App shell: navigation rail, Home / Tasks / School / Projects / Knowledge, chat at shell level | next |
+| 5 | App shell: navigation rail, Home / Tasks / School / Projects / Knowledge, chat at shell level | done |
 | 6 | Quick capture: Ctrl+N overlay and `jarvis add "..."` | done |
-| 7 | Tasks workspace v0: Overdue / Today / Upcoming / Someday | |
+| 7 | Tasks workspace v0: Overdue / Today / Upcoming / Someday | next |
 | 8 | Home dashboard v0 from stored data | |
 | 9 | Task items in the graph | |
 

@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -58,18 +59,25 @@ from jarvis.gui.cockpit import (
     set_pill,
 )
 from jarvis.gui.data import WindowData, describe_error, load_window_data, local_stamp, refresh_message
+from jarvis.gui.shell import WIDE_FROM, WORKSPACES, NavRail, PlaceholderPage
 from jarvis.gui.widgets import ICON_SIZE, PulseDot, _label, refresh_icon, repolish
 from jarvis.lock import RefreshBusy, refresh_lock
 
 DEFAULT_SIZE = (1500, 940)
 LEFT_W = 290
 RIGHT_W = 360
+# Below this window width the cockpit's side columns narrow, so the graph keeps room.
+NARROW_BELOW = 1200
+LEFT_W_NARROW = 272   # the longest vitals key + value still fit
+RIGHT_W_NARROW = 256
 POLL_MS = 30_000
 DEBOUNCE_MS = 400
 STATUS_CLEAR_MS = 8_000
 CLOCK_MS = 1_000
 IDLE_HINT = ("hover = inspect · click = lock · scroll = zoom · Ctrl+R refresh · "
              "Ctrl+N capture · Ctrl+K ask · Ctrl+Space talk · Esc release")
+SHELL_HINT = "Ctrl+1–5 switch · Ctrl+N capture · Ctrl+K ask · Ctrl+Space talk"
+START_WORKSPACE = "projects"  # the only built workspace so far
 BUSY_TEXT = "A refresh is already running in the background"
 SPIN_MS = 33
 SPIN_DEG_PER_S = 300
@@ -150,10 +158,20 @@ class _GraphStage(QWidget):
         self.hud.setFixedWidth(min(BriefingHud.WIDTH, max(260, w - 28)))
         self.hud.adjustSize()
         self.hud.move(14, 14)
+        # a narrow graph: the legend drops its bullets (the labels keep their colours)
+        buttons = self.legend.findChildren(QPushButton)
+        for b in buttons:
+            b.setText(b.property("full"))
+        self.legend.adjustSize()
+        if self.legend.width() > w - 24:
+            for b in buttons:
+                b.setText(b.property("short"))
         self.legend.adjustSize()
         self.legend.move(12, h - self.legend.height() - 8)
         self.counts.adjustSize()
         self.counts.move(w - self.counts.width() - 14, h - self.counts.height() - 12)
+        # no room beside the legend: the counts give way
+        self.counts.setVisible(self.counts.x() > self.legend.geometry().right() + 12)
         self.graph.set_inset_left(self.hud.width() + 14 if self.hud.expanded else 0)
 
 
@@ -198,6 +216,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(980, 600)
         self._build()
         self._shortcuts()
+        self.show_workspace(START_WORKSPACE)
         self.set_chat_open(chat_open, focus=False)
 
         self._status_timer = QTimer(self, singleShot=True, interval=STATUS_CLEAR_MS)
@@ -233,7 +252,51 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(self._build_topbar())
-        outer.addWidget(self._build_status_row())
+
+        # rail | workspaces | chat
+        middle = QHBoxLayout()
+        middle.setContentsMargins(0, 0, 0, 0)
+        middle.setSpacing(0)
+        self.rail = NavRail(self.tokens)
+        self.rail.changed.connect(self.show_workspace)
+        middle.addWidget(self.rail)
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("workspaces")
+        self.workspaces: dict[str, QWidget] = {}
+        for ws in WORKSPACES:
+            if ws.key == "projects":
+                w = self._build_projects()
+            else:
+                w = PlaceholderPage(ws.key, self.tokens)
+                w.open_projects.connect(lambda: self.show_workspace("projects"))
+                w.capture.connect(self.open_capture)
+            w.setObjectName(f"workspace_{ws.key}")
+            self.stack.addWidget(w)
+            self.workspaces[ws.key] = w
+        middle.addWidget(self.stack, 1)
+
+        # the chat belongs to the shell: it opens beside any workspace
+        self.chat = ChatPanel(self.cfg, self.tokens, self._ask_fn, **self._voice_kw)
+        self.chat.close_requested.connect(lambda: self.set_chat_open(False))
+        self.chat.answered.connect(self._on_answer)
+        middle.addWidget(self.chat)
+
+        outer.addLayout(middle, 1)
+        outer.addWidget(self._build_ticker())
+        self.setCentralWidget(page)
+
+        # quick capture floats over everything (Ctrl+N)
+        self.capture = CaptureOverlay(self.cfg, *self._capture_fns, parent=page)
+        self.capture.captured.connect(self._on_captured)
+
+    def _build_projects(self) -> QWidget:
+        """The engineering cockpit: status line, then vitals / milestones / pulse /
+        power, the graph with the briefing over it, and the inspector + stream."""
+        ws = QWidget()
+        lay = QVBoxLayout(ws)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._build_status_row())
 
         body = QHBoxLayout()
         body.setContentsMargins(12, 10, 12, 10)
@@ -247,6 +310,7 @@ class MainWindow(QMainWindow):
         left_scroll.setFixedWidth(LEFT_W)
         left = QWidget()
         left.setFixedWidth(LEFT_W - 6)
+        self._left_inner = left
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(10)
@@ -258,6 +322,7 @@ class MainWindow(QMainWindow):
             ll.addWidget(w)
         ll.addStretch(1)
         left_scroll.setWidget(left)
+        self.left_column = left_scroll
         body.addWidget(left_scroll)
 
         # centre: the graph
@@ -276,7 +341,7 @@ class MainWindow(QMainWindow):
         fl.addWidget(self.stage)
         body.addWidget(frame, 1)
 
-        # right: inspector + stream, or the chat
+        # right: inspector + stream (the chat takes this room when it is open)
         self.right = QWidget()
         self.right.setFixedWidth(RIGHT_W)
         rl = QVBoxLayout(self.right)
@@ -295,18 +360,8 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.stream, 1)
         body.addWidget(self.right)
 
-        self.chat = ChatPanel(self.cfg, self.tokens, self._ask_fn, **self._voice_kw)
-        self.chat.close_requested.connect(lambda: self.set_chat_open(False))
-        self.chat.answered.connect(self._on_answer)
-        body.addWidget(self.chat)
-
-        outer.addLayout(body, 1)
-        outer.addWidget(self._build_ticker())
-        self.setCentralWidget(page)
-
-        # quick capture floats over everything (Ctrl+N)
-        self.capture = CaptureOverlay(self.cfg, *self._capture_fns, parent=page)
-        self.capture.captured.connect(self._on_captured)
+        lay.addLayout(body, 1)
+        return ws
 
     def _build_topbar(self) -> QWidget:
         bar = QFrame()
@@ -315,9 +370,11 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(18, 0, 12, 0)
         lay.setSpacing(10)
-        self.logo = mono(_label(f"jarvis — {self.cfg.repo.split('/')[-1]}", "logo"), 14, 700)
-        self.logo.setToolTip(self.cfg.repo)
+        self.logo = mono(_label("jarvis", "logo"), 15, 700)
         lay.addWidget(self.logo)
+        self.crumb = mono(_label("", "crumb"), 12)
+        lay.addWidget(self.crumb)
+        lay.addSpacing(4)
         self.state_pill = pill("idle")
         lay.addWidget(self.state_pill, 0, Qt.AlignmentFlag.AlignVCenter)
         self.watch_dot = PulseDot()
@@ -348,7 +405,7 @@ class MainWindow(QMainWindow):
         row = QFrame()
         row.setObjectName("statusRow")
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(18, 8, 18, 0)
+        lay.setContentsMargins(13, 8, 13, 0)  # lines up with the panels below
         lay.setSpacing(10)
         self.status_text = mono(_label("", "statusText"), 11)
         lay.addWidget(self.status_text)
@@ -362,10 +419,12 @@ class MainWindow(QMainWindow):
         w = QWidget()
         lay = QHBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
+        lay.setSpacing(0)
         self.filter_buttons: dict[str, QPushButton] = {}
         for kind in FILTER_KINDS:
             b = QPushButton(f"● {FILTER_LABELS[kind]}")
+            b.setProperty("full", b.text())
+            b.setProperty("short", FILTER_LABELS[kind])
             b.setObjectName("filter")
             b.setCheckable(True)
             b.setChecked(True)
@@ -402,6 +461,33 @@ class MainWindow(QMainWindow):
                   activated=lambda: self.hud.set_expanded(not self.hud.expanded))
         QShortcut(QKeySequence("Ctrl+Space"), self, activated=self.toggle_voice)
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self.open_capture)
+        for ws in WORKSPACES:
+            QShortcut(QKeySequence(ws.shortcut), self,
+                      activated=lambda k=ws.key: self.show_workspace(k))
+
+    # ------------------------------------------------------------ workspaces
+
+    @property
+    def workspace(self) -> str:
+        """The key of the workspace on screen ("home", "tasks", ..., "projects")."""
+        current = self.stack.currentWidget()
+        return next(k for k, w in self.workspaces.items() if w is current)
+
+    def show_workspace(self, key: str) -> None:
+        if key not in self.workspaces:
+            raise KeyError(f"no workspace {key!r}")
+        self.stack.setCurrentWidget(self.workspaces[key])
+        self.rail.select(key)
+        name = next(w.name for w in WORKSPACES if w.key == key).lower()
+        if key == "projects":
+            self.crumb.setText(f"/ {name} / {self.cfg.repo.split('/')[-1]}")
+            self.crumb.setToolTip(self.cfg.repo)
+        else:
+            self.crumb.setText(f"/ {name}")
+            self.crumb.setToolTip("")
+        self.hint_label.setText(IDLE_HINT if key == "projects" else SHELL_HINT)
+        if key == "projects":
+            self.stage.place()
 
     # ------------------------------------------------------------ quick capture
 
@@ -415,6 +501,15 @@ class MainWindow(QMainWindow):
         self.capture.setFixedWidth(w)
         self.capture.adjustSize()
         self.capture.move((page.width() - w) // 2, 64)
+
+    def _fit_columns(self) -> None:
+        """Narrow the cockpit's side columns in a small window."""
+        narrow = self.width() < NARROW_BELOW
+        lw, rw = (LEFT_W_NARROW, RIGHT_W_NARROW) if narrow else (LEFT_W, RIGHT_W)
+        if self.left_column.width() != lw:
+            self.left_column.setFixedWidth(lw)
+            self._left_inner.setFixedWidth(lw - 6)
+            self.right.setFixedWidth(rw)
 
     def _on_captured(self, result: Any) -> None:
         from jarvis.capture import summary
@@ -468,6 +563,7 @@ class MainWindow(QMainWindow):
 
     def select_node(self, node_id: str) -> None:
         """Lock a node (from the stream or the inspector's links)."""
+        self.show_workspace("projects")
         if self.chat.isVisible():
             self.set_chat_open(False)
         kind = node_id.split(":")[0]
@@ -760,6 +856,10 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(e)
+        wide = self.width() >= WIDE_FROM
+        if wide != self.rail.wide:
+            self.rail.set_wide(wide)
+        self._fit_columns()
         if not self.capture.isHidden():
             self._place_capture()
 

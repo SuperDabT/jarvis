@@ -1,6 +1,6 @@
 # Current state
 
-Updated after Phase 1, steps 4 and 6 (see ROADMAP.md).
+Updated after Phase 1, step 5 (see ROADMAP.md).
 
 ## Database
 
@@ -73,6 +73,25 @@ Updated after Phase 1, steps 4 and 6 (see ROADMAP.md).
   closes it before anything else).
 - About 2.5 s per capture with `gemma4:26b` loaded (about 14 s when it has to load first).
 
+## The window (shell)
+
+- `gui/window.py` `MainWindow`: top bar, then rail | workspaces (`QStackedWidget`) | chat,
+  then the ticker. `gui/shell.py` has the rail (`NavRail`, painted icons) and the placeholder
+  pages. Workspaces in order, Ctrl+1 .. Ctrl+5: Home, Tasks, School, Projects, Knowledge;
+  `show_workspace(key)`, `workspace`. It opens on Projects (the only built one).
+- Projects holds the whole engineering cockpit unchanged (status line, vitals / milestones /
+  pulse / power, graph + briefing, inspector + stream). Its widgets are still attributes of
+  the window (`win.graph`, `win.hud`, `win.inspector`, ...). Picking a graph reference from
+  anywhere switches to Projects.
+- The chat is at shell level: Ctrl+K / Ctrl+J / Ctrl+Space work in every workspace; in
+  Projects it still takes the inspector column. Esc order: capture, voice, graph lock, chat.
+- Home, Tasks, School and Knowledge are labelled placeholders ("not built yet", what they will
+  hold, when), with only real actions (quick capture, open Projects).
+- Below 1320 px wide the rail is compact (icon over caption); below 1200 px the cockpit's side
+  columns narrow (272 / 256) so the graph keeps about 330 px at the 980x600 minimum.
+- Palette (`theme.py`): forest-green near-black `#031211`, grey-green ink `#DCE8E2`, teal mint
+  `#52E3A4` (the Life OS mockup); every other colour is mixed from these.
+
 ## The real database
 
 The real `~/.local/share/jarvis/jarvis.db` is at version 1 (upgraded on 2026-10-09 during
@@ -83,8 +102,8 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 687 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 703 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,
-`tests/test_capture.py` capture and `jarvis add`, `tests/test_gui_capture.py` the overlay.
+`tests/test_capture.py` capture and `jarvis add`, `tests/test_gui_capture.py` the overlay, `tests/test_gui_shell.py` the shell.

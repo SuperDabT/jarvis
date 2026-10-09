@@ -77,6 +77,9 @@ open the full card with the prompt for Claude, Done and Not useful. Every number
 Python from the synced data and `hardware.yaml`; the model only writes the briefing sentences
 and chat answers.
 
+Workspaces in the left rail (Ctrl+1 to Ctrl+5): Home, Tasks, School, Projects and Knowledge.
+Projects is the project cockpit described here; the others are placeholders for now.
+
 "Ask Jarvis" on the right (Ctrl+K to type, Ctrl+J to show or hide) answers questions from the
 synced data with sources (issues, commits, checks), using the local model; answers stream in
 and can take 10-25 s to start. Ctrl+R / F5 refresh, Esc closes the card drawer, Ctrl+Q quits.

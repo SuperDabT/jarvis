@@ -1,7 +1,7 @@
 """Colour tokens, fonts and the stylesheet: Jarvis's "project brain" look.
 
-Dark only. A charcoal blue base (#202833) with pearl text (#EAE0C8); panels are
-the charcoal lifted a little towards the pearl. One neon mint (#7CF29A) marks
+Dark only. A forest-green near-black base (#031211) with grey-green ink text
+(#DCE8E2); panels are the base lifted a little. One teal mint (#52E3A4) marks
 everything live: graph nodes with recent activity, status pills, sparklines,
 the orb while it listens or speaks, new arrivals, focus. A muted red is kept
 for genuinely failing checks only.
@@ -34,7 +34,7 @@ def mix(a: str, b: str, k: float) -> str:
 @dataclass(frozen=True)
 class Tokens:
     name: str
-    bg: str  # page background (charcoal)
+    bg: str  # page background (green-black)
     ink: str  # the pearl: marks, rings, primary buttons
     side: str  # side columns / chat panel background
     text: str
@@ -63,48 +63,50 @@ class Tokens:
     grid: tuple[str, str, str, str, str]  # activity levels 0..4 (towards mint)
     series: tuple[str, ...]  # categorical order
     tags: dict[str, tuple[str, str, str]] = field(default_factory=dict)  # bg, fg, border
-    orb_core: str = "#fff6e2"
-    orb_ring: str = "#eae0c8"
+    orb_core: str = "#f0fff7"
+    orb_ring: str = "#dce8e2"
     watermark: float = 0.06
-    panel: str = "#262f3b"  # cockpit panels
+    panel: str = "#061917"  # cockpit panels
 
     def tag(self, name: str) -> tuple[str, str, str]:
         return self.tags.get(name) or self.tags["open"]
 
     def tint(self, k: float) -> str:
-        """The pearl over the charcoal at ``k`` (0..1)."""
+        """The ink over the background at ``k`` (0..1)."""
         return mix(self.bg, self.ink, k)
 
 
-BG = "#202833"
-PEARL = "#eae0c8"
-MINT = "#7cf29a"
+# Forest-green near-black, a grey-green ink and a teal mint (the Life OS mockup).
+BG = "#031211"
+INK = "#dce8e2"
+PEARL = INK  # the ink's old name, kept for older imports
+MINT = "#52e3a4"
 RED = "#e5787a"
 
 
 def _dark() -> Tokens:
-    t = lambda k: mix(BG, PEARL, k)  # noqa: E731 - a tint of the pair
+    t = lambda k: mix(BG, INK, k)  # noqa: E731 - a tint of the pair
     m = lambda k: mix(BG, MINT, k)  # noqa: E731 - towards the mint
     return Tokens(
-        name="dark", bg=BG, ink=PEARL, side="#1c232d", text=PEARL, muted=t(0.74),
+        name="dark", bg=BG, ink=INK, side="#041614", text=INK, muted=t(0.72),
         faint=t(0.5), border=t(0.11), border_strong=t(0.18), btn_line=t(0.3),
-        fill=t(0.045), fill2=t(0.1), inset="#1a2029", hover=t(0.08), accent=PEARL,
-        accent_hover="#fff6e2", on_accent=BG, signal=MINT, signal_text=MINT,
+        fill=t(0.045), fill2=t(0.1), inset="#061a18", hover=t(0.07), accent=INK,
+        accent_hover="#f2fbf6", on_accent=BG, signal=MINT, signal_text=MINT,
         signal_soft=m(0.14), unsure=t(0.72), unsure_bg=t(0.1), warn=MINT, red=RED,
-        green=MINT, amber=t(0.45), shadow="#0b0e13",
+        green=MINT, amber=t(0.45), shadow="#010807",
         grid=(t(0.07), m(0.3), m(0.5), m(0.72), MINT),
-        series=(PEARL, MINT, t(0.55), m(0.55)),
+        series=(INK, MINT, t(0.55), m(0.55)),
         tags={
             "open": (t(0.08), t(0.74), "none"),
             "ok": (m(0.12), MINT, "none"),
-            "electrical": (t(0.1), PEARL, "none"),
-            "research": ("transparent", PEARL, f"1px solid {t(0.3)}"),
-            "warning": (t(0.14), PEARL, f"1px solid {t(0.45)}"),
+            "electrical": (t(0.1), INK, "none"),
+            "research": ("transparent", INK, f"1px solid {t(0.3)}"),
+            "warning": (t(0.14), INK, f"1px solid {t(0.45)}"),
             "needs": ("transparent", t(0.74), f"1px dashed {t(0.4)}"),
             "new": ("transparent", MINT, f"1px solid {m(0.7)}"),
             "fail": (mix(BG, RED, 0.16), RED, f"1px solid {mix(BG, RED, 0.5)}"),
         },
-        panel=t(0.045),
+        panel="#061917",
     )
 
 
@@ -319,7 +321,7 @@ QPushButton#ghost[active="true"] {{ background: {t.hover}; color: {t.signal}; }}
 QPushButton#primary {{ color: {t.on_accent}; background: {t.accent}; border: 1px solid {t.accent}; }}
 QPushButton#primary:hover {{ background: {t.accent_hover}; border-color: {t.accent_hover}; }}
 QPushButton#primary[flash="true"] {{ color: {t.signal}; background: transparent; border-color: {t.signal}; }}
-QPushButton#filter {{ border: none; color: {t.faint}; padding: 2px 6px; font-size: 11px; }}
+QPushButton#filter {{ border: none; color: {t.faint}; padding: 2px 5px; font-size: 11px; }}
 QPushButton#filter:checked {{ color: {t.text}; }}
 QPushButton#filter:hover {{ color: {t.signal}; }}
 QPushButton#chip {{
@@ -356,6 +358,19 @@ QMenu::item {{ padding: 5px 16px; border-radius: 5px; }}
 QMenu::item:selected {{ background: {t.hover}; color: {t.signal}; }}
 QMenu::item:disabled {{ color: {t.faint}; }}
 QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
+
+/* shell: navigation rail + placeholder workspaces */
+#rail {{ background: {t.side}; border-right: 1px solid {t.border}; }}
+#railHint {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
+#placeholder {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 14px; }}
+#placeholderTitle {{ color: {t.text}; font-family: {sans}; font-size: 22px; font-weight: 600; }}
+#placeholderLead {{ color: {t.muted}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
+#placeholderBadge {{
+    color: {t.faint}; font-family: {mono}; font-size: 10px; border: 1px dashed {t.btn_line};
+    border-radius: 8px; padding: 1px 8px;
+}}
+#placeholderText {{ color: {t.text}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
+#placeholderWhen {{ color: {t.signal_text}; font-family: {mono}; font-size: 11px; }}
 
 /* quick capture (Ctrl+N) */
 #capture {{
