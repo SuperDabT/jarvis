@@ -467,3 +467,13 @@ def test_cli_refresh_commands_report_busy(tmp_path, monkeypatch, capsys):
         assert cli.main([]) == 0  # default: no sync, shows what is stored
         out = capsys.readouterr()
         assert "already running" in out.err and "No briefing stored yet." in out.out
+
+
+def test_loop_notifies_only_when_cards_are_new(env):
+    sent = []
+    d, ft, lines = make_daemon(env, max_sleeps=40, notify=lambda s, b: sent.append((s, b)))
+    d.run()
+    first = d.ticks[0]
+    assert first.cards_new > 0
+    assert len(sent) == 1  # first tick only; later skipped ticks stay quiet
+    assert sent[0][0].startswith(f"{first.cards_new} new suggestion")

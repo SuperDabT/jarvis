@@ -49,7 +49,8 @@ from typing import Any
 
 import httpx
 
-from jarvis import db
+from jarvis import db, notify
+from jarvis.notify import new_card_message
 from jarvis.briefing import Briefing, build_briefing
 from jarvis.config import Config
 from jarvis.facts import compute_facts, facts_hash
@@ -407,6 +408,7 @@ class Daemon:
         wall: Callable[[], datetime] = lambda: datetime.now(UTC),
         stop: threading.Event | None = None,
         hw_poll_s: float = HW_POLL_S,
+        notify: Callable[[str, str], Any] | None = None,
     ) -> None:
         self.cfg, self.conn = cfg, conn
         self.interval = interval
@@ -417,6 +419,7 @@ class Daemon:
         self.stop = stop or threading.Event()
         self.sleep = sleep or self._sleep
         self.hw_poll_s = hw_poll_s
+        self.notify = notify
         self.backoff = Backoff()
         self.in_model = False
         self.ticks: list[TickResult] = []
@@ -493,6 +496,11 @@ class Daemon:
         if self.verbose:
             for line in verbose_lines(res):
                 self.out(line)
+        if self.notify and res.cards_new and not res.busy:
+            try:
+                self.notify(*new_card_message(self.conn, res.cards_new))
+            except Exception as e:  # noqa: BLE001
+                self.out(f"  notify failed: {_short(str(e), 120)}")
 
     def _hardware_edited(self) -> bool:
         try:
@@ -589,7 +597,8 @@ def run_watch(cfg: Config, interval: int | None = None, once: bool = False,
     conn = db.connect(cfg.db_path)
     gh = GitHubClient(cfg.repo, cfg.token, conn)
     ollama = OllamaClient(cfg.ollama_url, cfg.model)
-    daemon = Daemon(cfg, conn, interval=requested, gh=gh, ollama=ollama, verbose=verbose)
+    daemon = Daemon(cfg, conn, interval=requested, gh=gh, ollama=ollama, verbose=verbose,
+                    notify=None if once else notify.send)
     old = install_signal_handlers(daemon)
     try:
         return daemon.run(once=once)

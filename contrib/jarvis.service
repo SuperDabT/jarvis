@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis project watcher (jarvis watch)
+After=network-online.target
+
+[Service]
+Type=simple
+# Optional: GITHUB_TOKEN and JARVIS_* overrides. Keep this file chmod 600.
+EnvironmentFile=-%h/.config/jarvis/env
+ExecStart=%h/.local/bin/jarvis watch
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

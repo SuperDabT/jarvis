@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Jarvis
+Comment=Project briefing and suggestions
+Exec=/home/tal_desktop/.local/bin/jarvis-window
+Icon=dialog-information
+Terminal=false
+Categories=Development;
+StartupWMClass=jarvis

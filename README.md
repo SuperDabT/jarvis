@@ -67,3 +67,14 @@ uv run pytest -q
 ## Phase status
 
 Phases 1 to 5 done (reader, briefing, window, electrical cards, fast loop); next is phase 6 (research loop).
+
+## Daily use (runs at login)
+
+```bash
+./contrib/install.sh
+```
+
+Installs the `jarvis` and `jarvis-window` commands, a systemd user service that runs
+`jarvis watch` from login, and a launcher entry. Put a `GITHUB_TOKEN` in
+`~/.config/jarvis/env` (mode 600) if you want authenticated requests. New cards raise a
+desktop notification. Logs: `journalctl --user -u jarvis -f`.
