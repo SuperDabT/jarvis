@@ -37,7 +37,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from jarvis import cards, db  # noqa: E402
 from jarvis.config import Config  # noqa: E402
 from jarvis.gui.app import make_app  # noqa: E402
-from jarvis.gui.window import EMPTY_CARDS, MainWindow  # noqa: E402
+from jarvis.gui.window import MainWindow, ref_to_node  # noqa: E402
 from test_gui_data import HW_YAML, REPO, seed  # noqa: E402
 
 
@@ -67,112 +67,121 @@ def setup(app, tmp_path):
     conn.close()
 
 
-def test_window_shows_dashboard(setup):
+def test_window_shows_cockpit(setup):
     win, conn, ids = setup
-    assert win.briefing_view.headline.text() == "Core demo due Oct 18, 0 of 9 closed"
-    assert [r.sentence.uncertain for r in win.briefing_view.rows] == [False, True]
-    assert "unconfirmed" in win.briefing_view.rows[1].text_label.text()
-    assert "unconfirmed" not in win.briefing_view.rows[0].text_label.text()
-    assert len(win.kpi_row.tiles) == 4
-    assert win.timeline.data is not None and len(win.timeline.data.bars) == 1
-    assert win.grid_chart.data is not None and "commits in the last 6 months" in \
-        win.grid_caption.text()
-    assert win.phase_chart.data is not None
-    assert len(win.budget_charts) == 2 and len(win.window_charts) == 2
-    assert set(win.card_widgets) == set(ids)
-    assert win.suggestions_head.head.text() == "SUGGESTIONS  ·  2"
-    assert "briefing by gemma4:26b" in win.meta_label.text()
-    assert win.chat.isVisible()
-    for w in (win.timeline, win.grid_chart, win.phase_chart, *win.budget_charts,
-              *win.window_charts):
-        assert not w.grab().isNull(), type(w).__name__
-        assert w.hits or w is win.phase_chart, type(w).__name__  # tooltips (no issues seeded)
+    # the briefing floats over the graph
+    assert win.hud.headline.text() == "Core demo due Oct 18, 0 of 9 closed"
+    assert [r.sentence.uncertain for r in win.hud.rows] == [False, True]
+    assert "unconfirmed" in win.hud.rows[1].text_label.text()
+    assert win.hud.isVisible() and win.hud.expanded
+    # graph: core, the milestone, the two cards
+    g = win.graph.graph
+    assert g.node("jarvis") and g.node("ms:1")
+    assert {n.card_id for n in g.nodes if n.kind == "card"} == set(ids)
+    assert "nodes" in win.counts.text() and "links" in win.counts.text()
+    # columns
+    assert "suggestions" in win.vitals.values and win.vitals.values["suggestions"].text() == "2"
+    assert len(win.milestones.rows) == 1
+    assert win.pulse.bars.counts and "events" in win.pulse.caption.text()
+    assert win.stream.rows and "new suggestion" in " ".join(r.item.text for r in win.stream.rows)
+    assert "briefing by gemma4:26b" in win.status_text.text()
+    assert win.right.isVisible() and not win.chat.isVisible()  # chat starts closed
+    assert win.state_pill.text() == "idle"
+    for w in (win.graph, win.pulse.bars):
+        assert not w.grab().isNull()
 
 
 def test_window_without_hardware_says_why(app, tmp_path):
     cfg = _cfg(tmp_path, hardware=False)
     conn = db.connect(cfg.db_path)
     win = MainWindow(cfg, conn, auto_refresh=False, watch=False)
-    assert win.budget_charts == []
-    assert "No hardware.yaml" in win.power_widgets[0].text()
-    assert win.empty_label.text() == EMPTY_CARDS
+    texts = [win.power.body.itemAt(i).widget().text() for i in range(win.power.body.count())
+             if win.power.body.itemAt(i).widget()]
+    assert any("hardware.yaml" in t.lower() for t in texts)
+    assert win.hud.headline.text() == "No briefing yet"
     win.close()
     conn.close()
 
 
-def _click(widget):
-    QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
-    QApplication.instance().processEvents()
+def _card_node(win, card_id):
+    return next(n.id for n in win.graph.graph.nodes if n.card_id == card_id)
 
 
-def test_row_click_opens_peek_and_esc_closes_it(setup):
+def test_hover_inspects_click_locks_esc_releases(setup, app):
     win, conn, ids = setup
-    row = win.card_widgets[ids[1]]
-    _click(row)
-    assert win.peek.isVisible() and win.peek.row.id == ids[1]
-    assert win.peek.title.text() == row.card.title
-    assert win.peek.prompt.toPlainText() == row.card.claude_prompt
-    assert row.property("selected") == "true"
     from PySide6.QtGui import QShortcut
 
+    nid = _card_node(win, ids[1])
+    pt = win.graph.screen_pos(nid)
+    assert win.graph.node_at(pt.x(), pt.y()) == nid
+    QTest.mouseMove(win.graph, pt.toPoint())
+    app.processEvents()
+    assert win.inspector.node is not None and win.inspector.node.id == nid
+    assert win.inspector.card is not None and win.inspector.card.id == ids[1]
+    QTest.mouseClick(win.graph, Qt.MouseButton.LeftButton, pos=pt.toPoint())
+    app.processEvents()
+    assert win.graph.lock_id == nid and "locked" in win.inspector.hint.text()
     esc = next(s for s in win.findChildren(QShortcut) if s.key().toString() == "Esc")
     esc.activated.emit()
-    QApplication.instance().processEvents()
-    assert not win.peek.isVisible()
+    assert win.graph.lock_id is None
     assert win.isVisible()  # Esc never closes the window
-    assert row.property("selected") == "false"
-    esc.activated.emit()  # nothing open: Esc does nothing
-    assert win.isVisible()
 
 
-def test_done_in_peek_writes_db_and_removes_row(setup, app):
+def test_done_from_inspector_writes_db_and_drops_node(setup, app):
     win, conn, ids = setup
-    _click(win.card_widgets[ids[0]])
-    win.peek.done_btn.click()
+    win.select_node(_card_node(win, ids[0]))
+    assert win.inspector.card.id == ids[0]
+    win.inspector.done.emit(win.inspector.card)
     app.processEvents()
     assert cards.get_card(conn, ids[0]).status == "done"
-    assert ids[0] not in win.card_widgets
-    assert not win.peek.isVisible()
     assert "Marked done" in win.status_label.text()
-    win.reload()  # a later DB-driven reload agrees
-    assert set(win.card_widgets) == {ids[1]}
+    win.reload()
+    assert {n.card_id for n in win.graph.graph.nodes if n.kind == "card"} == {ids[1]}
 
 
 def test_not_useful_records_reason(setup, app):
     win, conn, ids = setup
-    _click(win.card_widgets[ids[1]])
-    win.peek.feedback_actions["vague"].trigger()
+    win.select_node(_card_node(win, ids[1]))
+    win.inspector.feedback_actions["vague"].trigger()
     app.processEvents()
     c = cards.get_card(conn, ids[1])
     assert (c.status, c.feedback) == ("done", "vague")
-    assert ids[1] not in win.card_widgets
 
 
-def test_last_card_gone_shows_empty_state(setup, app):
+def test_copy_prompt_sets_clipboard(setup, app):
     win, conn, ids = setup
-    for cid in ids:
-        win.open_peek(win.card_widgets[cid].row)
-        win.peek.done_btn.click()
+    win.select_node(_card_node(win, ids[0]))
+    win.inspector.copy_btn.click()
     app.processEvents()
-    assert win.card_widgets == {}
-    assert win.empty_label.text() == EMPTY_CARDS
-
-
-def test_copy_buttons_set_clipboard(setup, app):
-    win, conn, ids = setup
-    w = win.card_widgets[ids[0]]
-    w.copy_btn.click()  # the row's own button copies without opening the peek
-    app.processEvents()
-    assert QGuiApplication.clipboard().text() == w.card.claude_prompt
-    assert w.copy_btn.text() == "Copied" and not win.peek.isVisible()
-    w._unflash()
-    assert w.copy_btn.text() == "Copy"
-    QGuiApplication.clipboard().setText("")
-    win.open_peek(win.card_widgets[ids[1]].row)
-    win.peek.copy_btn.click()
-    assert QGuiApplication.clipboard().text() == win.card_widgets[ids[1]].card.claude_prompt
-    assert "Copied" in win.peek.copy_btn.text()
+    assert QGuiApplication.clipboard().text() == cards.get_card(conn, ids[0]).claude_prompt
+    assert "copied" in win.inspector.copy_btn.text()
     assert "Copied the prompt" in win.status_label.text()
+    win.inspector._unflash()
+    assert win.inspector.copy_btn.text() == "copy prompt"
+
+
+def test_filters_hide_kinds_and_stream_click_selects(setup, app):
+    win, conn, ids = setup
+    win.filter_buttons["card"].setChecked(False)
+    assert "card" in win.graph.hidden_kinds
+    nid = _card_node(win, ids[0])
+    pt = win.graph.screen_pos(nid)
+    assert win.graph.node_at(pt.x(), pt.y()) != nid
+    row = next(r for r in win.stream.rows if r.item.node_id == nid)
+    row.clicked.emit(nid)  # a stream entry shows its node (and un-hides its kind)
+    assert win.filter_buttons["card"].isChecked() and win.graph.lock_id == nid
+
+
+def test_chat_answer_lights_up_cited_nodes(setup, app):
+    win, conn, ids = setup
+    from jarvis.chat import Answer, Source
+
+    a = Answer(text="x", sources=[], unverified_numbers=[], notes=[], model="m", duration=1,
+               cited_sources=[Source(f"card:{ids[0]}", "c", None), Source("#999", "x", None)])
+    win._on_answer(a)
+    assert win.graph.highlight == {f"card:{ids[0]}"}  # unknown refs are ignored
+    assert ref_to_node("#7") == "issue:7" and ref_to_node("commit:02fb2d2abc") == \
+        "commit:02fb2d2" and ref_to_node("fact:x") is None
 
 
 # ---------------------------------------------------------------- chat
@@ -267,13 +276,17 @@ def test_chat_toggle_and_shortcuts(setup, app):
     from PySide6.QtGui import QShortcut
 
     keys = {s.key().toString() for s in win.findChildren(QShortcut)}
-    assert {"Ctrl+R", "F5", "Ctrl+Q", "Esc", "Ctrl+K", "Ctrl+J"} <= keys
+    assert {"Ctrl+R", "F5", "Ctrl+Q", "Esc", "Ctrl+K", "Ctrl+J", "Ctrl+B"} <= keys
     assert QApplication.instance().desktopFileName() == "jarvis"
-    assert Qt.ScrollBarPolicy.ScrollBarAlwaysOff == win.scroll.horizontalScrollBarPolicy()
     win.chat_btn.click()
-    assert not win.chat.isVisible()
+    assert win.chat.isVisible() and not win.right.isVisible()  # the chat takes the column
+    win.chat_btn.click()
+    assert not win.chat.isVisible() and win.right.isVisible()
     win.focus_chat()  # Ctrl+K opens it again
     assert win.chat.isVisible()
+    esc = next(s for s in win.findChildren(QShortcut) if s.key().toString() == "Esc")
+    esc.activated.emit()  # nothing locked, no voice: Esc closes the chat
+    assert not win.chat.isVisible()
 
 
 def test_real_ask_is_wired_with_session(app, tmp_path, monkeypatch):
@@ -314,14 +327,15 @@ def test_refresh_runs_in_background_and_reloads(app, tmp_path):
                                cards_new=1, cards_resolved=0, notes=[])
 
     win = MainWindow(cfg, conn, auto_refresh=False, watch=False, refresh_fn=fake_refresh)
-    assert win.briefing_view.data is None and win.card_widgets == {}
+    assert win.hud.data is None and win.graph.graph.count("card") == 0
     win.refresh()
     assert win.refreshing and not win.refresh_btn.isEnabled()
+    assert win.state_pill.text() == "syncing"
     win.wait_for_refresh()
     assert calls == [True]
     assert not win.refreshing and win.refresh_btn.isEnabled()
-    assert win.briefing_view.data is not None
-    assert len(win.card_widgets) == 1
+    assert win.hud.data is not None
+    assert win.graph.graph.count("card") == 1
     assert win.status_label.text() == "Ollama unavailable, showing template briefing"
     win.close()
     conn.close()
@@ -371,22 +385,14 @@ def test_header_shows_watch_heartbeat(app, tmp_path):
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
     win = MainWindow(cfg, conn, auto_refresh=False, watch=False)
-    assert not win.watch_label.isVisibleTo(win)  # never watched: nothing shown
+    assert win.pulse_text.text() == "not watching" and win.state_pill.text() == "idle"
     tick_at = (datetime.now(UTC) - timedelta(minutes=2)).isoformat(timespec="seconds")
     db.update_daemon_state(conn, pid=1234, interval_s=180, last_tick_at=tick_at)
     win.reload()
-    assert win.watch_label.text() == "watching · checked 2 min ago"
-    assert win.watch_label.isVisibleTo(win) and win.watch_dot.isVisibleTo(win)
+    assert win.pulse_text.text() == "watching · checked 2 min ago"
+    assert win.state_pill.text() == "watching" and win.watch_dot.breathing
     db.update_daemon_state(conn, pid=None)  # daemon stopped
     win.reload()
-    assert win.watch_label.text() == "not watching"
+    assert win.pulse_text.text() == "not watching"
     win.close()
     conn.close()
-
-
-def test_dark_theme_switch_rebuilds(setup, app):
-    win, _, ids = setup
-    win.apply_scheme("dark")
-    assert win.tokens.name == "dark" and win.timeline.tokens.name == "dark"
-    assert set(win.card_widgets) == set(ids)
-    win.apply_scheme("light")

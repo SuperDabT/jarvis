@@ -1,25 +1,21 @@
-"""Colour tokens, fonts and the stylesheet: the visual identity of tal.dev.
+"""Colour tokens, fonts and the stylesheet: Jarvis's "project brain" look.
 
-The portfolio site is a two-colour system: a deep racing green and a warm cream
-that swap roles between modes. Dark mode is cream ink on green; light mode is
-green ink on cream paper. Every surface, hairline, muted text, tag and chart
-ramp here is a tint or shade of that one pair (``mix(bg, ink, k)``), so the UI
-reads as the duo rather than a palette. One third colour, the terracotta /
-brick ``signal``, is kept for live data only (today, the watching dot, the
-listening orb, failing checks, new arrivals) and never for clickable things.
+Dark only. A charcoal blue base (#202833) with pearl text (#EAE0C8); panels are
+the charcoal lifted a little towards the pearl. One neon mint (#7CF29A) marks
+everything live: graph nodes with recent activity, status pills, sparklines,
+the orb while it listens or speaks, new arrivals, focus. A muted red is kept
+for genuinely failing checks only.
 
-Type follows the site's voices: Archivo condensed for display (page title,
-numbers), IBM Plex Mono for small uppercase labels, Newsreader for reading
-text (the briefing), IBM Plex Sans for the interface and Inter for buttons.
-The fonts ship in ``gui/fonts`` (SIL OFL, licences beside them) and are
-registered at startup; any that fail to load fall back to system fonts.
+Type: JetBrains Mono for the cockpit (labels, numbers, the graph, the stream,
+pills, the ticker); Adwaita Sans (Inter's design, every weight, installed
+with the desktop) for reading (the briefing, chat answers).
+Labels are lower case: the look is a terminal, not a poster.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPalette
 
 # Tag roles (gui/data.py maps finding statuses and card types onto these).
@@ -38,125 +34,102 @@ def mix(a: str, b: str, k: float) -> str:
 @dataclass(frozen=True)
 class Tokens:
     name: str
-    bg: str  # page background (the base colour of the pair)
-    ink: str  # the other colour of the pair: accents, marks, rings
-    side: str  # chat panel / peek background
+    bg: str  # page background (charcoal)
+    ink: str  # the pearl: marks, rings, primary buttons
+    side: str  # side columns / chat panel background
     text: str
     muted: str  # secondary text
     faint: str  # tertiary text (axis labels, hints)
     border: str  # hairlines
     border_strong: str  # inputs
     btn_line: str  # outline buttons
-    fill: str  # cards: callout, KPI tiles
+    fill: str  # panels
     fill2: str  # chart tracks, user bubble
-    inset: str  # code / prompt boxes (below the cards)
+    inset: str  # code / prompt boxes, the composer
     hover: str  # hovered ghost buttons
-    accent: str  # primary buttons (the ink)
+    accent: str  # primary buttons (the pearl)
     accent_hover: str
     on_accent: str
-    signal: str  # live data only, never clickable
-    signal_text: str  # signal as readable text on signal_soft
-    signal_soft: str
+    signal: str  # the mint: live data only
+    signal_text: str  # mint as readable text
+    signal_soft: str  # mint wash behind live pills
     unsure: str  # "unconfirmed" text
     unsure_bg: str
     warn: str  # status-line problems
-    red: str  # today line, limit violations (the signal)
-    green: str  # progress / closed (the ink)
-    amber: str  # "may be done" hatch (a mid tint of the ink)
+    red: str  # failing checks, limit violations
+    green: str  # progress / closed (mint)
+    amber: str  # "may be done" hatch (a mid tint of the pearl)
     shadow: str
-    grid: tuple[str, str, str, str, str]  # contribution grid levels 0..4
-    series: tuple[str, ...]  # categorical order: lightness steps of the ink
+    grid: tuple[str, str, str, str, str]  # activity levels 0..4 (towards mint)
+    series: tuple[str, ...]  # categorical order
     tags: dict[str, tuple[str, str, str]] = field(default_factory=dict)  # bg, fg, border
-    orb_core: str = "#fff3d6"
-    orb_ring: str = "#efe3c6"
-    watermark: float = 0.08  # alpha of the oversized section word
+    orb_core: str = "#fff6e2"
+    orb_ring: str = "#eae0c8"
+    watermark: float = 0.06
+    panel: str = "#262f3b"  # cockpit panels
 
     def tag(self, name: str) -> tuple[str, str, str]:
         return self.tags.get(name) or self.tags["open"]
 
     def tint(self, k: float) -> str:
-        """The ink over the page at ``k`` (0..1)."""
+        """The pearl over the charcoal at ``k`` (0..1)."""
         return mix(self.bg, self.ink, k)
 
 
-def _tokens(name: str, *, bg: str, ink: str, text: str, muted: str, faint: str, side: str,
-            fill: str, fill2: str, inset: str, border: str, border_strong: str,
-            btn_line: str, hover: str, accent_hover: str, on_accent: str, signal: str,
-            signal_text: str, orb_core: str, orb_ring: str, watermark: float,
-            series_k: tuple[float, ...], grid_k: tuple[float, ...], shadow: str) -> Tokens:
-    t = lambda k: mix(bg, ink, k)  # noqa: E731 - a tint of the pair
-    soft = mix(bg, signal, 0.16)
+BG = "#202833"
+PEARL = "#eae0c8"
+MINT = "#7cf29a"
+RED = "#e5787a"
+
+
+def _dark() -> Tokens:
+    t = lambda k: mix(BG, PEARL, k)  # noqa: E731 - a tint of the pair
+    m = lambda k: mix(BG, MINT, k)  # noqa: E731 - towards the mint
     return Tokens(
-        name=name, bg=bg, ink=ink, side=side, text=text, muted=muted, faint=faint,
-        border=border, border_strong=border_strong, btn_line=btn_line, fill=fill,
-        fill2=fill2, inset=inset, hover=hover, accent=ink, accent_hover=accent_hover,
-        on_accent=on_accent, signal=signal, signal_text=signal_text, signal_soft=soft,
-        unsure=mix(bg, text, 0.86), unsure_bg=t(0.16), warn=signal_text, red=signal,
-        green=ink, amber=t(0.55), shadow=shadow,
-        grid=tuple(t(k) for k in grid_k),  # type: ignore[arg-type]
-        series=tuple(t(k) for k in series_k),
+        name="dark", bg=BG, ink=PEARL, side="#1c232d", text=PEARL, muted=t(0.74),
+        faint=t(0.5), border=t(0.11), border_strong=t(0.18), btn_line=t(0.3),
+        fill=t(0.045), fill2=t(0.1), inset="#1a2029", hover=t(0.08), accent=PEARL,
+        accent_hover="#fff6e2", on_accent=BG, signal=MINT, signal_text=MINT,
+        signal_soft=m(0.14), unsure=t(0.72), unsure_bg=t(0.1), warn=MINT, red=RED,
+        green=MINT, amber=t(0.45), shadow="#0b0e13",
+        grid=(t(0.07), m(0.3), m(0.5), m(0.72), MINT),
+        series=(PEARL, MINT, t(0.55), m(0.55)),
         tags={
-            "open": (t(0.08), muted, "none"),
-            "ok": (t(0.13), text, "none"),
-            "electrical": (t(0.13), text, "none"),
-            "research": ("transparent", text, f"1px solid {t(0.38)}"),
-            "warning": (t(0.24), text, f"1px solid {t(0.6)}"),
-            "needs": ("transparent", muted, f"1px dashed {t(0.5)}"),
-            "new": ("transparent", signal_text, f"1px solid {signal}"),
-            "fail": (soft, signal_text, f"1px solid {mix(bg, signal, 0.5)}"),
+            "open": (t(0.08), t(0.74), "none"),
+            "ok": (m(0.12), MINT, "none"),
+            "electrical": (t(0.1), PEARL, "none"),
+            "research": ("transparent", PEARL, f"1px solid {t(0.3)}"),
+            "warning": (t(0.14), PEARL, f"1px solid {t(0.45)}"),
+            "needs": ("transparent", t(0.74), f"1px dashed {t(0.4)}"),
+            "new": ("transparent", MINT, f"1px solid {m(0.7)}"),
+            "fail": (mix(BG, RED, 0.16), RED, f"1px solid {mix(BG, RED, 0.5)}"),
         },
-        orb_core=orb_core, orb_ring=orb_ring, watermark=watermark,
+        panel=t(0.045),
     )
 
 
-# Dark: the site's primary look, cream ink on racing green.
-DARK = _tokens(
-    "dark", bg="#00160e", ink="#efe3c6", text="#fff7e6", muted="#cdd0bf", faint="#8fa294",
-    side="#031b12", fill="#072419", fill2="#113628", inset="#010d08", border="#16392b",
-    border_strong="#24493a", btn_line="#4a6a5a", hover="#0c2a1f", accent_hover="#fff7e6",
-    on_accent="#00160e", signal="#d27a5a", signal_text="#e3906f", orb_core="#fff3d6",
-    orb_ring="#efe3c6", watermark=0.085, series_k=(0.96, 0.72, 0.52, 0.38),
-    grid_k=(0.07, 0.26, 0.46, 0.70, 0.96), shadow="#000000",
-)
-
-# Light: the same pair inverted, green ink on cream paper.
-LIGHT = _tokens(
-    "light", bg="#fff7e6", ink="#00311e", text="#00311e", muted="#4a5d53", faint="#5f6f65",
-    side="#faf0d9", fill="#faf0d9", fill2="#efe0c0", inset="#f1e2c1", border="#e4d6ba",
-    border_strong="#d8c9a8", btn_line="#978a76", hover="#f5e9cd", accent_hover="#204e3a",
-    on_accent="#fffaf0", signal="#9c3320", signal_text="#9c3320", orb_core="#1d5a3f",
-    orb_ring="#00311e", watermark=0.07, series_k=(0.96, 0.74, 0.56, 0.42),
-    grid_k=(0.08, 0.28, 0.48, 0.70, 0.95), shadow="#3c2d14",
-)
+DARK = _dark()
+LIGHT = DARK  # dark only; kept so older imports keep working
 
 BODY_PX = 14
 SMALL_PX = 12
-TITLE_PX = 46
+TITLE_PX = 22
 
 # ---------------------------------------------------------------- fonts
 
 FONT_DIR = Path(__file__).with_name("fonts")
-FONT_FILES = {  # file -> voice
-    "archivo.woff2": "display",
-    "ibm-plex-mono-500.woff2": "mono",
-    "ibm-plex-sans-400.woff2": "sans",
-    "ibm-plex-sans-500.woff2": "sans",
-    "newsreader.woff2": "serif",
-    "inter.woff2": "button",
-}
-# Fallbacks when a bundled font cannot be loaded (Qt without WOFF2 support).
-SANS_FALLBACK = ("IBM Plex Sans", "Inter", "Inter Variable", "Adwaita Sans", "Cantarell",
-                 "Noto Sans")
-MONO_FALLBACK = ("IBM Plex Mono", "JetBrains Mono", "Adwaita Mono", "DejaVu Sans Mono",
+FONT_FILES: dict[str, str] = {}  # bundled file -> voice (none: system fonts suffice)
+SANS_FALLBACK = ("Adwaita Sans", "Inter", "Inter Variable", "Noto Sans", "Cantarell")
+MONO_FALLBACK = ("JetBrains Mono", "JetBrainsMono Nerd Font", "JetBrainsMono NF",
+                 "iA Writer Mono S", "Adwaita Mono", "Noto Sans Mono", "DejaVu Sans Mono",
                  "Liberation Mono")
-SERIF_FALLBACK = ("Newsreader", "Noto Serif", "DejaVu Serif", "Liberation Serif")
 
 _families: dict[str, str] | None = None
 
 
 def load_fonts() -> dict[str, str]:
-    """Register the bundled fonts (once) and return the family per voice:
-    display, mono, sans, serif, button. Missing ones fall back to system fonts."""
+    """Find the reading sans and the mono font (once). Returns the family per
+    voice: sans, display, mono, serif, button (display/serif/button = sans)."""
     global _families
     if _families is not None:
         return _families
@@ -178,11 +151,8 @@ def load_fonts() -> dict[str, str]:
 
     sans = found.get("sans") or first(SANS_FALLBACK, QGuiApplication.font().family())
     _families = {
-        "sans": sans,
-        "display": found.get("display") or sans,
-        "mono": found.get("mono") or first(MONO_FALLBACK, "monospace"),
-        "serif": found.get("serif") or first(SERIF_FALLBACK, sans),
-        "button": found.get("button") or sans,
+        "sans": sans, "display": sans, "serif": sans, "button": sans,
+        "mono": first(MONO_FALLBACK, "monospace"),
     }
     _families["bundled"] = ",".join(sorted(found))  # what actually loaded (for reports)
     return _families
@@ -192,44 +162,33 @@ def family(voice: str) -> str:
     return load_fonts()[voice]
 
 
-def _axes(f: QFont, weight: int, width: int) -> None:
-    """Variable-font axes where Qt supports them (6.7+); else plain weight/stretch."""
-    try:
-        f.setVariableAxis(QFont.Tag("wght"), float(weight))
-        f.setVariableAxis(QFont.Tag("wdth"), float(width))
-    except (AttributeError, TypeError):
-        f.setWeight(QFont.Weight(min(900, max(100, weight))))
-        f.setStretch(width)
-
-
-def display_font(px: int, weight: int = 800, width: int = 82, caps: bool = False,
+def display_font(px: int, weight: int = 650, width: int = 100, caps: bool = False,
                  spacing_em: float = -0.01) -> QFont:
-    """Archivo: condensed, heavy (the site's headings and stat numbers)."""
+    """The sans, semibold: headlines and big numbers. Never all caps (``caps`` and
+    ``width`` are accepted for older callers and ignored)."""
     f = QFont(family("display"))
     f.setPixelSize(px)
-    _axes(f, weight, width)
+    f.setWeight(QFont.Weight(min(700, max(100, weight))))
     f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-    if caps:
-        f.setCapitalization(QFont.Capitalization.AllUppercase)
     if spacing_em:
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, px * spacing_em)
     return f
 
 
-def mono_font(px: int = 11, caps: bool = True, spacing_em: float = 0.12) -> QFont:
-    """IBM Plex Mono: the site's small uppercase, letter-spaced labels."""
+def mono_font(px: int = 11, caps: bool = False, spacing_em: float = 0.0,
+              weight: int = 400) -> QFont:
+    """JetBrains Mono: the cockpit voice. Lower case (``caps`` is ignored)."""
     f = QFont(family("mono"))
     f.setPixelSize(px)
+    f.setWeight(QFont.Weight(weight))
     f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-    if caps:
-        f.setCapitalization(QFont.Capitalization.AllUppercase)
     if spacing_em:
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, px * spacing_em)
     return f
 
 
 def pick_font() -> QFont:
-    """The interface font: IBM Plex Sans (bundled), else a system sans."""
+    """The reading font (the sans)."""
     font = QFont(QGuiApplication.font())
     font.setFamily(family("sans"))
     font.setPixelSize(BODY_PX)
@@ -245,20 +204,11 @@ def mono_family() -> str:
 
 
 def system_scheme() -> str:
-    """"dark" or "light" from Qt 6.5+ style hints; dark (the site's primary
-    look) when the system does not say."""
-    app = QGuiApplication.instance()
-    if app is None:
-        return "dark"
-    try:
-        scheme = app.styleHints().colorScheme()
-    except AttributeError:  # Qt < 6.5
-        return "dark"
-    return "light" if scheme == Qt.ColorScheme.Light else "dark"
+    return "dark"
 
 
 def tokens_for(scheme: str | None = None) -> Tokens:
-    return DARK if (scheme or system_scheme()) == "dark" else LIGHT
+    return DARK
 
 
 def palette(t: Tokens) -> QPalette:
@@ -271,12 +221,12 @@ def palette(t: Tokens) -> QPalette:
         QPalette.ColorRole.Text: t.text,
         QPalette.ColorRole.Button: t.bg,
         QPalette.ColorRole.ButtonText: t.text,
-        QPalette.ColorRole.Highlight: t.tint(0.35),
+        QPalette.ColorRole.Highlight: t.tint(0.3),
         QPalette.ColorRole.HighlightedText: t.text,
-        QPalette.ColorRole.Link: t.muted,
-        QPalette.ColorRole.LinkVisited: t.muted,
-        QPalette.ColorRole.ToolTipBase: t.ink,  # tooltips invert the pair
-        QPalette.ColorRole.ToolTipText: t.bg,
+        QPalette.ColorRole.Link: t.signal,
+        QPalette.ColorRole.LinkVisited: t.signal,
+        QPalette.ColorRole.ToolTipBase: t.inset,
+        QPalette.ColorRole.ToolTipText: t.text,
         QPalette.ColorRole.PlaceholderText: t.faint,
         QPalette.ColorRole.Mid: t.border,
     }
@@ -287,124 +237,109 @@ def palette(t: Tokens) -> QPalette:
 
 def stylesheet(t: Tokens) -> str:
     fam = load_fonts()
-    sans, mono, serif, btn = (f'"{fam[k]}"' for k in ("sans", "mono", "serif", "button"))
-    ring = t.tint(0.35)  # the cream (or green) hover ring
-    sel = t.tint(0.3)
+    sans, mono = f'"{fam["sans"]}"', f'"{fam["mono"]}"'
+    sel = t.tint(0.28)
+    live_line = mix(t.bg, t.signal, 0.6)
     return f"""
 * {{ outline: none; }}
-QMainWindow, #page, #dash {{ background: {t.bg}; }}
+QMainWindow, #page {{ background: {t.bg}; }}
 QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
 QLabel {{ color: {t.text}; background: transparent; }}
 QToolTip {{
-    background: {t.ink}; color: {t.bg}; border: none; border-radius: 6px;
-    padding: 5px 8px; font-size: {SMALL_PX}px;
+    background: {t.inset}; color: {t.text}; border: 1px solid {t.border_strong};
+    border-radius: 6px; padding: 5px 8px; font-size: {SMALL_PX}px;
 }}
 
-/* top bar: the site's nav */
-#topBar {{ background: {t.bg}; border-bottom: 1px solid {t.border}; }}
-#crumb {{ color: {t.muted}; }}
-#crumbStrong {{ color: {t.muted}; }}
+/* cockpit chrome */
+#topBar, #statusRow, #ticker {{ background: {t.bg}; }}
+#topBar {{ border-bottom: 1px solid {t.border}; }}
+#ticker {{ border-top: 1px solid {t.border}; }}
 #logo {{ color: {t.text}; }}
+#crumb {{ color: {t.muted}; }}
+#clock, #pulseText, #statusText, #tickerHint {{ color: {t.faint}; }}
+#tickerText {{ color: {t.muted}; }}
+#tickerText[level="warn"] {{ color: {t.red}; }}
+#tickerText[level="ok"] {{ color: {t.signal}; }}
+#pill {{
+    border-radius: 9px; padding: 1px 8px; color: {t.muted};
+    border: 1px solid {t.border_strong}; background: transparent;
+}}
+#pill[live="true"] {{ color: {t.signal}; border-color: {live_line}; background: {t.signal_soft}; }}
+#pill[level="fail"] {{ color: {t.red}; border-color: {mix(t.bg, t.red, 0.5)}; }}
 
-/* page head */
-#pageTitle {{ color: {t.text}; }}
-#meta {{ color: {t.muted}; }}
-#metaSep {{ color: {t.btn_line}; }}
-
-/* section headers: "02 MILESTONES" in mono, a short rule under it */
-#sectionNum {{ color: {t.faint}; }}
-#sectionHead {{ color: {t.muted}; }}
-#sectionRule {{ background: {t.tint(0.4)}; border: none; border-radius: 1px; }}
-#sectionHint {{ color: {t.faint}; font-size: 12px; }}
-#subHead {{ color: {t.muted}; }}
+/* panels */
+#panel {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 8px; }}
+#panel[live="true"] {{ border-color: {mix(t.bg, t.signal, 0.45)}; }}
+#panelHead {{ color: {t.muted}; }}
+#panelHint {{ color: {t.faint}; }}
+#vKey {{ color: {t.faint}; }}
+#vVal {{ color: {t.text}; }}
+#vVal[live="true"] {{ color: {t.signal}; }}
+#vVal[level="fail"] {{ color: {t.red}; }}
+#vNote {{ color: {t.faint}; }}
 #hairline {{ background: {t.border}; border: none; }}
 
-/* briefing callout: a site card */
-#callout {{ background: {t.fill}; border: 1px solid {t.border}; border-radius: 14px; }}
+/* briefing HUD */
+#hud {{
+    background: {mix(t.bg, t.inset, 0.6)}; border: 1px solid {t.border_strong};
+    border-radius: 10px;
+}}
+#hudHead {{ color: {t.muted}; }}
 #headline {{ color: {t.text}; }}
-#sentence {{ font-family: {serif}; font-size: 17px; color: {t.text}; }}
-#bullet {{ font-family: {serif}; color: {t.faint}; font-size: 17px; }}
-#evidence {{ color: {t.faint}; font-size: {SMALL_PX}px; }}
-#emptyText {{ color: {t.muted}; font-size: {BODY_PX}px; }}
-#calloutFoot {{ color: {t.faint}; font-size: {SMALL_PX}px; }}
+#sentence {{ font-family: {sans}; font-size: 13px; font-weight: 400; color: {t.text}; }}
+#bullet {{ color: {t.signal}; font-size: 13px; }}
+#evidence {{ color: {t.faint}; font-size: 11px; }}
+#emptyText {{ color: {t.muted}; font-size: 13px; }}
+#unsureTag {{ color: {t.unsure}; background: {t.unsure_bg}; }}
 
-/* KPI tiles: the site's stat cells */
-#kpi {{ background: {t.fill}; border: 1px solid {t.border}; border-radius: 14px; }}
-#kpi:hover {{ border-color: {ring}; }}
-#kpiLabel {{ color: {t.faint}; }}
-#kpiValue {{ color: {t.text}; }}
-#kpiValue[tone="bad"] {{ color: {t.signal_text}; }}
-#kpiValue[tone="warn"] {{ color: {t.text}; }}
-#kpiValue[tone="good"] {{ color: {t.text}; }}
-#kpiValue[tone="muted"] {{ color: {t.faint}; }}
-#kpiSub {{ color: {t.muted}; font-size: 12px; }}
-#kpiSub[unsure="true"] {{ color: {t.unsure}; font-style: italic; }}
+/* inspector + stream */
+#inspTitle {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
+#inspText {{ color: {t.muted}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
+#inspKind {{ color: {t.signal}; }}
+#promptBox {{
+    background: {t.inset}; color: {t.muted}; border: 1px solid {t.border};
+    border-radius: 8px; padding: 8px 10px; font-size: 11px;
+    selection-background-color: {sel};
+}}
+#streamText {{ color: {t.text}; }}
+#streamMeta {{ color: {t.faint}; }}
+#tag {{ border-radius: 7px; padding: 0px 7px; font-size: 11px; font-family: {mono}; }}
 
-/* chart blocks */
-#caption {{ color: {t.muted}; font-size: 12px; }}
-#railHead {{ color: {t.text}; }}
-#railSub {{ color: {t.faint}; }}
-
-/* suggestions table */
-#table {{ background: transparent; }}
-#tableHead {{ border-top: 1px solid {t.border}; border-bottom: 1px solid {t.border}; }}
-#colHead {{ color: {t.faint}; }}
-#row {{ border-bottom: 1px solid {t.border}; background: transparent; }}
-/* row hover / selected ring is painted by TableRow (animated) */
-#rowTitle {{ color: {t.text}; font-size: {BODY_PX}px; }}
-#rowWhy {{ color: {t.faint}; font-size: 12px; }}
-#tag {{ border-radius: 8px; padding: 1px 8px; font-size: 12px; }}
-
-/* buttons: outline pills (secondary), cream / green pills (primary) */
 QPushButton {{
     color: {t.text}; background: transparent; border: 1px solid {t.btn_line};
-    border-radius: 14px; padding: 6px 14px; font-family: {btn}; font-size: 13px;
-    font-weight: 600;
+    border-radius: 6px; padding: 4px 10px; font-family: {mono}; font-size: 12px;
 }}
 QPushButton:hover {{ border-color: {t.text}; }}
 QPushButton:pressed {{ background: {t.hover}; }}
 QPushButton:disabled {{ color: {t.faint}; border-color: {t.border_strong}; }}
 QPushButton::menu-indicator {{ width: 0; image: none; }}
-QPushButton#ghost {{
-    border: none; color: {t.muted}; padding: 6px 10px; font-weight: 600;
-}}
+QPushButton#ghost {{ border: none; color: {t.muted}; padding: 4px 8px; }}
 QPushButton#ghost:hover {{ background: {t.hover}; color: {t.text}; }}
-QPushButton#ghost[active="true"] {{ background: {t.hover}; color: {t.text}; }}
-QPushButton#primary {{
-    color: {t.on_accent}; background: {t.accent}; border: 1px solid {t.accent};
-}}
+QPushButton#ghost[active="true"] {{ background: {t.hover}; color: {t.signal}; }}
+QPushButton#primary {{ color: {t.on_accent}; background: {t.accent}; border: 1px solid {t.accent}; }}
 QPushButton#primary:hover {{ background: {t.accent_hover}; border-color: {t.accent_hover}; }}
-QPushButton#primary[flash="true"] {{
-    color: {t.text}; background: transparent; border-color: {t.text};
-}}
-QPushButton#rowCopy {{
-    border: 1px solid {t.btn_line}; color: {t.muted}; padding: 3px 8px; font-size: 12px;
-    border-radius: 10px; background: transparent;
-}}
-QPushButton#rowCopy:hover {{ color: {t.text}; border-color: {t.text}; }}
-QPushButton#rowCopy[flash="true"] {{ color: {t.on_accent}; background: {t.accent};
-    border-color: {t.accent}; }}
+QPushButton#primary[flash="true"] {{ color: {t.signal}; background: transparent; border-color: {t.signal}; }}
+QPushButton#filter {{ border: none; color: {t.faint}; padding: 2px 6px; font-size: 11px; }}
+QPushButton#filter:checked {{ color: {t.text}; }}
+QPushButton#filter:hover {{ color: {t.signal}; }}
 QPushButton#chip {{
-    border: 1px solid {t.btn_line}; border-radius: 16px; padding: 7px 14px;
-    color: {t.text}; background: transparent; font-size: 13px; text-align: left;
+    border: 1px solid {t.btn_line}; border-radius: 8px; padding: 6px 12px;
+    color: {t.text}; background: transparent; font-family: {sans}; font-size: 13px;
+    text-align: left;
 }}
-QPushButton#chip:hover {{ border-color: {t.text}; background: {t.hover}; }}
+QPushButton#chip:hover {{ border-color: {t.signal}; color: {t.signal}; }}
 QPushButton#srcChip {{
-    border: 1px solid {t.border}; border-radius: 8px; padding: 2px 8px;
-    font-family: {mono}; font-size: 11px; font-weight: 500; color: {t.muted};
-    background: {t.fill};
+    border: 1px solid {t.border_strong}; border-radius: 6px; padding: 1px 7px;
+    font-family: {mono}; font-size: 11px; color: {t.muted}; background: {t.fill};
 }}
-QPushButton#srcChip:hover {{ color: {t.text}; border-color: {ring}; }}
+QPushButton#srcChip:hover {{ color: {t.signal}; border-color: {live_line}; }}
 QPushButton#srcChip[more="true"] {{ background: transparent; border-style: dashed; }}
 QPushButton#thinkToggle {{
-    border: 1px solid {t.btn_line}; border-radius: 11px; padding: 3px 10px;
-    font-family: {mono}; font-size: 11px; font-weight: 600; color: {t.muted};
-    background: transparent;
+    border: 1px solid {t.btn_line}; border-radius: 9px; padding: 2px 9px;
+    font-family: {mono}; font-size: 11px; color: {t.muted}; background: transparent;
 }}
 QPushButton#thinkToggle:hover {{ color: {t.text}; border-color: {t.text}; }}
-QPushButton#thinkToggle:checked {{
-    color: {t.on_accent}; background: {t.accent}; border-color: {t.accent};
-}}
+QPushButton#thinkToggle:checked {{ color: {t.signal}; background: {t.signal_soft}; border-color: {live_line}; }}
 QPushButton#send {{
     border: none; border-radius: 14px; background: {t.accent}; color: {t.on_accent};
     font-size: 15px; font-weight: 700; padding: 0;
@@ -413,74 +348,54 @@ QPushButton#send:hover {{ background: {t.accent_hover}; }}
 QPushButton#send:disabled {{ background: {t.fill2}; color: {t.faint}; }}
 
 QMenu {{
-    background: {t.fill}; color: {t.text};
-    border: 1px solid {t.border_strong}; border-radius: 10px; padding: 4px;
+    background: {t.inset}; color: {t.text};
+    border: 1px solid {t.border_strong}; border-radius: 8px; padding: 4px;
+    font-family: {mono}; font-size: 12px;
 }}
-QMenu::item {{ padding: 6px 18px; border-radius: 6px; font-size: 13px; }}
-QMenu::item:selected {{ background: {t.hover}; }}
+QMenu::item {{ padding: 5px 16px; border-radius: 5px; }}
+QMenu::item:selected {{ background: {t.hover}; color: {t.signal}; }}
 QMenu::item:disabled {{ color: {t.faint}; }}
 QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
-
-/* peek drawer */
-#peek {{ background: {t.side}; border-left: 1px solid {t.border_strong}; }}
-#peekTitle {{ color: {t.text}; }}
-#propKey {{ color: {t.faint}; }}
-#propVal {{ color: {t.text}; font-size: 13px; }}
-#peekWhy {{ font-family: {serif}; color: {t.text}; font-size: 17px; }}
-#promptBox {{
-    background: {t.inset}; color: {t.muted}; border: 1px solid {t.border};
-    border-radius: 10px; padding: 10px 12px; font-size: 12px;
-    selection-background-color: {sel};
-}}
 
 /* chat panel */
 #chat {{ background: {t.side}; border-left: 1px solid {t.border}; }}
 #chatTitle {{ color: {t.text}; }}
 #chatSub {{ color: {t.faint}; }}
 #emptyTitle {{ color: {t.text}; }}
-#emptyHint {{ font-family: {serif}; color: {t.muted}; font-size: 15px; }}
-#userBubble {{ background: {t.fill2}; border-radius: 14px; }}
+#emptyHint {{ color: {t.muted}; font-size: 13px; font-weight: 400; }}
+#userBubble {{ background: {t.fill2}; border-radius: 10px; }}
 #userText {{ color: {t.text}; font-size: {BODY_PX}px; }}
-#botText {{ color: {t.text}; font-size: {BODY_PX}px; }}
-#botName {{ color: {t.muted}; }}
+#botText {{ color: {t.text}; font-size: {BODY_PX}px; font-weight: 400; }}
+#botName {{ color: {t.signal}; }}
 #botMeta {{ color: {t.faint}; }}
-#thinking {{ color: {t.muted}; font-size: 13px; }}
+#thinking {{ color: {t.muted}; font-family: {mono}; font-size: 12px; }}
 #botNote {{ color: {t.unsure}; font-size: 12px; font-style: italic; }}
 #botError {{ color: {t.muted}; font-size: 13px; font-style: italic; }}
-#composer {{
-    background: {t.inset}; border: 1px solid {t.border_strong}; border-radius: 14px;
-}}
-#composer[focus="true"] {{ border-color: {ring}; }}
+#composer {{ background: {t.inset}; border: 1px solid {t.border_strong}; border-radius: 10px; }}
+#composer[focus="true"] {{ border-color: {live_line}; }}
 #composerEdit {{
     background: transparent; border: none; color: {t.text}; font-size: {BODY_PX}px;
     selection-background-color: {sel};
 }}
-#composerHint {{ color: {t.faint}; font-size: 11px; }}
-#voiceCaption {{ color: {t.muted}; font-size: 12px; }}
+#composerHint {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
+#voiceCaption {{ color: {t.muted}; font-family: {mono}; font-size: 11px; }}
 #voiceNote {{ color: {t.faint}; font-size: 12px; font-style: italic; }}
 #voiceNote[level="error"] {{
-    color: {t.muted}; font-style: normal; background: {t.fill}; border-radius: 10px;
+    color: {t.muted}; font-style: normal; background: {t.fill}; border-radius: 8px;
     padding: 8px 10px;
 }}
 
-#statusBar {{ background: {t.bg}; border-top: 1px solid {t.border}; }}
-#status {{ color: {t.faint}; font-family: {mono}; font-size: 11px; font-weight: 500; }}
-#status[level="warn"] {{ color: {t.warn}; }}
-#status[level="ok"] {{ color: {t.muted}; }}
-
-QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: {t.border_strong}; border-radius: 3px; min-height: 30px; }}
 QScrollBar::handle:vertical:hover {{ background: {t.btn_line}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
-QPlainTextEdit QScrollBar:vertical {{ width: 8px; }}
-#unsureTag {{ color: {t.unsure}; background: {t.unsure_bg}; }}
 """
 
 
 def apply(app: QGuiApplication, scheme: str | None = None) -> Tokens:
-    """Apply palette + stylesheet for ``scheme`` (None = follow the system)."""
-    t = tokens_for(scheme)
+    """Apply palette + stylesheet (``scheme`` is ignored: dark only)."""
+    t = DARK
     load_fonts()
     app.setPalette(palette(t))
     if hasattr(app, "setStyleSheet"):

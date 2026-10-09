@@ -30,7 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="jarvis-window", description="The Jarvis window.")
     parser.add_argument("--no-refresh", action="store_true",
                         help="show cached data only; do not refresh on open")
-    parser.add_argument("--theme", choices=("system", "light", "dark"), default="system")
+    parser.add_argument("--theme", choices=("system", "light", "dark"), default="dark",
+                        help="ignored: Jarvis has one (dark) theme")
     parser.add_argument("--no-animations", action="store_true",
                         help="reduce motion: no animations (also JARVIS_REDUCE_MOTION=1)")
     args = parser.parse_args(argv)

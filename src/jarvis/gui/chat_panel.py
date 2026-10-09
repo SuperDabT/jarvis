@@ -930,7 +930,7 @@ class ChatPanel(QFrame):
 
             self.mic_btn.setToolTip(NO_PW_RECORD)
         foot.addWidget(self.composer)
-        foot.addWidget(_label("Enter to send · Shift+Enter for a new line · Ctrl+Space to talk",
+        foot.addWidget(_label("enter send · shift+enter new line · ctrl+space talk",
                               "composerHint"))
         outer.addLayout(foot)
 

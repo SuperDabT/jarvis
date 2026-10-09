@@ -20,8 +20,6 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget  # noqa: E402
 from jarvis import cards, db  # noqa: E402
 from jarvis.gui import motion, orb, theme  # noqa: E402
 from jarvis.gui.app import make_app  # noqa: E402
-from jarvis.gui.charts import PhaseBarsChart  # noqa: E402
-from jarvis.gui.data import PhaseBar, PhaseBars  # noqa: E402
 from jarvis.gui.window import MainWindow  # noqa: E402
 from test_gui_data import seed  # noqa: E402
 from test_gui_window import _cfg  # noqa: E402
@@ -50,14 +48,6 @@ def motion_off(app):
 def _pump(n: int = 3) -> None:
     for _ in range(n):
         QApplication.instance().processEvents()
-
-
-def _phase_data() -> PhaseBars:
-    bars = (PhaseBar("phase-1", 3, 2, (1, 2, 3)), PhaseBar("phase-2", 5, 0, (4, 5, 6, 7, 8)))
-    return PhaseBars(bars)
-
-
-# ---------------------------------------------------------------- switch and pure helpers
 
 
 def test_env_turns_motion_off(monkeypatch):
@@ -141,8 +131,10 @@ def test_motion_off_jumps_to_end_states(motion_off):
     done = []
     assert motion.collapse(w, on_done=lambda: done.append(1)) is None
     assert done == [1]  # removal happens right away
-    ch = PhaseBarsChart(theme.LIGHT)
-    ch.set_data(_phase_data(), animate=True)
+    from jarvis.gui.brain import PulseBars
+
+    ch = PulseBars(theme.DARK)
+    ch.set_data((1, 2, 3), animate=True)
     assert ch.progress == 1.0
     assert motion.created_count() == before and motion.live() == []
 
@@ -189,45 +181,43 @@ def test_fade_rise_ends_opaque_in_place(motion_on):
     parent.close()
 
 
-def test_chart_progress_animates_and_changes_the_paint(motion_on):
-    ch = PhaseBarsChart(theme.LIGHT)
-    ch.resize(500, 120)
-    ch.set_data(_phase_data(), animate=True)
+def test_pulse_progress_animates_and_changes_the_paint(motion_on):
+    from jarvis.gui.brain import PulseBars
+
+    ch = PulseBars(theme.DARK)
+    ch.resize(260, 46)
+    ch.set_data((0, 1, 3, 0, 2, 5, 1), animate=True)
     assert ch.progress == 0.0
     ch.show()
     _pump()
-    ch.set_progress(0.5)
+    ch.progress = 0.5
     half = ch.grab().toImage()
-    ch.set_progress(1.0)
+    ch.progress = 1.0
     full = ch.grab().toImage()
     assert half != full
-    ch.set_progress(0.0)
+    ch.progress = 0.0
     motion.finish_all()
     assert ch.progress == 1.0
     assert ch.grab().toImage() == full
     ch.close()
 
 
-def test_every_chart_paints_mid_animation(app, tmp_path, motion_off):
+def test_graph_paints_mid_reveal(app, tmp_path, motion_off):
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
     seed(conn)
     win = MainWindow(cfg, conn, auto_refresh=False, watch=False)
     win.show()
     _pump()
-    charts = [win.timeline, win.grid_chart, win.phase_chart, *win.budget_charts,
-              *win.window_charts]
-    with_marks = [win.timeline, *win.budget_charts, *win.window_charts]  # seed: no commits
-    for ch in charts:
-        full = ch.grab().toImage()
-        for p in (0.0, 0.3, 0.6):
-            ch.set_progress(p)
-            assert not ch.grab().isNull()
-        ch.set_progress(0.3)
-        if ch in with_marks:
-            assert ch.grab().toImage() != full, type(ch).__name__
-        ch.set_progress(1.0)
-        assert ch.grab().toImage() == full
+    g = win.graph
+    full = g.grab().toImage()
+    for p in (0.0, 0.3, 0.6):
+        g.progress = p
+        assert not g.grab().isNull()
+    g.progress = 0.3
+    assert g.grab().toImage() != full
+    g.progress = 1.0
+    assert g.grab().toImage() == full
     win.close()
     conn.close()
 
@@ -250,75 +240,49 @@ def test_animations_on_first_show_and_data_change_only(motion_on, tmp_path):
     before = motion.created_count()
     win, conn, ids = _window(tmp_path)
     assert motion.created_count() > before  # first show animates
-    assert win.timeline.progress < 1.0
+    assert win.graph.progress < 1.0
     motion.finish_all()
-    assert win.timeline.progress == 1.0 and win.phase_chart.progress == 1.0
-    assert win.kpi_row.tiles[0].value.text() == win.kpi_row.tiles[0].kpi.value
-    assert all(r.graphicsEffect() is None for r in win.briefing_view.rows)
+    assert win.graph.progress == 1.0 and win.pulse.bars.progress == 1.0
+    assert all(r.graphicsEffect() is None for r in win.hud.rows)
 
     n = motion.created_count()
     win.reload()  # the 30 s poll, nothing changed
     win.reload(force=False)
     assert motion.created_count() == n and motion.live() == []
 
-    # new data: only the changed section animates
+    # new data: only the changed part animates
     db.insert_briefing(conn, "h3", "A new headline", "[]", "model", "2026-10-08T17:00:00+00:00",
                        "gemma4:26b")
     win.reload()
     assert motion.created_count() > n
-    assert win.timeline.progress == 1.0  # its data did not change: not re-animated
+    assert win.graph.progress == 1.0  # the graph did not re-reveal
     motion.finish_all()
-    assert win.briefing_view.headline.text() == "A new headline"
-
-    n = motion.created_count()
-    win.apply_scheme("dark")  # a theme switch is not new data
-    assert motion.created_count() == n
-    win.apply_scheme("light")
+    assert win.hud.headline.text() == "A new headline"
     win.close()
     conn.close()
 
 
-def test_done_slides_row_out_then_removes_it(motion_on, tmp_path):
+def test_graph_timer_runs_only_while_visible(motion_on, tmp_path):
     win, conn, ids = _window(tmp_path)
-    motion.finish_all()
-    row = win.card_widgets[ids[0]]
-    win.open_peek(row.row)
-    win.peek.done_btn.click()
+    assert win.graph.running
+    win.hide()
+    assert not win.graph.running
+    win.show()
     _pump()
-    assert cards.get_card(conn, ids[0]).status == "done"  # written at once
-    assert ids[0] not in win.card_widgets  # gone from the model at once
-    assert not win.peek.is_open
-    assert row.parent() is not None  # ...but still sliding out
-    motion.finish_all()
-    _pump()
-    assert row.parent() is None or not row.isVisible()
-    assert not win.peek.isVisible()
-    assert set(win.card_widgets) == {ids[1]}
-    # the last one: the empty state appears after its slide-out
-    win.open_peek(win.card_widgets[ids[1]].row)
-    win.peek.done_btn.click()
-    _pump()
-    motion.finish_all()
-    _pump()
-    assert win.card_widgets == {} and win.empty_label is not None
+    assert win.graph.running
     win.close()
     conn.close()
 
 
-def test_new_cards_flash_and_rows_tint_on_hover(motion_on, tmp_path):
+def test_new_node_grows_in(motion_on, tmp_path):
     win, conn, ids = _window(tmp_path)
-    rows = list(win.card_widgets.values())
-    assert any(r.glow > 0.5 for r in rows)  # seeded cards are new (< 24 h)
     motion.finish_all()
-    assert all(r.glow == 0.0 for r in rows)
-    r = rows[0]
-    r._hover_to(1.0)
-    _pump()
-    motion.finish_all()
-    assert r.tint == 1.0
-    r._hover_to(0.0)
-    motion.finish_all()
-    assert r.tint == 0.0
+    cards.upsert_card(conn, type_="research", title="New paper", why="w", source_ref="x",
+                      source_url=None, claude_prompt="p", paper_id="2410.99999")
+    win.reload()
+    new = [n.id for n in win.graph.graph.nodes if n.kind == "card" and n.id not in
+           {f"card:{i}" for i in ids}]
+    assert new and new[0] in win.graph._born
     win.close()
     conn.close()
 
@@ -360,22 +324,6 @@ def test_refresh_icon_spins_only_while_refreshing(motion_on, tmp_path):
     gate.set()
     win.wait_for_refresh()
     assert not win._spin_timer.isActive()
-    win.close()
-    conn.close()
-
-
-def test_peek_backdrop_fades(motion_on, tmp_path):
-    win, conn, ids = _window(tmp_path)
-    win.open_peek(win.card_widgets[ids[0]].row)
-    _pump()
-    motion.finish_all()
-    assert win.peek.backdrop.level == 1.0 and win.peek.backdrop.isVisible()
-    win.peek.hide_panel()
-    assert not win.peek.is_open
-    motion.finish_all()
-    _pump()
-    assert not win.peek.isVisible()
-    assert win.peek.backdrop.level == 0.0 and not win.peek.backdrop.isVisible()
     win.close()
     conn.close()
 
@@ -509,7 +457,7 @@ def test_orb_paints_every_state_in_both_themes(app, motion_off):
 def test_chat_orb_moves_to_stage_and_back(app, tmp_path, motion_on):
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, chat_open=True)
     win.show()
     _pump()
     chat = win.chat

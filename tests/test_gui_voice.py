@@ -671,14 +671,16 @@ def test_ctrl_space_and_esc_priority(rig):
     win.set_chat_open(False)
     space.activated.emit()  # opens the chat and starts listening
     assert win.chat.isVisible() and p.voice_state == "listening"
-    win.open_peek(next(row for row in win.data.rows if row.id == ids[1]))
-    assert win.peek.is_open
+    win.graph.lock(f"card:{ids[1]}")
+    assert win.graph.lock_id == f"card:{ids[1]}"
     esc = shortcuts["Esc"]
     esc.activated.emit()  # voice first
-    assert p.voice_state == "idle" and win.peek.is_open
-    esc.activated.emit()  # then the peek
+    assert p.voice_state == "idle" and win.graph.lock_id == f"card:{ids[1]}"
+    esc.activated.emit()  # then the locked node
+    assert win.graph.lock_id is None and win.chat.isVisible()
+    esc.activated.emit()  # then the chat
     QApplication.processEvents()
-    assert not win.peek.is_open
+    assert not win.chat.isVisible()
 
 
 def test_ctrl_space_works_while_typing(rig):
