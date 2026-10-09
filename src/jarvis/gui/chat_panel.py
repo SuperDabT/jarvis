@@ -4,10 +4,18 @@ The engine is ``jarvis.chat.ask`` (grounded context, streamed reply, validated
 sources); this module is only its UI. A question runs on a background thread
 with its own SQLite connection; streamed tokens come back through a queued Qt
 signal. One question at a time: Send is disabled while Jarvis answers.
+
+Voice (mic button / Ctrl+Space): a ``voice_turn.VoiceTurn`` walks listening ->
+transcribing -> thinking -> speaking. Recording, speech-to-text and the spoken
+answer run on worker threads (``jarvis.voice``); every callback comes back as a
+queued signal, so the orb and the bubbles are only touched on the GUI thread.
+A voice turn joins the same history and session as typed questions, and only
+one turn (typed or spoken) runs at a time.
 """
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -20,6 +28,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, QU
 from PySide6.QtGui import QDesktopServices, QKeyEvent
 from PySide6.QtWidgets import (
     QFrame,
+    QMenu,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -35,8 +44,9 @@ from PySide6.QtWidgets import (
 from jarvis import db
 from jarvis.config import Config
 from jarvis.gui import motion
+from jarvis.gui import voice_turn as vt
 from jarvis.gui.orb import COMPACT, Orb
-from jarvis.gui.theme import Tokens
+from jarvis.gui.theme import LIGHT, Tokens
 from jarvis.gui.widgets import _clear, _label, repolish
 
 PANEL_WIDTH = 380
@@ -57,6 +67,53 @@ def default_ask(conn: sqlite3.Connection, cfg: Config, question: str, history: l
     from jarvis.chat import ask
 
     return ask(conn, cfg, question, history, None, on_token=on_token, session_id=session_id)
+
+
+# Voice seams, injectable for tests (nothing real is recorded or played there).
+# recorder_factory(on_level) -> object with record() -> wav bytes | None, stop()
+RecorderFactory = Callable[[Callable[[float], None]], Any]
+# transcribe_fn(wav, cfg) -> text
+TranscribeFn = Callable[[bytes, Config], str]
+# voice_answer_fn(conn, cfg, question, history, speaker, on_token, session_id) -> chat.Answer
+VoiceAnswerFn = Callable[..., Any]
+# speaker_factory(cfg, on_level, on_state, on_error) -> object with say(), stop(),
+# close() and a ``speaking`` property (voice.Speaker fits)
+SpeakerFactory = Callable[..., Any]
+
+AUTO_LISTEN_DELAY_MS = 450   # pause between Jarvis finishing and listening again
+UNSTAGE_DELAY_MS = 700       # the orb lingers on its stage after a turn
+UNSTAGE_ERROR_MS = 1600      # ... longer after an error, while it flashes
+
+
+def default_recorder(on_level: Callable[[float], None]) -> Any:
+    from jarvis.voice import Recorder
+
+    return Recorder(on_level=on_level)
+
+
+def default_transcribe(wav: bytes, cfg: Config) -> str:
+    from jarvis.voice import transcribe
+
+    return transcribe(wav, cfg)
+
+
+def default_voice_answer(conn: sqlite3.Connection, cfg: Config, question: str, history: list,
+                         speaker: Any, on_token: Callable[[str], None], session_id: str) -> Any:
+    from jarvis.voice import voice_answer
+
+    return voice_answer(conn, cfg, question, history, None, speaker, on_token=on_token,
+                        session_id=session_id)
+
+
+def default_speaker(cfg: Config, on_level: Callable[[float], None],
+                    on_state: Callable[[str], None], on_error: Callable[[str], None]) -> Any:
+    from jarvis.voice import Speaker
+
+    return Speaker(cfg, on_level=on_level, on_state=on_state, on_error=on_error)
+
+
+def mic_available() -> bool:
+    return shutil.which("pw-record") is not None
 
 
 def markdown_html(text: str) -> str:
@@ -152,23 +209,84 @@ class FlowLayout(QLayout):
 
 
 class UserMessage(QWidget):
-    def __init__(self, text: str, parent: QWidget | None = None):
+    """The question bubble; a spoken one (``voice=True``) carries a small mic."""
+
+    def __init__(self, text: str, parent: QWidget | None = None, *, voice: bool = False,
+                 tokens: Tokens | None = None):
         super().__init__(parent)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(40, 0, 0, 0)
         lay.addStretch(1)
         bubble = QFrame()
         bubble.setObjectName("userBubble")
-        bl = QVBoxLayout(bubble)
+        bl = QHBoxLayout(bubble)
         bl.setContentsMargins(12, 8, 12, 9)
+        bl.setSpacing(7)
+        self.voice = voice
+        self.glyph: vt.MicGlyph | None = None
+        extra = 0
+        if voice:
+            self.glyph = vt.MicGlyph(tokens, 12)
+            col = QVBoxLayout()
+            col.setContentsMargins(0, 0, 0, 0)
+            # centred on the first line of text (also when the question wraps)
+            col.addSpacing(max(0, (_label("x", "userText").sizeHint().height() - 12) // 2))
+            col.addWidget(self.glyph)
+            col.addStretch(1)
+            bl.addLayout(col)
+            bl.setContentsMargins(10, 8, 12, 9)
+            extra = 19
         self.label = _label(text, "userText")
         self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         # Short questions stay on one line; long ones wrap inside the bubble.
-        if self.label.fontMetrics().horizontalAdvance(text) > PANEL_WIDTH - 110:
+        if self.label.fontMetrics().horizontalAdvance(text) > PANEL_WIDTH - 110 - extra:
             self.label.setWordWrap(True)
-            self.label.setMinimumWidth(PANEL_WIDTH - 130)
+            self.label.setMinimumWidth(PANEL_WIDTH - 130 - extra)
         bl.addWidget(self.label)
         lay.addWidget(bubble)
+        self.text = text
+
+
+_PRE = '<p style="margin:0; white-space:pre">{}</p>'
+
+
+def note_html(text: str) -> str:
+    """A voice message as rich text. A URL and a "Start it with: <command>" hint
+    each get a line of their own that never wraps (Qt breaks inside URLs and at
+    hyphens otherwise), the command in monospace, so it reads as something to
+    copy; copying still gives the plain text."""
+    import html
+
+    head, sep, cmd = text.partition("Start it with: ")
+    head = head.strip()
+    m = re.search(r"\s(https?://\S+?[.,;]?)(?:\s|$)", head)
+    if m:
+        before, url, after = head[:m.start()], m.group(1), head[m.end():].strip()
+        out = (f'<p style="margin:0">{html.escape(before)}</p>' + _PRE.format(html.escape(url))
+               + (f'<p style="margin:0">{html.escape(after)}</p>' if after else ""))
+    else:
+        out = f'<p style="margin:0">{html.escape(head)}</p>'
+    if sep:
+        out += ('<p style="margin:6px 0 0 0">Start it with:</p>'
+                + _PRE.format(f"<code>{html.escape(cmd.strip())}</code>"))
+    return out
+
+
+class VoiceNote(QWidget):
+    """A quiet line in the conversation: "Didn't catch that." or a voice error
+    with the hint to fix it (selectable, so a command can be copied)."""
+
+    def __init__(self, text: str, error: bool = False, parent: QWidget | None = None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 8, 0)
+        self.error = error
+        self.label = _label("", "voiceNote", wrap=True)
+        self.label.setProperty("level", "error" if error else "info")
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setText(note_html(text))
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self.label, 1)
         self.text = text
 
 
@@ -307,7 +425,7 @@ class Composer(QFrame):
 
     MIN_LINES, MAX_LINES = 1, 6
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, tokens: Tokens | None = None):
         super().__init__(parent)
         self.setObjectName("composer")
         self.setProperty("focus", "false")
@@ -323,6 +441,8 @@ class Composer(QFrame):
         self.edit.installEventFilter(self)
         self.edit.textChanged.connect(self._grow)
         lay.addWidget(self.edit, 1)
+        self.mic_btn = vt.MicButton(tokens or LIGHT)
+        lay.addWidget(self.mic_btn, 0, Qt.AlignmentFlag.AlignBottom)
         self.send_btn = QPushButton("↑")
         self.send_btn.setObjectName("send")
         self.send_btn.setFixedSize(28, 28)
@@ -372,10 +492,31 @@ class Composer(QFrame):
 # ---------------------------------------------------------------- panel
 
 
+class _Silent:
+    """A speaker that says nothing (speech output failed to start)."""
+    speaking = False
+
+    def say(self, text: str) -> None:
+        pass
+
+
 class _ChatBridge(QObject):
     token = Signal(int, str)
     finished = Signal(int, object)
     failed = Signal(int, str)
+
+
+class _VoiceBridge(QObject):
+    """Worker-thread callbacks of a voice turn, delivered on the GUI thread.
+    The int is the voice turn id (stale events are dropped)."""
+    mic_level = Signal(int, float)
+    recorded = Signal(int, object)          # wav bytes or None (no speech)
+    transcribed = Signal(int, str)
+    answered = Signal(int, object)          # chat.Answer
+    failed = Signal(int, str, str)          # stage ("record", "stt", "answer"), message
+    speaker_state = Signal(int, str)
+    speaker_level = Signal(int, float)
+    speaker_error = Signal(int, str)
 
 
 def _emit(sig, *args) -> None:
@@ -401,14 +542,64 @@ def _run_ask(cfg: Config, ask_fn: AskFn, question: str, history: list, session_i
             conn.close()
 
 
+def _run_record(recorder: Any, vid: int, bridge: _VoiceBridge) -> None:
+    from jarvis.voice import VoiceError
+
+    try:
+        wav = recorder.record()
+    except VoiceError as e:
+        _emit(bridge.failed, vid, "record", str(e))
+    except Exception as e:  # noqa: BLE001 - shown inline
+        _emit(bridge.failed, vid, "record", f"Recording failed: {type(e).__name__}: {e}")
+    else:
+        _emit(bridge.recorded, vid, wav)
+
+
+def _run_transcribe(fn: TranscribeFn, wav: bytes, cfg: Config, vid: int,
+                    bridge: _VoiceBridge) -> None:
+    from jarvis.voice import VoiceError
+
+    try:
+        text = fn(wav, cfg)
+    except VoiceError as e:
+        _emit(bridge.failed, vid, "stt", str(e))
+    except Exception as e:  # noqa: BLE001
+        _emit(bridge.failed, vid, "stt", f"Speech-to-text failed: {type(e).__name__}: {e}")
+    else:
+        _emit(bridge.transcribed, vid, str(text or ""))
+
+
+def _run_voice_answer(cfg: Config, fn: VoiceAnswerFn, question: str, history: list,
+                      session_id: str, speaker: Any, rid: int, vid: int,
+                      chat_bridge: _ChatBridge, bridge: _VoiceBridge) -> None:
+    conn = None
+    try:
+        conn = db.connect(cfg.db_path)
+        answer = fn(conn, cfg, question, history, speaker,
+                    lambda t: _emit(chat_bridge.token, rid, t), session_id)
+    except Exception as e:  # noqa: BLE001
+        _emit(bridge.failed, vid, "answer", f"Something went wrong: {type(e).__name__}: {e}")
+    else:
+        _emit(bridge.answered, vid, answer)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 class ChatPanel(QFrame):
-    """Right-side panel. ``ask_fn`` is injectable for tests."""
+    """Right-side panel. ``ask_fn`` and the voice seams are injectable for tests."""
 
     answered = Signal(object)
     close_requested = Signal()
+    voice_state_changed = Signal(str)
 
     def __init__(self, cfg: Config, tokens: Tokens, ask_fn: AskFn | None = None,
-                 model_name: str | None = None, parent: QWidget | None = None):
+                 model_name: str | None = None, parent: QWidget | None = None, *,
+                 recorder_factory: RecorderFactory | None = None,
+                 transcribe_fn: TranscribeFn | None = None,
+                 voice_answer_fn: VoiceAnswerFn | None = None,
+                 speaker_factory: SpeakerFactory | None = None,
+                 mic_ok: bool | None = None, settings: Any = None):
         super().__init__(parent)
         self.setObjectName("chat")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -427,6 +618,37 @@ class ChatPanel(QFrame):
         self._bridge.finished.connect(self._on_finished)
         self._bridge.failed.connect(self._on_failed)
         self.setFixedWidth(PANEL_WIDTH)
+
+        # voice
+        self.recorder_factory = recorder_factory or default_recorder
+        self.transcribe_fn = transcribe_fn or default_transcribe
+        self.voice_answer_fn = voice_answer_fn or default_voice_answer
+        self.speaker_factory = speaker_factory or default_speaker
+        self.mic_ok = mic_available() if mic_ok is None else bool(mic_ok)
+        self.settings = settings if settings is not None else vt.ui_settings()
+        self.turn = vt.VoiceTurn()
+        self._vid = 0                      # current voice turn id
+        self._speech_turn = 0              # turn whose speaker events count (0 = none)
+        self._recorder: Any = None
+        self._speaker: Any = None          # one Speaker per panel, made on first use
+        self._turn_speaker: vt.TurnSpeaker | None = None
+        self._voice_threads: list[threading.Thread] = []
+        self._voice_error = False
+        self._closed = False
+        self._vbridge = _VoiceBridge(self)
+        vb = self._vbridge
+        vb.mic_level.connect(self._on_mic_level)
+        vb.recorded.connect(self._on_recorded)
+        vb.transcribed.connect(self._on_transcribed)
+        vb.answered.connect(self._on_voice_answer)
+        vb.failed.connect(self._on_voice_failed)
+        vb.speaker_state.connect(self._on_speaker_state)
+        vb.speaker_level.connect(self._on_speaker_level)
+        vb.speaker_error.connect(self._on_speaker_error)
+        self._unstage_timer = QTimer(self, singleShot=True)
+        self._unstage_timer.timeout.connect(self._unstage_if_idle)
+        self._rearm_timer = QTimer(self, singleShot=True, interval=AUTO_LISTEN_DELAY_MS)
+        self._rearm_timer.timeout.connect(self._rearm)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -448,6 +670,17 @@ class ChatPanel(QFrame):
                             "only; numbers and references are checked afterwards.")
         hl.addWidget(self.sub)
         hl.addStretch(1)
+        self.menu_btn = QPushButton("⋯")
+        self.menu_btn.setObjectName("ghost")
+        self.menu_btn.setToolTip("Voice options")
+        self.menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.menu = QMenu(self.menu_btn)
+        self.auto_listen_action = self.menu.addAction(vt.AUTO_LISTEN_LABEL)
+        self.auto_listen_action.setCheckable(True)
+        self.auto_listen_action.setChecked(vt.read_bool(self.settings, vt.AUTO_LISTEN_KEY))
+        self.auto_listen_action.toggled.connect(self.set_auto_listen)
+        self.menu_btn.setMenu(self.menu)
+        hl.addWidget(self.menu_btn)
         self.new_btn = QPushButton("New chat")
         self.new_btn.setObjectName("ghost")
         self.new_btn.setToolTip("Start a new conversation")
@@ -468,11 +701,19 @@ class ChatPanel(QFrame):
 
         # The orb's stage: in voice mode the header orb moves here and grows.
         self.stage = QWidget()
-        sl = QHBoxLayout(self.stage)
-        sl.setContentsMargins(0, 14, 0, 6)
+        stage_col = QVBoxLayout(self.stage)
+        stage_col.setContentsMargins(16, 14, 16, 10)
+        stage_col.setSpacing(8)
+        sl = QHBoxLayout()
+        sl.setContentsMargins(0, 0, 0, 0)
         sl.addStretch(1)
         sl.addStretch(1)
+        stage_col.addLayout(sl)
         self._stage_lay = sl
+        self.caption = _label("", "voiceCaption")
+        self.caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.caption.setWordWrap(True)
+        stage_col.addWidget(self.caption)
         self.stage.hide()
         self._staged = False
         outer.addWidget(self.stage)
@@ -498,10 +739,18 @@ class ChatPanel(QFrame):
         foot = QVBoxLayout()
         foot.setContentsMargins(14, 8, 14, 12)
         foot.setSpacing(6)
-        self.composer = Composer()
+        self.composer = Composer(tokens=tokens)
         self.composer.submitted.connect(self.ask)
+        self.mic_btn = self.composer.mic_btn
+        self.mic_btn.clicked.connect(self.toggle_voice)
+        if not self.mic_ok:
+            self.mic_btn.setEnabled(False)
+            from jarvis.voice import NO_PW_RECORD
+
+            self.mic_btn.setToolTip(NO_PW_RECORD)
         foot.addWidget(self.composer)
-        foot.addWidget(_label("Enter to send · Shift+Enter for a new line", "composerHint"))
+        foot.addWidget(_label("Enter to send · Shift+Enter for a new line · Ctrl+Space to talk",
+                              "composerHint"))
         outer.addLayout(foot)
 
     # ------------------------------------------------------------ empty state
@@ -568,7 +817,7 @@ class ChatPanel(QFrame):
         self.composer.edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
     def new_chat(self) -> None:
-        if self._busy:
+        if self.turn_busy:
             return
         for m in self.messages:
             self.list.removeWidget(m)
@@ -582,12 +831,11 @@ class ChatPanel(QFrame):
 
     def ask(self, question: str) -> None:
         question = (question or "").strip()
-        if not question or self._busy:
+        if not question or self.turn_busy:
             return
         self.empty.hide()
         self._busy = True
-        self.composer.set_busy(True)
-        self.new_btn.setEnabled(False)
+        self._sync_controls()
         self._add(UserMessage(question))
         bot = BotMessage(self.tokens)
         self._current = bot
@@ -634,8 +882,7 @@ class ChatPanel(QFrame):
     def _done(self) -> None:
         self._busy = False
         self._current = None
-        self.composer.set_busy(False)
-        self.new_btn.setEnabled(True)
+        self._sync_controls()
 
     def _on_finished(self, rid: int, answer: Any) -> None:
         if rid != self._rid or self._current is None:
@@ -653,13 +900,353 @@ class ChatPanel(QFrame):
         self._current.fail(message)
         self._done()
 
+    # ------------------------------------------------------------ voice: public
+
+    @property
+    def voice_state(self) -> str:
+        return self.turn.state
+
+    @property
+    def voice_active(self) -> bool:
+        """Listening, transcribing, or a turn whose speech hasn't been cancelled."""
+        return self.turn.active
+
+    @property
+    def turn_busy(self) -> bool:
+        """A typed answer is streaming or a voice turn is under way."""
+        return self._busy or self.turn.state != vt.IDLE
+
+    @property
+    def auto_listen(self) -> bool:
+        return self.auto_listen_action.isChecked()
+
+    def set_auto_listen(self, on: bool) -> None:
+        on = bool(on)
+        if self.auto_listen_action.isChecked() != on:
+            self.auto_listen_action.setChecked(on)  # re-enters via toggled
+            return
+        self.settings.setValue(vt.AUTO_LISTEN_KEY, on)
+        self.settings.sync()
+
+    def toggle_voice(self) -> None:
+        """Mic button / Ctrl+Space: start listening, or act on the current turn
+        (stop recording, cancel, or barge in on the speech)."""
+        self._voice_key("mic")
+
+    def stop_voice(self) -> bool:
+        """Esc: stop whatever voice is doing. False when there was nothing to stop
+        (so Esc can do its usual job)."""
+        if not self.turn.active:
+            return False
+        self._voice_key("esc")
+        return True
+
+    def start_listening(self) -> bool:
+        if (self._closed or not self.mic_ok or self._busy
+                or self.turn.state != vt.IDLE):
+            return False
+        self._rearm_timer.stop()
+        self._unstage_timer.stop()
+        self._vid += 1
+        vid = self._vid
+        self._voice_error = False
+        self._fire("start")
+        self.set_orb_staged(True)
+        self.orb.set_level(0.0)
+        bridge = self._vbridge
+        try:
+            self._recorder = self.recorder_factory(
+                lambda level: _emit(bridge.mic_level, vid, float(level)))
+        except Exception as e:  # noqa: BLE001
+            self._on_voice_failed(vid, "record", str(e))
+            return False
+        self._spawn(_run_record, "jarvis-voice-rec", self._recorder, vid, bridge)
+        return True
+
+    def shutdown(self) -> None:
+        """Stop the mic and the speaker and wait for the voice workers (window close)."""
+        if self._closed:
+            return
+        self._closed = True
+        self._vid += 1                     # every pending voice event is now stale
+        self._speech_turn = 0
+        self._rearm_timer.stop()
+        self._unstage_timer.stop()
+        rec, self._recorder = self._recorder, None
+        if rec is not None:
+            try:
+                rec.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._turn_speaker is not None:
+            self._turn_speaker.mute()
+        speaker, self._speaker = self._speaker, None
+        if speaker is not None:
+            try:
+                speaker.close()
+            except Exception:  # noqa: BLE001
+                pass
+        deadline = time.monotonic() + 3.0
+        for t in self._voice_threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+        self._voice_threads = [t for t in self._voice_threads if t.is_alive()]
+
+    def voice_threads(self) -> list[threading.Thread]:
+        """Voice worker threads still running (tests)."""
+        return [t for t in self._voice_threads if t.is_alive()]
+
+    def closeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        self.shutdown()
+        super().closeEvent(e)
+
+    # ------------------------------------------------------------ voice: internals
+
+    def _spawn(self, target: Callable[..., None], name: str, *args: Any) -> None:
+        self._voice_threads = [t for t in self._voice_threads if t.is_alive()]
+        t = threading.Thread(target=target, name=name, daemon=True, args=args)
+        self._voice_threads.append(t)
+        t.start()
+
+    def _fire(self, event: str) -> None:
+        state = self.turn.fire(event)
+        self._render_voice()
+        self.voice_state_changed.emit(state)
+
+    def _render_voice(self) -> None:
+        """Orb, caption and controls for the current voice state."""
+        state = self.turn.state
+        if state != vt.IDLE and not self.turn.muted:
+            self.orb.set_state({vt.LISTENING: "listening", vt.SPEAKING: "speaking"}
+                               .get(state, "thinking"))
+            self.caption.setText(vt.CAPTIONS.get(state, ""))
+            self.caption.show()
+        else:
+            self.caption.hide()
+            self.orb.set_level(0.0)
+            if self.orb.state != "error":
+                self.orb.set_state("idle")
+        self._sync_controls()
+
+    def _sync_controls(self) -> None:
+        busy = self.turn_busy
+        self.composer.set_busy(busy)
+        self.new_btn.setEnabled(not busy)
+        self.mic_btn.set_active(self.turn.state == vt.LISTENING)
+        self.mic_btn.setEnabled(self.mic_ok and not self._closed and not self._busy
+                                and (self.turn.state == vt.IDLE or self.turn.active))
+        if self.mic_ok:
+            self.mic_btn.setToolTip("Stop listening (Ctrl+Space)"
+                                    if self.turn.state == vt.LISTENING else
+                                    "Stop speaking (Esc)" if self.turn.active
+                                    and self.turn.state != vt.TRANSCRIBING else vt.MIC_TOOLTIP)
+
+    def _voice_key(self, key: str) -> None:
+        action = vt.barge_in_action(self.turn.state, key, self.turn.muted)
+        if action == "start":
+            self.start_listening()
+        elif action == "stop_recording":
+            if self._recorder is not None:
+                self._recorder.stop()      # record() returns what was said
+        elif action == "cancel":
+            self._cancel_voice()
+        elif action == "mute":
+            self._mute_speech()
+        elif action == "stop_speech":
+            self._mute_speech()
+            if self.turn.answer_done:
+                self._end_turn(natural=False)
+
+    def _cancel_voice(self) -> None:
+        """Drop the turn before a question was asked (listening / transcribing)."""
+        self._vid += 1
+        rec, self._recorder = self._recorder, None
+        if rec is not None:
+            rec.stop()
+        self._fire("cancel")
+        self._schedule_unstage()
+
+    def _mute_speech(self) -> None:
+        """No more speech this turn; the text answer still finishes."""
+        self.turn.muted = True
+        self._speech_turn = 0
+        if self._turn_speaker is not None:
+            self._turn_speaker.mute()
+        if self._speaker is not None:
+            self._speaker.stop()
+        if self.turn.state == vt.SPEAKING:
+            self.turn.fire("speech_paused")
+        self._render_voice()
+        self._schedule_unstage()
+
+    def _ensure_speaker(self) -> Any:
+        if self._speaker is None:
+            bridge = self._vbridge
+            self._speaker = self.speaker_factory(
+                self.cfg,
+                lambda level: _emit(bridge.speaker_level, self._speech_turn, float(level)),
+                lambda state: _emit(bridge.speaker_state, self._speech_turn, str(state)),
+                lambda msg: _emit(bridge.speaker_error, self._speech_turn, str(msg)))
+        return self._speaker
+
+    def _note(self, text: str, error: bool = False) -> None:
+        self._add(VoiceNote(text, error))
+        self._stick = True
+
+    def _schedule_unstage(self, ms: int = UNSTAGE_DELAY_MS) -> None:
+        self._unstage_timer.start(ms)
+
+    def _unstage_if_idle(self) -> None:
+        if self.turn.state == vt.IDLE or self.turn.muted:
+            self.set_orb_staged(False)
+
+    def _end_turn(self, natural: bool) -> None:
+        """The voice turn is over (answer shown, speech done or stopped)."""
+        self._speech_turn = 0
+        self._turn_speaker = None
+        if self.turn.state != vt.IDLE:
+            self._fire("done")
+        if (natural and not self._voice_error and self.auto_listen and self.mic_ok
+                and not self._closed):
+            self._rearm_timer.start()      # stay staged: the next question follows
+        else:
+            self._schedule_unstage(UNSTAGE_ERROR_MS if self._voice_error
+                                   else UNSTAGE_DELAY_MS)
+
+    def _rearm(self) -> None:
+        if not self.start_listening():
+            self._schedule_unstage()
+
+    def _voice_error_ui(self, message: str) -> None:
+        self._voice_error = True
+        self._note(message, error=True)
+        self.orb.set_state("error")        # flashes, then settles to idle by itself
+
+    # -- worker events (GUI thread)
+
+    def _on_mic_level(self, vid: int, level: float) -> None:
+        if vid == self._vid and self.turn.state == vt.LISTENING:
+            self.orb.set_level(level)
+
+    def _on_recorded(self, vid: int, wav: Any) -> None:
+        if vid != self._vid or self.turn.state != vt.LISTENING:
+            return
+        self._recorder = None
+        if not wav:
+            self._fire("no_speech")
+            self._note(vt.NO_SPEECH)
+            self._schedule_unstage()
+            return
+        self._fire("recorded")
+        self._spawn(_run_transcribe, "jarvis-voice-stt", self.transcribe_fn, wav, self.cfg,
+                    vid, self._vbridge)
+
+    def _on_transcribed(self, vid: int, text: str) -> None:
+        if vid != self._vid or self.turn.state != vt.TRANSCRIBING:
+            return
+        text = (text or "").strip()
+        if not text:
+            self._fire("no_speech")
+            self._note(vt.NO_SPEECH)
+            self._schedule_unstage()
+            return
+        self._fire("transcript")
+        self.empty.hide()
+        self._add(UserMessage(text, voice=True, tokens=self.tokens))
+        bot = BotMessage(self.tokens)
+        self._current = bot
+        self._add(bot)
+        self._stick = True
+        self._rid += 1
+        self._question = text
+        try:
+            speaker = self._ensure_speaker()
+        except Exception as e:  # noqa: BLE001 - no speech, the text answer still comes
+            speaker = None
+            self._voice_error_ui(f"Speech output is unavailable: {e}")
+        self._turn_speaker = vt.TurnSpeaker(speaker if speaker is not None else _Silent())
+        if speaker is None:
+            self._turn_speaker.mute()
+            self.turn.muted = True
+            self._render_voice()
+        else:
+            self._speech_turn = vid
+        self._spawn(_run_voice_answer, "jarvis-voice-answer", self.cfg, self.voice_answer_fn,
+                    text, list(self.history), self.session_id, self._turn_speaker, self._rid,
+                    vid, self._bridge, self._vbridge)
+
+    def _on_voice_answer(self, vid: int, answer: Any) -> None:
+        if vid != self._vid or self.turn.state not in (vt.THINKING, vt.SPEAKING):
+            return
+        bot = self._current
+        self._current = None
+        if bot is not None:
+            bot.finish(answer)
+        if not getattr(answer, "error", None):
+            self.history += [("user", self._question),
+                             ("assistant", getattr(answer, "text", "") or "")]
+        self.turn.answer_done = True
+        self.answered.emit(answer)
+        speaking = self._turn_speaker is not None and self._turn_speaker.speaking
+        if self.turn.muted or not speaking:
+            self._end_turn(natural=not self.turn.muted and not getattr(answer, "error", None))
+        else:
+            self._sync_controls()          # wait for the speaker to go idle
+
+    def _on_voice_failed(self, vid: int, stage: str, message: str) -> None:
+        if vid != self._vid or self.turn.state == vt.IDLE:
+            return
+        self._recorder = None
+        if stage == "answer":
+            bot, self._current = self._current, None
+            if bot is not None:
+                bot.fail(message)
+            if self._turn_speaker is not None:
+                self._turn_speaker.mute()
+            if self._speaker is not None:
+                self._speaker.stop()
+            self._speech_turn = 0
+            self._turn_speaker = None
+            self._voice_error = True
+            self.orb.set_state("error")
+            self._fire("error")
+        else:
+            self._fire("error")
+            self._voice_error_ui(message)
+        self._schedule_unstage(UNSTAGE_ERROR_MS)
+
+    def _on_speaker_state(self, sid: int, state: str) -> None:
+        if not sid or sid != self._speech_turn or self.turn.muted:
+            return
+        if state == "speaking" and self.turn.state == vt.THINKING:
+            self._fire("speech_started")
+        elif state == "idle":
+            if self.turn.answer_done:
+                self._end_turn(natural=True)
+            elif self.turn.state == vt.SPEAKING:
+                self._fire("speech_paused")   # waiting for the model's next sentence
+
+    def _on_speaker_level(self, sid: int, level: float) -> None:
+        if sid and sid == self._speech_turn and self.turn.state == vt.SPEAKING:
+            self.orb.set_level(level)
+
+    def _on_speaker_error(self, sid: int, message: str) -> None:
+        if not sid or sid != self._speech_turn:
+            return
+        self._mute_speech()
+        self._voice_error_ui(message)
+        if self.turn.answer_done:
+            self._end_turn(natural=False)
+
     def set_tokens(self, tokens: Tokens) -> None:
         self.tokens = tokens
         self.orb.set_tokens(tokens)
+        self.mic_btn.set_tokens(tokens)
         for m in self.messages:
             if isinstance(m, BotMessage):
                 m.tokens = tokens
                 m.thinking_orb.set_tokens(tokens)
+            elif isinstance(m, UserMessage) and m.glyph is not None:
+                m.glyph.set_tokens(tokens)
 
 
-__all__ = ["ChatPanel", "BotMessage", "UserMessage", "SUGGESTED", "chip_text", "QLabel"]
+__all__ = ["ChatPanel", "BotMessage", "UserMessage", "VoiceNote", "SUGGESTED", "chip_text", "QLabel"]

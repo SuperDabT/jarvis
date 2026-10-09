@@ -354,6 +354,12 @@ QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
     selection-background-color: {t.accent};
 }}
 #composerHint {{ color: {t.faint}; font-size: 11px; }}
+#voiceCaption {{ color: {t.muted}; font-size: 12px; }}
+#voiceNote {{ color: {t.faint}; font-size: 12px; font-style: italic; }}
+#voiceNote[level="error"] {{
+    color: {t.muted}; font-style: normal; background: {t.fill}; border-radius: 8px;
+    padding: 8px 10px;
+}}
 
 #statusBar {{ background: {t.bg}; border-top: 1px solid {t.border}; }}
 #status {{ color: {t.faint}; font-size: 12px; }}

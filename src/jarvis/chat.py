@@ -153,6 +153,18 @@ class Context:
     ranking: str = "keywords"             # or "keywords+embeddings"
     window_days: int | None = None        # time window the question asked about, if any
     fact_evidence: dict[str, list[str]] = field(default_factory=dict)
+    # stable_prefix mode: text[:stable_chars] is the part that doesn't depend on the
+    # question or the clock (byte-identical between questions, so Ollama can reuse
+    # its KV cache for it); 0 = no split.
+    stable_chars: int = 0
+
+    @property
+    def stable_text(self) -> str:
+        return self.text[:self.stable_chars]
+
+    @property
+    def question_text(self) -> str:
+        return self.text[self.stable_chars:].lstrip("\n")
 
     @property
     def tokens(self) -> int:
@@ -380,7 +392,8 @@ def _electrical(conn: sqlite3.Connection, cfg: Config,
 def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
                   now: datetime | None = None, *, history: Sequence[tuple[str, str]] = (),
                   embedder: Any | None = None,
-                  budget_tokens: int = CONTEXT_TOKEN_BUDGET) -> Context:
+                  budget_tokens: int = CONTEXT_TOKEN_BUDGET,
+                  stable_prefix: bool = False) -> Context:
     """A compact, reference-tagged text block of real project data for one question.
 
     Facts and milestones are always included; open issue titles next; the rest
@@ -388,6 +401,14 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
     ``budget_tokens`` (estimated at 4 characters per token). Issue bodies are only
     included for issues the question names (#N) or shares keywords with, plus up to
     3 more ranked by embeddings when ``embedder`` (an OllamaClient) works.
+
+    ``stable_prefix=True`` (voice) orders the context for prompt caching: first
+    everything that only depends on the synced data and today's date (project,
+    facts, milestones, open issues in a fixed order without question hints,
+    electrical, commits, closed issues, cards), trimmed to the budget independently
+    of the question; then the volatile part (local time and sync time, issues asked
+    about, the issues relevant to this question with their bodies and keyword hints,
+    a time-window view). ``Context.stable_chars`` marks the split.
     """
     now = (now or datetime.now(UTC)).astimezone()
     tz = now.tzinfo
@@ -441,13 +462,23 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
     sync_txt = (f"{_fmt_day(sync_dt.astimezone(tz).date())} {sync_dt.astimezone(tz):%H:%M}"
                 if sync_dt else "never")
     elec_lines, project = _electrical(conn, cfg, refs)
-    header = [
-        f"Project: {project or 'an embedded project'} GitHub repo: {repo}.",
-        f"Today: {now:%A} {_fmt_day(today)}, {today.year} ({today.isoformat()}), "
-        f"local time {now:%H:%M}.",
-        f"GitHub data last synced: {sync_txt}. All counts and day differences below were "
-        "computed by Jarvis from the synced data.",
-    ]
+    if stable_prefix:
+        header = [
+            f"Project: {project or 'an embedded project'} GitHub repo: {repo}.",
+            f"Today: {now:%A} {_fmt_day(today)}, {today.year} ({today.isoformat()}).",
+            "All counts and day differences in the CONTEXT were computed by Jarvis from "
+            "the synced data.",
+        ]
+        now_lines = [f"Local time: {now:%H:%M}. GitHub data last synced: {sync_txt}."]
+    else:
+        header = [
+            f"Project: {project or 'an embedded project'} GitHub repo: {repo}.",
+            f"Today: {now:%A} {_fmt_day(today)}, {today.year} ({today.isoformat()}), "
+            f"local time {now:%H:%M}.",
+            f"GitHub data last synced: {sync_txt}. All counts and day differences below "
+            "were computed by Jarvis from the synced data.",
+        ]
+        now_lines = []
 
     # --- facts
     try:
@@ -502,7 +533,7 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
     # --- open issues (relevant first, then by milestone due order, then number)
     ms_rank = {m["number"]: k for k, m in enumerate(milestones)}
 
-    def issue_line(i: sqlite3.Row, with_body: bool) -> str:
+    def issue_line(i: sqlite3.Row, with_body: bool, hint: bool = True) -> str:
         n = i["number"]
         ref = f"#{n}"
         refs[ref] = Source(ref, f"#{n} {i['title']}", _issue_url(repo, i))
@@ -517,7 +548,7 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
             bits.append(f"closed {day_str(local_day(i['closed_at']))}")
         else:
             bits.append(f"updated {day_str(local_day(i['updated_at']))}")
-        if n in kw:
+        if hint and n in kw:
             bits.append("keyword hit: " + ", ".join(kw[n][1]))  # a hint for the model
         line = " | ".join(bits)
         if with_body:
@@ -529,7 +560,16 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
         0 if i["number"] in body_for else 1 if i["number"] in kw else 2,
         body_for.index(i["number"]) if i["number"] in body_for else 0,
         ms_rank.get(i["milestone_number"], len(ms_rank)), i["number"]))
-    open_lines = [issue_line(i, i["number"] in body_for) for i in ordered_open]
+    if stable_prefix:
+        # fixed order, no hints or bodies: the same lines for every question
+        stable_open = sorted(open_issues, key=lambda i: (
+            ms_rank.get(i["milestone_number"], len(ms_rank)), i["number"]))
+        open_lines = [issue_line(i, False, hint=False) for i in stable_open]
+        relevant_lines = [issue_line(i, i["number"] in body_for) for i in ordered_open
+                          if i["number"] in body_for or i["number"] in kw]
+    else:
+        open_lines = [issue_line(i, i["number"] in body_for) for i in ordered_open]
+        relevant_lines = []
 
     asked_lines = []
     for n in asked:
@@ -564,6 +604,28 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
     shown_commits = commits[:MAX_COMMITS]
     commits_title = "RECENT COMMITS (newest first)"
     closed_title = f"ISSUES CLOSED IN THE LAST {RECENT_CLOSED_DAYS} DAYS"
+
+    def commit_line(c: sqlite3.Row) -> str:
+        sha = c["sha"][:7]
+        ref = f"commit:{sha}"
+        line1 = first_line(c["message"])
+        refs[ref] = Source(ref, f"{sha} {_one_line(line1, 70)}",
+                           c["html_url"] or f"https://github.com/{repo}/commit/{c['sha']}")
+        return f"[{ref}] {day_str(local_day(c['committed_at']))}: {_one_line(line1, 140)}"
+
+    stable_views: dict[str, tuple[str, list[str]]] = {}
+    if stable_prefix:
+        # the default views, independent of the question (a time window is added to
+        # the question part instead of replacing them)
+        all_closed = sorted((i for i in issues if i["state"] == "closed"
+                             and (local_day(i["closed_at"]) or date.min) >= cutoff_closed),
+                            key=lambda i: (i["closed_at"], i["number"]), reverse=True)
+        stable_views = {
+            "commits": (commits_title, commit_lines
+                        + [commit_line(c) for c in commits[:MAX_COMMITS]]),
+            "closed": (closed_title, closed_lines[:1]
+                       + [issue_line(i, False, hint=False) for i in all_closed]),
+        }
     if window is not None:
         since = today - timedelta(days=window)
         shown_commits = [c for c, d in zip(commits, commit_dates, strict=True)
@@ -577,14 +639,7 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
         closed_lines = closed_lines[:1] + [issue_line(i, False) for i in closed_recent]
         if not shown_commits:
             commit_lines.append(f"(no commits since {_fmt_day(since)})")
-    for c in shown_commits:
-        sha = c["sha"][:7]
-        ref = f"commit:{sha}"
-        line1 = first_line(c["message"])
-        refs[ref] = Source(ref, f"{sha} {_one_line(line1, 70)}",
-                           c["html_url"] or f"https://github.com/{repo}/commit/{c['sha']}")
-        commit_lines.append(f"[{ref}] {day_str(local_day(c['committed_at']))}: "
-                            f"{_one_line(line1, 140)}")
+    commit_lines += [commit_line(c) for c in shown_commits]
 
     # --- cards
     card_lines = []
@@ -600,6 +655,16 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
                   f"{no_ms} of them with no milestone)")
 
     # --- assemble within the budget
+    if stable_prefix:
+        windowed = {"commits": (commits_title, commit_lines),
+                    "closed": (closed_title, closed_lines)} if window is not None else {}
+        return _assemble_stable(
+            budget_tokens, header, fact_lines, ms_lines, open_title, open_lines, elec_lines,
+            stable_views, windowed, card_lines, now_lines, asked_lines, relevant_lines, refs,
+            dict(issue_numbers=set(by_num),
+                 commit_shas=[c["sha"] for c in conn.execute("SELECT sha FROM commits")],
+                 ranking=ranking, fact_evidence=fact_evidence, window_days=window),
+            body_for)
     sections = {
         "header": _Section("PROJECT", header, required=True),
         "facts": _Section("FACTS (computed by Jarvis)", fact_lines or ["(none)"], required=True),
@@ -650,6 +715,91 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
         body_issues=[n for n in body_for if f"#{n}" in refs], omitted=omitted,
         ranking=ranking, fact_evidence=fact_evidence, window_days=window,
     )
+
+
+def _fill(sections: dict[str, _Section], keys: Sequence[str], budget: int, used: int,
+          kept: dict[str, list[str]], omitted: dict[str, int]) -> int:
+    """Keep each section's lines in order while they fit ``budget`` characters
+    (required sections always fit); returns the characters used."""
+    for key in keys:
+        sec = sections[key]
+        if not sec.lines:
+            continue
+        cost = len(sec.title) + 2
+        out: list[str] = []
+        for k, line in enumerate(sec.lines):
+            more = len(sec.lines) - k
+            reserve = 40 if more > 1 else 0
+            if not sec.required and used + cost + len(line) + 1 + reserve > budget:
+                omitted[key] = more
+                break
+            out.append(line)
+            cost += len(line) + 1
+        if not out:
+            continue
+        if key in omitted:
+            out.append(f"(... {omitted[key]} more not shown)")
+            cost += 30
+        kept[key] = out
+        used += cost
+    return used
+
+
+# stable_prefix mode: the stable part gets the whole budget (once warm it costs
+# nothing: it is cached), and the question part may add up to this many tokens.
+QUESTION_PART_TOKENS = 1000
+
+
+def _assemble_stable(budget_tokens: int, header: list[str], fact_lines: list[str],
+                     ms_lines: list[str], open_title: str, open_lines: list[str],
+                     elec_lines: list[str], views: dict[str, tuple[str, list[str]]],
+                     windowed: dict[str, tuple[str, list[str]]], card_lines: list[str],
+                     now_lines: list[str], asked_lines: list[str], relevant_lines: list[str],
+                     refs: dict[str, Source], extra: dict[str, Any],
+                     body_for: list[int]) -> Context:
+    """build_context(stable_prefix=True): the stable sections fill ``budget_tokens``
+    on their own (so their trimming never depends on the question); the question
+    part comes after, within QUESTION_PART_TOKENS more."""
+    sections = {
+        "header": _Section("PROJECT", header, required=True),
+        "facts": _Section("FACTS (computed by Jarvis)", fact_lines or ["(none)"],
+                          required=True),
+        "milestones": _Section("MILESTONES", ms_lines or ["(none)"], required=True),
+        "open": _Section(open_title, open_lines or ["(none)"]),
+        "electrical": _Section("ELECTRICAL (hardware.yaml checks)", elec_lines),
+        "commits": _Section(*views["commits"]),
+        "closed": _Section(*views["closed"]),
+        "cards": _Section("ACTIVE SUGGESTION CARDS", card_lines),
+        "now": _Section("NOW", now_lines, required=True),
+        "asked": _Section("ISSUES ASKED ABOUT", asked_lines),
+        "relevant": _Section("OPEN ISSUES RELEVANT TO THIS QUESTION (details)",
+                             relevant_lines),
+    }
+    # A question about a time window gets its own commits / closed views in the
+    # question part; the default views stay in the stable part.
+    for key, (title, lines) in windowed.items():
+        sections[f"window_{key}"] = _Section(title, lines)
+    stable = ["header", "facts", "milestones", "open", "electrical", "commits", "closed",
+              "cards"]
+    volatile = ["now", "asked", "relevant", *(f"window_{k}" for k in windowed)]
+    budget = budget_tokens * CHARS_PER_TOKEN
+    kept: dict[str, list[str]] = {}
+    omitted: dict[str, int] = {}
+    used = _fill(sections, stable, budget, 0, kept, omitted)
+    _fill(sections, volatile, used + QUESTION_PART_TOKENS * CHARS_PER_TOKEN, used, kept,
+          omitted)
+
+    def join(keys: Sequence[str]) -> str:
+        return "\n\n".join(f"{sections[k].title}:\n" + "\n".join(kept[k])
+                            for k in keys if k in kept)
+
+    stable_text, question_text = join(stable), join(volatile)
+    text = stable_text + "\n\n" + question_text if question_text else stable_text
+    present = set(re.findall(r"\[([^\[\]\n]+)\]", text))
+    refs = {r: s for r, s in refs.items() if r in present}
+    return Context(text=text, refs=refs, omitted=omitted,
+                   body_issues=[n for n in body_for if f"#{n}" in refs],
+                   stable_chars=len(stable_text), **extra)
 
 
 # ---------------------------------------------------------------- streaming display
@@ -967,10 +1117,18 @@ Brevity = Literal["text", "voice"]
 def build_messages(ctx: Context, question: str, history: Sequence[tuple[str, str]],
                    brevity: Brevity = "text") -> list[dict[str, str]]:
     system = SYSTEM_PROMPT + VOICE_RULES if brevity == "voice" else SYSTEM_PROMPT
+    if ctx.stable_chars:
+        # Stable data in the system message, before the history: the prompt prefix
+        # stays byte-identical across questions and turns (Ollama reuses its cache).
+        system += ("\nCONTEXT, part 1 (project data; part 2 for this question is in the "
+                   f"user's message):\n{ctx.stable_text}\n\nEND OF CONTEXT PART 1.\n")
+        user = (f"CONTEXT, part 2:\n{ctx.question_text}\n\nEND OF CONTEXT.\n\n"
+                f"QUESTION: {question}")
+    else:
+        user = f"CONTEXT:\n{ctx.text}\n\nEND OF CONTEXT.\n\nQUESTION: {question}"
     msgs = [{"role": "system", "content": system}]
     msgs += [{"role": r, "content": c} for r, c in trim_history(history)]
-    msgs.append({"role": "user", "content":
-                 f"CONTEXT:\n{ctx.text}\n\nEND OF CONTEXT.\n\nQUESTION: {question}"})
+    msgs.append({"role": "user", "content": user})
     return msgs
 
 
@@ -978,7 +1136,8 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
         history: Sequence[tuple[str, str]], client: OllamaClient | None,
         on_token: Callable[[str], None] | None = None, now: datetime | None = None, *,
         session_id: str | None = None, use_embeddings: bool = False,
-        brevity: Brevity = "text", budget_tokens: int = CONTEXT_TOKEN_BUDGET) -> Answer:
+        brevity: Brevity = "text", budget_tokens: int = CONTEXT_TOKEN_BUDGET,
+        stable_prefix: bool = False) -> Answer:
     """Answer one question from the synced data. Never raises for model failures.
 
     ``history`` is the earlier (role, content) messages of this conversation (only
@@ -990,6 +1149,8 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
     markdown); grounding and validation are unchanged. ``<think>`` blocks a thinking
     model may emit are removed from the stream and the answer. ``budget_tokens``
     caps the context size (smaller = faster first token, less detail).
+    ``stable_prefix`` puts the question-independent context first, in the system
+    message (see build_context), so a warm model reuses its prompt cache.
     """
     t0 = time.monotonic()
     question = question.strip()
@@ -1003,7 +1164,7 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
             save_message(conn, session_id, "user", question)
         ctx = build_context(conn, cfg, question, now, history=history,
                             embedder=client if use_embeddings else None,
-                            budget_tokens=budget_tokens)
+                            budget_tokens=budget_tokens, stable_prefix=stable_prefix)
         messages = build_messages(ctx, question, history, brevity)
         think = ThinkFilter()
         filt = SourcesLineFilter()

@@ -42,6 +42,9 @@ TTS_RATE = 24000              # Kokoro PCM: s16 mono at 24 kHz
 # word (~1k tokens/s for qwen3:14b here). Facts, milestones, open issues and the
 # electrical section still fit; older commits, closed issues and cards are trimmed.
 VOICE_CONTEXT_TOKEN_BUDGET = 3000
+# Question-independent context first (in the system message), so the warm voice
+# model reuses its prompt cache between questions (chat.build_context).
+VOICE_STABLE_PREFIX = True
 UNVERIFIED_SPOKEN = "Some numbers couldn't be verified."
 
 STT_DOWN = ("Parakeet speech-to-text isn't running at {url}. "
@@ -434,10 +437,19 @@ class Speaker:
         """Block until everything queued has been played (True) or timeout (False)."""
         return self._idle.wait(timeout)
 
-    def close(self) -> None:
+    def close(self, timeout: float = 2.0) -> None:
+        """Stop, end both worker threads and wait for them (up to ``timeout``)."""
         self.stop()
         self._closed = True
         self._text_q.put((-1, ""))
+        try:
+            self._audio_q.put_nowait((-1, None))
+        except queue.Full:  # pragma: no cover - stop() just emptied it
+            pass
+        deadline = time.monotonic() + timeout
+        for t in self._threads:
+            if t is not threading.current_thread():
+                t.join(max(0.0, deadline - time.monotonic()))
 
     # -- internals
 
@@ -531,6 +543,8 @@ class Speaker:
         clock = 0.0          # monotonic time at which written audio ends
         while True:
             gen, item = self._audio_q.get()
+            if gen < 0:
+                return
             if not self._current(gen):
                 continue
             if isinstance(item, tuple) and item and item[0] is _END:
@@ -781,7 +795,8 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
                  on_token: Callable[[str], None] | None = None, now: datetime | None = None,
                  *, session_id: str | None = None,
                  on_sentence: Callable[[str], None] | None = None,
-                 budget_tokens: int | None = None) -> Any:
+                 budget_tokens: int | None = None,
+                 stable_prefix: bool = VOICE_STABLE_PREFIX) -> Any:
     """Answer ``question`` aloud: chat.ask(brevity="voice") with sentence-by-sentence speech.
 
     Streamed display text goes to ``on_token`` (as with typed chat; replace it
@@ -820,7 +835,8 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
     try:
         ans = chat.ask(conn, cfg, question, history, client, on_token=token, now=now,
                        session_id=session_id, brevity="voice",
-                       budget_tokens=budget_tokens or VOICE_CONTEXT_TOKEN_BUDGET)
+                       budget_tokens=budget_tokens or VOICE_CONTEXT_TOKEN_BUDGET,
+                       stable_prefix=stable_prefix)
     finally:
         if own:
             client.close()

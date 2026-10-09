@@ -448,3 +448,48 @@ def test_think_blocks_never_reach_display_or_answer(tmp_path):
     ans = chat.ask(conn, cfg(tmp_path), "When?", [], client, on_token=shown.append, now=NOW)
     assert "".join(shown) == "Core demo is due Oct 18.\n"
     assert ans.text == "Core demo is due Oct 18." and ans.unverified_numbers == []
+
+
+# ---------------------------------------------------------------- prompt-cache friendly order
+
+
+def test_stable_prefix_is_identical_across_questions(tmp_path):
+    conn = seeded()
+    c = cfg(tmp_path)
+    questions = [("What's left for Core demo?", []), ("Is the servo PWM ok?", []),
+                 ("What did I do in the last 3 days?", []), ("What about #27?", []),
+                 ("And #31?", [("user", "Tell me about #12"), ("assistant", "It is open.")])]
+    ctxs = [chat.build_context(conn, c, q, NOW + timedelta(minutes=k), history=h,
+                               stable_prefix=True) for k, (q, h) in enumerate(questions)]
+    assert len({x.stable_text for x in ctxs}) == 1  # byte-identical
+    stable = ctxs[0].stable_text
+    assert ctxs[0].text.startswith(stable) and ctxs[0].stable_chars == len(stable)
+    # nothing question- or clock-dependent in the stable part
+    assert "keyword hit" not in stable and "body:" not in stable
+    assert "10:00" not in stable and "local time" not in stable
+    q0 = ctxs[0].question_text
+    assert "Local time: 10:00" in q0 and "keyword hit: core, demo" in q0
+    assert "[#26] Core demo plan" in q0 and "body: Day plan." in q0
+    assert "COMMITS IN THE ASKED PERIOD, THE LAST 3 DAYS" in ctxs[2].question_text
+    assert "ISSUES ASKED ABOUT" in ctxs[3].question_text and "[#27]" in ctxs[3].question_text
+    # the default (typed) context is unchanged: no split
+    plain = chat.build_context(conn, c, "What's left for Core demo?", NOW)
+    assert plain.stable_chars == 0 and "local time 10:00" in plain.text
+    # every ref of both parts can be cited
+    assert {"#26", "milestone:Core demo", "commit:02fb2d2"} <= set(ctxs[0].refs)
+
+
+def test_stable_prefix_goes_in_system_message_before_history(tmp_path):
+    conn = seeded()
+    client = FakeClient(["Core demo is due Oct 18.\n", "SOURCES: milestone:Core demo"])
+    hist = [("user", "hi"), ("assistant", "Hello.")]
+    ans = chat.ask(conn, cfg(tmp_path), "When is Core demo due?", hist, client, now=NOW,
+                   brevity="voice", stable_prefix=True)
+    system, *rest = client.messages
+    assert system["role"] == "system" and "CONTEXT, part 1" in system["content"]
+    assert "[milestone:Core demo]" in system["content"]
+    assert "Local time" not in system["content"]
+    assert [m["content"] for m in rest[:2]] == ["hi", "Hello."]
+    assert rest[-1]["content"].startswith("CONTEXT, part 2:\nNOW:\nLocal time: 10:00")
+    assert rest[-1]["content"].endswith("QUESTION: When is Core demo due?")
+    assert [s.ref for s in ans.sources] == ["milestone:Core demo"]

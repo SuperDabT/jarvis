@@ -78,7 +78,8 @@ CONTENT_MAX_WIDTH = 1100
 POLL_MS = 30_000
 DEBOUNCE_MS = 400
 STATUS_CLEAR_MS = 8_000
-IDLE_HINT = "Ctrl+R refresh  ·  Ctrl+K ask Jarvis  ·  Ctrl+J toggle chat"
+IDLE_HINT = ("Ctrl+R refresh  ·  Ctrl+K ask Jarvis  ·  Ctrl+Space talk  ·  "
+             "Ctrl+J toggle chat")
 EMPTY_CARDS = SuggestionsTable.EMPTY
 BUSY_TEXT = "A refresh is already running in the background"
 SECTION_GAP = 40
@@ -149,6 +150,7 @@ class MainWindow(QMainWindow):
         scheme: str | None = None,
         ask_fn: AskFn | None = None,
         chat_open: bool = True,
+        voice: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg or Config.from_env()
@@ -165,6 +167,7 @@ class MainWindow(QMainWindow):
         self._bridge.failed.connect(self._on_refresh_failed)
         self._bridge.busy.connect(self._on_refresh_busy)
         self._ask_fn = ask_fn
+        self._voice_kw = dict(voice or {})  # ChatPanel voice seams (tests inject fakes)
 
         self.setWindowTitle(f"Jarvis · {self.cfg.repo.split('/')[-1]}")
         self.resize(*DEFAULT_SIZE)
@@ -246,7 +249,7 @@ class MainWindow(QMainWindow):
         pane_lay.addWidget(bar)
 
         root.addWidget(self.pane, 1)
-        self.chat = ChatPanel(self.cfg, self.tokens, self._ask_fn)
+        self.chat = ChatPanel(self.cfg, self.tokens, self._ask_fn, **self._voice_kw)
         self.chat.close_requested.connect(lambda: self.set_chat_open(False))
         root.addWidget(self.chat)
 
@@ -370,6 +373,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self.focus_chat)
         QShortcut(QKeySequence("Ctrl+J"), self,
                   activated=lambda: self.set_chat_open(not self.chat.isVisible()))
+        # Window-wide, so it also works while typing in the chat box.
+        QShortcut(QKeySequence("Ctrl+Space"), self, activated=self.toggle_voice)
 
     # ------------------------------------------------------------ chat / peek
 
@@ -383,8 +388,17 @@ class MainWindow(QMainWindow):
     def focus_chat(self) -> None:
         self.set_chat_open(True)
 
+    def toggle_voice(self) -> None:
+        """Ctrl+Space: talk to Jarvis (opens the chat if it is hidden)."""
+        if not self.chat.isVisible() and not self.chat.voice_active:
+            self.set_chat_open(True, focus=False)
+        self.chat.toggle_voice()
+
     def _on_escape(self) -> None:
-        """Esc closes the peek drawer if it is open; otherwise it does nothing."""
+        """Esc stops voice (listening or speaking) first; otherwise it closes the
+        peek drawer if it is open; otherwise it does nothing."""
+        if self.chat.stop_voice():
+            return
         if self.peek.is_open:
             self.peek.hide_panel()
 
@@ -722,6 +736,7 @@ class MainWindow(QMainWindow):
             self._sync_spinner()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
+        self.chat.shutdown()  # mic and speaker off, voice workers joined
         if self._owns_conn:
             try:
                 self.conn.close()

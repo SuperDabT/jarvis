@@ -312,6 +312,8 @@ def test_speaker_plays_in_order_with_levels_and_states():
     assert p.stdin.closed and not p.killed
     assert states == ["speaking", "idle"]
     assert any(v > 0 for v in levels) and levels[-1] == 0.0
+    sp.close()
+    assert not any(t.is_alive() for t in sp._threads)  # both workers end on close
 
 
 def test_speaker_prefetches_next_sentence_while_playing():
@@ -530,6 +532,9 @@ def test_voice_answer_speaks_sentences_as_they_stream(tmp_path):
     assert "SOURCES" not in "".join(shown)
     assert ans.unverified_numbers == []
     assert chat.VOICE_RULES.strip() in client.messages[0]["content"]
+    # prompt-cache friendly: the stable project data is in the system message
+    assert "CONTEXT, part 1" in client.messages[0]["content"]
+    assert client.messages[-1]["content"].startswith("CONTEXT, part 2:")
 
 
 def test_voice_answer_speaks_unverified_note_at_end(tmp_path):
