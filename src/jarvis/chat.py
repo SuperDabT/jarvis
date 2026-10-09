@@ -49,10 +49,11 @@ from jarvis.briefing import (
 )
 from jarvis.config import Config
 from jarvis.db import now_iso
-from jarvis.facts import ISSUE_REF_RE, Fact, compute_facts, first_line, tokens
+from jarvis.facts import ISSUE_REF_RE, Fact, NextStep, compute_facts, first_line, tokens
 from jarvis.ollama import DEFAULT_EMBED_MODEL, OllamaClient, OllamaError
 
 CHARS_PER_TOKEN = 4
+CITED_SOURCES_MAX = 6
 CONTEXT_TOKEN_BUDGET = 6000
 BODY_CHARS = 300          # issue body excerpt for relevant issues
 MAX_BODIES = 6            # at most this many issue bodies per question
@@ -108,6 +109,10 @@ words, one item per theme with its dates and one or two example shas, for exampl
 - For "which issues are about X": list the issues tagged "keyword hit" whose title \
 or body is about X (the tag is a hint for you; do not copy it). Any other issue you think is related gets "may be related" and the \
 reason from its title.
+- For questions about what to do, work on, focus on, plan or prioritize: answer from \
+SUGGESTED NEXT STEPS, in its order, starting with step 1; summarize steps rather than \
+copying them, keep their hedges ("may already be done"), and say it is Jarvis's \
+suggestion from the data, not a schedule. Do not invent tasks, dates or time estimates.
 - Electrical results come from hardware.yaml values (mostly datasheet or seller figures, \
 not measurements); say so when you answer about them.
 - End with one last line: "SOURCES: " then the references you used, without brackets, \
@@ -123,7 +128,8 @@ length rule above:
 markdown, no tables, no references in square brackets, no parentheses if you can avoid them.
 - Never read out a list of issue numbers. Give the count exactly as the CONTEXT states \
 it (for example the milestone's "counts:"), then name at most 2 issues, each by number \
-and a few words of its title.
+and a few words of its title. For SUGGESTED NEXT STEPS, cover only the first 2 or 3 \
+steps, with at most 2 issue numbers in the whole answer.
 - Keep hedges for uncertain items ("may already be done").
 - Still end with the SOURCES line as described above; it is not spoken.
 """
@@ -157,6 +163,12 @@ class Context:
     # question or the clock (byte-identical between questions, so Ollama can reuse
     # its KV cache for it); 0 = no split.
     stable_chars: int = 0
+    # SUGGESTED NEXT STEPS (facts.NextStep) and every ref they point at (issues,
+    # commits, milestones, cards, checks) plus "fact:next_steps".
+    next_steps: list[NextStep] = field(default_factory=list)
+    next_step_refs: set[str] = field(default_factory=set)
+    today: date | None = None
+    last_commit: tuple[str, date] | None = None   # (7-char sha, local day) of the newest
 
     @property
     def stable_text(self) -> str:
@@ -184,6 +196,22 @@ class Answer:
     raw: str = ""                          # the full model reply, unedited
     dropped_refs: list[str] = field(default_factory=list)
     context_tokens: int = 0
+    # Only the refs the answer itself cited (SOURCES line) or named inline (#N, a sha),
+    # without the fact-evidence expansion that ``sources`` adds; at most
+    # CITED_SOURCES_MAX, ``cited_more_count`` says how many more there were. Empty
+    # when the answer text is empty. (``sources`` is unchanged, for compatibility.)
+    cited_sources: list[Source] = field(default_factory=list)
+    cited_more_count: int = 0
+    # Issue numbers / shas the answer named that aren't in the synced data.
+    invalid_refs: list[str] = field(default_factory=list)
+    # Statements about commit dates that contradict the synced commits.
+    claim_errors: list[str] = field(default_factory=list)
+    # Escalation (see jarvis.escalate): which tier produced this answer, whether a
+    # fast answer was judged weak and replaced, why, and how long the model reasoned.
+    tier: str = "fast"                     # "fast" | "deep" | "fallback"
+    escalated: bool = False
+    escalation_reasons: list[str] = field(default_factory=list)
+    thinking_s: float | None = None
 
     @property
     def display_text(self) -> str:
@@ -435,6 +463,8 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
     ms_title = {m["number"]: m["title"] for m in milestones}
     commits = [c for c in conn.execute("SELECT * FROM commits ORDER BY committed_at DESC, sha")
                if _parse_ts(c["committed_at"])]
+    last_commit = ((commits[0]["sha"][:7], local_day(commits[0]["committed_at"]))
+                   if commits else None)
     open_issues = [i for i in issues if i["state"] == "open"]
 
     # --- relevance
@@ -490,10 +520,21 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
                   if f.kind == "maybe_done" and "issue" in f.data}
     fact_lines = []
     fact_evidence: dict[str, list[str]] = {}
+    next_lines: list[str] = []
+    steps: list[NextStep] = []
+    step_refs: set[str] = set()
     for f in facts:
         ref = f"fact:{f.id}"
         refs[ref] = Source(ref, _one_line(f.text, 90), None)
         fact_evidence[ref] = list(f.evidence)
+        if f.kind == "next_steps":
+            steps = [NextStep(**d) for d in f.data["steps"]]
+            step_refs = {ref, *f.evidence}
+            next_lines.append(f"[{ref}] Ranked by Jarvis from open issues, milestones, "
+                              "electrical checks and commit dates:")
+            next_lines += [f"{st.rank}. {'(uncertain) ' if not st.certain else ''}{st.text} "
+                           f"Why: {st.reason}." for st in steps]
+            continue
         fact_lines.append(f"[{ref}] {'(uncertain) ' if not f.certain else ''}{f.text}")
 
     # --- milestones
@@ -663,12 +704,15 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
             stable_views, windowed, card_lines, now_lines, asked_lines, relevant_lines, refs,
             dict(issue_numbers=set(by_num),
                  commit_shas=[c["sha"] for c in conn.execute("SELECT sha FROM commits")],
-                 ranking=ranking, fact_evidence=fact_evidence, window_days=window),
-            body_for)
+                 ranking=ranking, fact_evidence=fact_evidence, window_days=window,
+                 next_steps=steps, next_step_refs=step_refs, today=today,
+                 last_commit=last_commit),
+            body_for, next_lines)
     sections = {
         "header": _Section("PROJECT", header, required=True),
         "facts": _Section("FACTS (computed by Jarvis)", fact_lines or ["(none)"], required=True),
         "milestones": _Section("MILESTONES", ms_lines or ["(none)"], required=True),
+        "next": _Section(NEXT_STEPS_TITLE, next_lines, required=True),
         "asked": _Section("ISSUES ASKED ABOUT", asked_lines),
         "open": _Section(open_title, open_lines or ["(none)"]),
         "electrical": _Section("ELECTRICAL (hardware.yaml checks)", elec_lines),
@@ -677,7 +721,7 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
         "cards": _Section("ACTIVE SUGGESTION CARDS", card_lines),
     }
     # Fill order: what must be there first; display order is the dict order above.
-    fill = ["header", "facts", "milestones", "asked", "open", "electrical", "commits",
+    fill = ["header", "facts", "milestones", "next", "asked", "open", "electrical", "commits",
             "closed", "cards"]
     budget = budget_tokens * CHARS_PER_TOKEN
     used = 0
@@ -714,6 +758,7 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
         commit_shas=[c["sha"] for c in conn.execute("SELECT sha FROM commits")],
         body_issues=[n for n in body_for if f"#{n}" in refs], omitted=omitted,
         ranking=ranking, fact_evidence=fact_evidence, window_days=window,
+        next_steps=steps, next_step_refs=step_refs, today=today, last_commit=last_commit,
     )
 
 
@@ -745,6 +790,9 @@ def _fill(sections: dict[str, _Section], keys: Sequence[str], budget: int, used:
     return used
 
 
+NEXT_STEPS_TITLE = ("SUGGESTED NEXT STEPS (computed by Jarvis from issues, milestones and "
+                    "checks — not a schedule)")
+
 # stable_prefix mode: the stable part gets the whole budget (once warm it costs
 # nothing: it is cached), and the question part may add up to this many tokens.
 QUESTION_PART_TOKENS = 1000
@@ -756,7 +804,7 @@ def _assemble_stable(budget_tokens: int, header: list[str], fact_lines: list[str
                      windowed: dict[str, tuple[str, list[str]]], card_lines: list[str],
                      now_lines: list[str], asked_lines: list[str], relevant_lines: list[str],
                      refs: dict[str, Source], extra: dict[str, Any],
-                     body_for: list[int]) -> Context:
+                     body_for: list[int], next_lines: list[str]) -> Context:
     """build_context(stable_prefix=True): the stable sections fill ``budget_tokens``
     on their own (so their trimming never depends on the question); the question
     part comes after, within QUESTION_PART_TOKENS more."""
@@ -765,6 +813,7 @@ def _assemble_stable(budget_tokens: int, header: list[str], fact_lines: list[str
         "facts": _Section("FACTS (computed by Jarvis)", fact_lines or ["(none)"],
                           required=True),
         "milestones": _Section("MILESTONES", ms_lines or ["(none)"], required=True),
+        "next": _Section(NEXT_STEPS_TITLE, next_lines, required=True),
         "open": _Section(open_title, open_lines or ["(none)"]),
         "electrical": _Section("ELECTRICAL (hardware.yaml checks)", elec_lines),
         "commits": _Section(*views["commits"]),
@@ -779,7 +828,7 @@ def _assemble_stable(budget_tokens: int, header: list[str], fact_lines: list[str
     # question part; the default views stay in the stable part.
     for key, (title, lines) in windowed.items():
         sections[f"window_{key}"] = _Section(title, lines)
-    stable = ["header", "facts", "milestones", "open", "electrical", "commits", "closed",
+    stable = ["header", "facts", "milestones", "next", "open", "electrical", "commits", "closed",
               "cards"]
     volatile = ["now", "asked", "relevant", *(f"window_{k}" for k in windowed)]
     budget = budget_tokens * CHARS_PER_TOKEN
@@ -1001,6 +1050,57 @@ def find_unverified_numbers(answer: str, allowed_text: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+_MONTH_NUM = {m: k + 1 for k, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"))}
+_CLAIM_DATE = (r"(?:on\s+|since\s+|after\s+)?(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day,?\s+)?"
+               r"((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}"
+               r"(?:st|nd|rd|th)?|today|yesterday)")
+_NO_COMMITS_SINCE_RE = re.compile(
+    r"\bno\s+(?:new\s+)?commits?\b[^.\n]{0,40}?\b(?:since|after)\s+" + _CLAIM_DATE, re.I)
+_LAST_COMMIT_RE = re.compile(
+    r"\b(?:last|latest|most recent|newest)\s+commit\b[^.\n]{0,40}?\b(?:was|is|on|from|"
+    r"dated|made|pushed)\s+" + _CLAIM_DATE, re.I)
+
+
+def _claim_day(text: str, today: date) -> date | None:
+    t = text.lower().strip()
+    if t == "today":
+        return today
+    if t == "yesterday":
+        return today - timedelta(days=1)
+    m = DATE_RE.match(t)
+    if not m:
+        return None
+    try:
+        d = date(today.year, _MONTH_NUM[m.group(1)[:3].lower()], int(m.group(2)))
+    except ValueError:
+        return None
+    return d.replace(year=d.year - 1) if d > today + timedelta(days=1) else d
+
+
+def commit_date_claim_errors(body: str, ctx: Context) -> list[str]:
+    """Claims about commit dates that contradict the newest synced commit.
+
+    "no commits since D" is wrong when the last commit is after D, and misleading
+    when it is more than a day before D (the quiet stretch began earlier);
+    "the last commit was on D" is wrong unless D is the last commit's local day.
+    Returns the offending phrases (empty when nothing is checkable).
+    """
+    if not ctx.last_commit or ctx.today is None:
+        return []
+    last = ctx.last_commit[1]
+    out: list[str] = []
+    for m in _NO_COMMITS_SINCE_RE.finditer(body):
+        d = _claim_day(m.group(1), ctx.today)
+        if d is not None and (last > d or last < d - timedelta(days=1)):
+            out.append(m.group(0).strip())
+    for m in _LAST_COMMIT_RE.finditer(body):
+        d = _claim_day(m.group(1), ctx.today)
+        if d is not None and d != last:
+            out.append(m.group(0).strip())
+    return list(dict.fromkeys(out))
+
+
 def _says_missing(text: str, n: int) -> bool:
     """True if the answer itself already says issue #n does not exist."""
     return bool(re.search(rf"\bno(?:t an?)?\s+issue\s+#{n}\b", text, re.I) or re.search(
@@ -1029,6 +1129,7 @@ def validate_answer(raw: str, ctx: Context, question: str,
         r = resolve_ref(m.group(0), ctx)
         if r and r not in sources:
             sources.append(r)
+    cited = list(sources) if body.strip() else []
     # A cited fact brings its evidence (issues, commits, milestones) along as links.
     for r in list(sources):
         for ev in ctx.fact_evidence.get(r, []):
@@ -1048,13 +1149,21 @@ def validate_answer(raw: str, ctx: Context, question: str,
     if bad_shas:
         notes.append(f"Note: commit {', '.join(dict.fromkeys(bad_shas))} isn't among the "
                      "synced commits.")
+    claims = commit_date_claim_errors(body, ctx)
+    if claims and ctx.last_commit:
+        sha, day = ctx.last_commit
+        notes.append(f"Note: the last synced commit is {sha}, on {_fmt_day(day)}.")
     allowed_text = "\n".join([ctx.text, question, *(c for r, c in history if r == "user")])
     unverified = find_unverified_numbers(body, allowed_text)
     if unverified:
         notes.append(f"Unverified numbers: {', '.join(unverified)} (not in Jarvis's data).")
     return Answer(text=body, sources=[ctx.refs[r] for r in sources], unverified_numbers=unverified,
                   notes=notes, model=None, duration=0.0, raw=raw, dropped_refs=dropped,
-                  context_tokens=ctx.tokens)
+                  context_tokens=ctx.tokens,
+                  cited_sources=[ctx.refs[r] for r in cited[:CITED_SOURCES_MAX]],
+                  cited_more_count=max(0, len(cited) - CITED_SOURCES_MAX),
+                  invalid_refs=[f"#{n}" for n in bad_issues] + list(dict.fromkeys(bad_shas)),
+                  claim_errors=claims)
 
 
 # ---------------------------------------------------------------- history + persistence
@@ -1137,7 +1246,10 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
         on_token: Callable[[str], None] | None = None, now: datetime | None = None, *,
         session_id: str | None = None, use_embeddings: bool = False,
         brevity: Brevity = "text", budget_tokens: int = CONTEXT_TOKEN_BUDGET,
-        stable_prefix: bool = False) -> Answer:
+        stable_prefix: bool = False, think: bool | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+        max_thinking_s: float | None = None,
+        ctx_out: list[Context] | None = None) -> Answer:
     """Answer one question from the synced data. Never raises for model failures.
 
     ``history`` is the earlier (role, content) messages of this conversation (only
@@ -1151,6 +1263,11 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
     caps the context size (smaller = faster first token, less detail).
     ``stable_prefix`` puts the question-independent context first, in the system
     message (see build_context), so a warm model reuses its prompt cache.
+    ``think=True`` asks the model for its native reasoning (OllamaClient.chat_stream);
+    the reasoning never reaches ``on_token`` or the answer, ``on_thinking`` gets its
+    chunks and ``answer.thinking_s`` how long it took; ``max_thinking_s`` caps the
+    reasoning (the answer then has ``error`` set to the budget message). ``ctx_out`` (a list) receives
+    the Context used, for callers that check the answer further (jarvis.escalate).
     """
     t0 = time.monotonic()
     question = question.strip()
@@ -1165,37 +1282,48 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
         ctx = build_context(conn, cfg, question, now, history=history,
                             embedder=client if use_embeddings else None,
                             budget_tokens=budget_tokens, stable_prefix=stable_prefix)
+        if ctx_out is not None:
+            ctx_out.append(ctx)
         messages = build_messages(ctx, question, history, brevity)
-        think = ThinkFilter()
+        stream_kw: dict[str, Any] = {}
+        if think is not None:
+            stream_kw["think"] = think
+        if on_thinking is not None:
+            stream_kw["on_thinking"] = on_thinking
+        if max_thinking_s is not None:
+            stream_kw["max_thinking_s"] = max_thinking_s
+        think_filter = ThinkFilter()
         filt = SourcesLineFilter()
         chunks: list[str] = []
         first: float | None = None
         error: str | None = None
         try:
-            for chunk in client.chat_stream(messages):
+            for chunk in client.chat_stream(messages, **stream_kw):
                 if first is None:
                     first = time.monotonic() - t0
                 chunks.append(chunk)
                 if on_token:
-                    shown = filt.feed(think.feed(chunk))
+                    shown = filt.feed(think_filter.feed(chunk))
                     if shown:
                         on_token(shown)
-            if on_token and (tail := filt.feed(think.flush()) + filt.flush()):
+            if on_token and (tail := filt.feed(think_filter.flush()) + filt.flush()):
                 on_token(tail)
         except OllamaError as e:
             error = str(e)
         raw = strip_think("".join(chunks))
+        thinking_s = getattr(client, "last_thinking_s", None) if think else None
         if error is not None and not raw.strip():
             msg = (UNREACHABLE.format(url=cfg.ollama_url) if "cannot reach" in error
                    else f"The local model failed: {error}")
             return Answer(text=msg, sources=[], unverified_numbers=[], notes=[], model=model,
                           duration=time.monotonic() - t0, first_token_s=first, error=error,
-                          context_tokens=ctx.tokens)
+                          context_tokens=ctx.tokens, thinking_s=thinking_s)
         ans = validate_answer(raw, ctx, question, history)
         if error is not None:
             ans.notes.append(f"Note: the answer was cut off ({error}).")
             ans.error = error
         ans.model = model
+        ans.thinking_s = thinking_s
         ans.first_token_s = first
         ans.duration = time.monotonic() - t0
         if session_id and error is None:

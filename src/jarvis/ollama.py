@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import httpx
@@ -14,6 +15,13 @@ DEFAULT_EMBED_MODEL = "qwen3-embedding:0.6b"
 
 class OllamaError(RuntimeError):
     """Connection failure, non-200 response, or a reply that is not valid JSON."""
+
+
+THINKING_BUDGET_MSG = "thinking budget exceeded"
+
+
+class ThinkingBudgetExceeded(OllamaError):
+    """chat_stream(max_thinking_s=...) stopped a reply that was still reasoning."""
 
 
 class OllamaClient:
@@ -33,6 +41,11 @@ class OllamaClient:
         self._think_supported = True
         # The final NDJSON object of the last chat_stream (timings, eval_count), or None.
         self.last_stream_stats: dict[str, Any] | None = None
+        # Thinking of the last chat_stream(think=True): seconds from the first thinking
+        # chunk to the first answer chunk (None = no thinking), and its length in chars.
+        # The thinking text itself is never yielded or stored.
+        self.last_thinking_s: float | None = None
+        self.last_thinking_chars = 0
 
     def close(self) -> None:
         self._http.close()
@@ -99,7 +112,9 @@ class OllamaClient:
 
     def chat_stream(
         self, messages: list[dict[str, str]], options: dict[str, Any] | None = None,
-        keep_alive: str | None = None,
+        keep_alive: str | None = None, think: bool | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+        max_thinking_s: float | None = None,
     ) -> Iterator[str]:
         """Stream a plain-text chat reply as content chunks (POST /api/chat, stream=true).
 
@@ -108,9 +123,20 @@ class OllamaClient:
         A line with ``error`` (e.g. the model crashed mid-reply), a non-200 status, a
         connection failure, or a stream that ends without ``done`` raises OllamaError.
         Thinking is disabled like ``chat_json`` (retried without it if rejected).
+        ``think=True`` turns the model's native reasoning on (``"think": true``, for
+        models with the "thinking" capability, e.g. gemma4): Ollama then sends the
+        reasoning in a separate ``message.thinking`` field. It is never yielded;
+        ``on_thinking`` gets each thinking chunk (for a "thinking..." indicator), and
+        ``last_thinking_s`` / ``last_thinking_chars`` say how long and how much. If
+        the server rejects ``think: true`` the request fails (OllamaError), since
+        the caller asked for reasoning explicitly. ``max_thinking_s`` caps the
+        reasoning: once it has run that long without an answer chunk, the request
+        is closed (Ollama stops generating) and ThinkingBudgetExceeded is raised.
         ``keep_alive`` (or the client's ``keep_alive``) is passed on when set.
         """
         self.last_stream_stats = None
+        self.last_thinking_s = None
+        self.last_thinking_chars = 0
         payload: dict[str, Any] = {
             "model": self.model,
             "stream": True,
@@ -120,7 +146,9 @@ class OllamaClient:
         if (ka := keep_alive or self.keep_alive) is not None:
             payload["keep_alive"] = ka
         for _attempt in range(2):
-            if self._think_supported:
+            if think:
+                payload["think"] = True
+            elif self._think_supported:
                 payload["think"] = False
             else:
                 payload.pop("think", None)
@@ -128,18 +156,27 @@ class OllamaClient:
                 with self._http.stream("POST", "/api/chat", json=payload) as resp:
                     if resp.status_code != 200:
                         text = resp.read().decode("utf-8", "replace")
-                        if (resp.status_code == 400 and "think" in payload
+                        if (resp.status_code == 400 and "think" in payload and not think
                                 and "think" in text.lower()):
                             self._think_supported = False
                             continue
                         raise OllamaError(f"Ollama returned {resp.status_code}: {text[:200]}")
-                    yield from self._iter_ndjson(resp.iter_lines())
+                    yield from self._iter_ndjson(resp.iter_lines(), on_thinking, max_thinking_s)
                     return
             except httpx.HTTPError as e:
                 raise OllamaError(f"cannot reach Ollama at {self.base_url}: {e}") from e
         raise OllamaError("Ollama rejected the request twice")
 
-    def _iter_ndjson(self, lines: Iterator[str]) -> Iterator[str]:
+    def _iter_ndjson(self, lines: Iterator[str],
+                     on_thinking: Callable[[str], None] | None = None,
+                     max_thinking_s: float | None = None) -> Iterator[str]:
+        think_t0: float | None = None
+        answering = False
+
+        def end_thinking() -> None:
+            if think_t0 is not None and self.last_thinking_s is None:
+                self.last_thinking_s = time.monotonic() - think_t0
+
         for line in lines:
             if not line.strip():
                 continue
@@ -152,10 +189,26 @@ class OllamaClient:
             if obj.get("error"):
                 raise OllamaError(f"Ollama error: {obj['error']}")
             msg = obj.get("message")
+            thinking = msg.get("thinking") if isinstance(msg, dict) else None
+            if thinking and isinstance(thinking, str):
+                if think_t0 is None:
+                    think_t0 = time.monotonic()
+                self.last_thinking_chars += len(thinking)
+                if on_thinking:
+                    on_thinking(thinking)
+                spent = time.monotonic() - think_t0
+                if max_thinking_s is not None and not answering and spent > max_thinking_s:
+                    self.last_thinking_s = spent
+                    raise ThinkingBudgetExceeded(
+                        f"{THINKING_BUDGET_MSG} ({spent:.0f} s, "
+                        f"{self.last_thinking_chars} chars)")
             content = msg.get("content") if isinstance(msg, dict) else None
             if content:
+                end_thinking()
+                answering = True
                 yield content
             if obj.get("done"):
+                end_thinking()
                 self.last_stream_stats = {k: v for k, v in obj.items() if k != "message"}
                 return
         raise OllamaError("Ollama stream ended before the reply was done")

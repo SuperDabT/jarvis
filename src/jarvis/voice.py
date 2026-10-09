@@ -46,6 +46,10 @@ VOICE_CONTEXT_TOKEN_BUDGET = 3000
 # model reuses its prompt cache between questions (chat.build_context).
 VOICE_STABLE_PREFIX = True
 UNVERIFIED_SPOKEN = "Some numbers couldn't be verified."
+# Said while the reasoning model loads and thinks (a deep pass can take 30-60 s,
+# most of it swapping qwen3 out for gemma4: both don't fit in VRAM together).
+THINK_FILLER = "Let me think about that properly."
+DOUBLE_CHECK_FILLER = "Let me double-check that."
 
 STT_DOWN = ("Parakeet speech-to-text isn't running at {url}. "
             "Start it with: systemctl --user start parakeet-stt")
@@ -796,7 +800,9 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
                  *, session_id: str | None = None,
                  on_sentence: Callable[[str], None] | None = None,
                  budget_tokens: int | None = None,
-                 stable_prefix: bool = VOICE_STABLE_PREFIX) -> Any:
+                 stable_prefix: bool = VOICE_STABLE_PREFIX,
+                 mode: str | None = None, deep_client: Any | None = None,
+                 on_phase: Callable[[str, dict], None] | None = None) -> Any:
     """Answer ``question`` aloud: chat.ask(brevity="voice") with sentence-by-sentence speech.
 
     Streamed display text goes to ``on_token`` (as with typed chat; replace it
@@ -807,8 +813,25 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
     anything, its error message is spoken. ``client`` None -> ``voice_client(cfg)``.
     Returns the chat.Answer. Blocks until the model is done (not until speech
     ends; use ``speaker.wait()`` for that). Safe on a worker thread.
+
+    ``mode`` "auto" or "think" uses ``escalate.answer_with_escalation`` with
+    ``client`` (the voice model) as the fast tier and ``deep_client`` (None ->
+    cfg.model with reasoning, kept loaded 10 min) as the deep tier; ``on_phase``
+    gets its phase events. Speech while escalating: the fast answer is spoken as it
+    streams (a weak one is usually empty, so nothing is said); when the deep pass
+    starts, a filler is spoken at once: "Let me double-check that." if part of the
+    fast answer was already spoken, else "Let me think about that properly.". The
+    fast answer's unspoken remainder is dropped. A template fallback answer is
+    spoken as a whole. ``mode`` None = one plain pass on ``client`` (as before).
     """
     from jarvis import chat
+
+    if mode is not None:
+        return _voice_escalated(conn, cfg, question, history, client, speaker,
+                                on_token=on_token, now=now, session_id=session_id,
+                                on_sentence=on_sentence, budget_tokens=budget_tokens,
+                                stable_prefix=stable_prefix, mode=mode,
+                                deep_client=deep_client, on_phase=on_phase)
 
     splitter = SentenceSplitter()
     spoke = False
@@ -842,6 +865,70 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
             client.close()
     speak(splitter.flush())
     if not spoke and ans.text.strip():
+        speak([ans.text])
+    if ans.unverified_numbers:
+        speak([UNVERIFIED_SPOKEN])
+    return ans
+
+
+def _voice_escalated(conn: sqlite3.Connection, cfg: Config, question: str,
+                     history: Sequence[tuple[str, str]], client: Any | None, speaker: Any,
+                     *, on_token: Callable[[str], None] | None, now: datetime | None,
+                     session_id: str | None, on_sentence: Callable[[str], None] | None,
+                     budget_tokens: int | None, stable_prefix: bool, mode: str,
+                     deep_client: Any | None,
+                     on_phase: Callable[[str, dict], None] | None) -> Any:
+    from jarvis import chat, escalate
+
+    state = {"splitter": SentenceSplitter(), "spoke": False, "spoke_pass": False}
+
+    def say(text: str) -> None:
+        speaker.say(text)
+        if on_sentence:
+            on_sentence(text)
+
+    def speak(sentences: list[str]) -> None:
+        for s in sentences:
+            text = speakable(condense_issue_list(s))
+            if not re.search(r"[A-Za-z0-9]", text):
+                continue
+            state["spoke"] = state["spoke_pass"] = True
+            say(text)
+
+    def token(t: str) -> None:
+        if on_token:
+            on_token(t)
+        speak(state["splitter"].feed(t))
+
+    def phase(name: str, info: dict) -> None:
+        if name == "escalating":
+            info = {**info, "spoken": state["spoke"]}
+        elif name == "discard_fast":
+            state["splitter"] = SentenceSplitter()  # drop the fast answer's remainder
+        elif name == "deep":
+            say(DOUBLE_CHECK_FILLER if state["spoke"] else THINK_FILLER)
+            state["spoke_pass"] = False
+        elif name == "fallback":
+            state["splitter"] = SentenceSplitter()
+            state["spoke_pass"] = False
+        if on_phase:
+            on_phase(name, info)
+
+    own = client is None
+    if client is None:
+        client = voice_client(cfg)
+    try:
+        ans = escalate.answer_with_escalation(
+            conn, cfg, question, history, mode=mode, fast_client=client,
+            deep_client=deep_client, on_token=token, on_phase=phase, brevity="voice",
+            session_id=session_id, now=now,
+            fast_budget=budget_tokens or VOICE_CONTEXT_TOKEN_BUDGET,
+            deep_budget=chat.CONTEXT_TOKEN_BUDGET, stable_prefix=stable_prefix)
+    finally:
+        if own:
+            client.close()
+    speak(state["splitter"].flush())
+    if not state["spoke_pass"] and ans.text.strip():
         speak([ans.text])
     if ans.unverified_numbers:
         speak([UNVERIFIED_SPOKEN])

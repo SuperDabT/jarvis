@@ -353,6 +353,11 @@ def compute_facts(
     if res is not None:
         facts.append(res)
 
+    # 12: suggested next steps (ranked from the facts above)
+    steps = _rank_next_steps(conn, today, tz, milestones, open_issues, maybe, commits)
+    if steps:
+        facts.append(next_steps_fact(steps))
+
     return sorted(facts, key=lambda f: (f.priority, f.id))
 
 
@@ -408,6 +413,162 @@ def research_fact(conn: sqlite3.Connection) -> Fact | None:
         data={"active": n, "issues": sorted(issues), "libraries": libraries},
         evidence=[f"#{x}" for x in sorted(issues)],
     )
+
+
+# ---------------------------------------------------------------- next steps
+
+NEXT_STEPS_MAX = 5
+NEXT_STEPS_PRIORITY = 6      # below every other fact: never crowds the briefing
+MAX_VERIFY_LISTED = 3        # maybe-done issues named in the "confirm and close" step
+MAX_MILESTONE_STEPS = 2      # milestone issues before blockers and the quiet gap
+PHASE_RE = re.compile(r"^phase[-_ ]?(\d+)$", re.I)
+
+
+@dataclass(frozen=True)
+class NextStep:
+    """One suggested next step: deterministic, with the reason and evidence behind it.
+
+    ``kind``: "verify_close" (open issues that may already be done), "milestone_issue"
+    (next open issue of the nearest-due milestone), "blocker" (hardware.yaml values
+    that electrical checks need), "quiet_gap" (no commits for a while; neutral).
+    """
+    rank: int
+    kind: str
+    text: str
+    reason: str
+    evidence: list[str] = field(default_factory=list)
+    certain: bool = True
+
+
+def _phase(labels_json: str | None) -> int:
+    """Phase number from a "phase-N" label (lowest wins); 99 when there is none."""
+    try:
+        labels = json.loads(labels_json or "[]")
+    except ValueError:
+        labels = []
+    nums = [int(m.group(1)) for lb in labels if (m := PHASE_RE.match(str(lb)))]
+    return min(nums) if nums else 99
+
+
+def _rank_next_steps(conn: sqlite3.Connection, today: date, tz: Any, milestones: list,
+                     open_issues: list, maybe: dict[int, list[dict]],
+                     commits: list) -> list[NextStep]:
+    """Ranked next steps (at most NEXT_STEPS_MAX), from issues, milestones and checks.
+
+    Order: (a) confirm and close issues that may already be done (cheap wins,
+    uncertain); (b) open issues of the nearest-due milestone by phase label
+    (phase-1 < phase-2 < phase-3 < none), then number, skipping maybe-done ones
+    (at most MAX_MILESTONE_STEPS here); (c) electrical checks blocked on missing
+    hardware.yaml values; (d) a quiet gap of 2+ days without commits; then more
+    milestone issues if there is room.
+    """
+    due_ms = sorted(((m, d) for m in milestones if (d := _due_date(m["due_on"])) is not None),
+                    key=lambda md: (md[1], md[0]["number"]))
+    ms_rank = {m["number"]: k for k, (m, _) in enumerate(due_ms)}
+
+    verify: list[NextStep] = []
+    if maybe:
+        nums = sorted(maybe, key=lambda n: (
+            ms_rank.get(next((i["milestone_number"] for i in open_issues
+                              if i["number"] == n), None), len(ms_rank)), n))
+        by_num = {i["number"]: i for i in open_issues}
+        listed = nums[:MAX_VERIFY_LISTED]
+        shas = list(dict.fromkeys(mt["sha"] for n in listed for mt in maybe[n][:1]))
+        names = ", ".join(f"#{n} {by_num[n]['title']}" for n in listed)
+        more = f" (and {len(nums) - len(listed)} more)" if len(nums) > len(listed) else ""
+        what = ("1 issue that may already be done" if len(nums) == 1
+                else f"{len(nums)} issues that may already be done")
+        verify.append(NextStep(
+            rank=0, kind="verify_close",
+            text=f"Confirm and close {what}: {names}{more}.",
+            reason=f"recent commits ({', '.join(shas)}) look like the same work; "
+                   "a quick check, not certain",
+            evidence=[f"#{n}" for n in nums] + [f"commit:{s}" for s in shas], certain=False))
+
+    work: list[NextStep] = []
+    if due_ms:
+        m, due = due_ms[0]
+        cands = sorted((i for i in open_issues if i["milestone_number"] == m["number"]
+                        and i["number"] not in maybe),
+                       key=lambda i: (_phase(i["labels"]), i["number"]))
+        left = (due - today).days
+        rel = (f"in {plural(left, 'day')}" if left > 0 else "today" if left == 0
+               else f"overdue by {plural(-left, 'day')}")
+        for i in cands:
+            ph = _phase(i["labels"])
+            ph_txt = f"phase-{ph}" if ph != 99 else "no phase label"
+            work.append(NextStep(
+                rank=0, kind="milestone_issue",
+                text=f"Work on #{i['number']} {i['title']} (milestone {m['title']}, "
+                     f"due {fmt_day(due)}, {rel}).",
+                reason=f"open in the nearest-due milestone; {ph_txt}, ordered by phase "
+                       "then issue number",
+                evidence=[f"#{i['number']}", f"milestone:{m['title']}"]))
+
+    blockers: list[NextStep] = []
+    missing = [r["check_id"][len("missing:"):] for r in conn.execute(
+        "SELECT check_id FROM electrical_findings WHERE check_id LIKE 'missing:%' "
+        "AND COALESCE(status, 'unknown') != 'pass' ORDER BY check_id")]
+    cards = conn.execute(
+        """SELECT c.id, COALESCE(e.status, 'unknown') AS status FROM cards c
+           LEFT JOIN electrical_findings e ON e.check_id = c.check_id
+           WHERE c.type = 'electrical' AND c.status = 'active' ORDER BY c.id""").fetchall()
+    unknown_cards = [c["id"] for c in cards if c["status"] == "unknown"]
+    if missing:
+        n_cards = len(unknown_cards)
+        tail = (f": {plural(n_cards, 'electrical check card')} "
+                f"{'stays' if n_cards == 1 else 'stay'} unconfirmed until then"
+                if n_cards else "")
+        blockers.append(NextStep(
+            rank=0, kind="blocker",
+            text=f"Fill in {plural(len(missing), 'hardware.yaml value')} "
+                 f"({', '.join(missing)}){tail}.",
+            reason="electrical checks can't confirm the power rails without these values",
+            evidence=[f"card:{c}" for c in unknown_cards]
+            + [f"check:missing:{x}" for x in missing]))
+    elif cards:
+        blockers.append(NextStep(
+            rank=0, kind="blocker",
+            text=f"Review {plural(len(cards), 'active electrical check card')}.",
+            reason="electrical checks found problems or open questions",
+            evidence=[f"card:{c['id']}" for c in cards]))
+
+    quiet: list[NextStep] = []
+    if commits:
+        last = commits[0]
+        dt = _parse_ts(last["committed_at"])
+        last_day = dt.astimezone(tz).date()
+        gap = (today - last_day).days
+        if gap >= 2:
+            quiet.append(NextStep(
+                rank=0, kind="quiet_gap",
+                text=f"No commits for {plural(gap, 'day')}; the last was {last['sha'][:7]} "
+                     f"on {fmt_day(last_day)}.",
+                reason="for context only, not a judgement",
+                evidence=[f"commit:{last['sha'][:7]}"]))
+
+    ordered = (verify + work[:MAX_MILESTONE_STEPS] + blockers + quiet
+               + work[MAX_MILESTONE_STEPS:])[:NEXT_STEPS_MAX]
+    return [NextStep(k + 1, s.kind, s.text, s.reason, s.evidence, s.certain)
+            for k, s in enumerate(ordered)]
+
+
+def next_steps_fact(steps: list[NextStep]) -> Fact:
+    listed = " ".join(f"{s.rank}. {s.text}" for s in steps)
+    evidence = list(dict.fromkeys(e for s in steps for e in s.evidence))
+    return Fact(
+        id="next_steps", kind="next_steps", priority=NEXT_STEPS_PRIORITY,
+        text=f"Suggested next steps (computed by Jarvis, not a schedule): {listed}",
+        data={"steps": [asdict(s) for s in steps]}, evidence=evidence,
+        certain=all(s.certain for s in steps))
+
+
+def compute_next_steps(conn: sqlite3.Connection, now: datetime | None = None) -> list[NextStep]:
+    """The ranked suggested next steps (empty when there is nothing to suggest)."""
+    for f in compute_facts(conn, now):
+        if f.kind == "next_steps":
+            return [NextStep(**d) for d in f.data["steps"]]
+    return []
 
 
 # ---------------------------------------------------------------- matching

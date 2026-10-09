@@ -222,3 +222,84 @@ def test_facts_hash():
 def test_default_now_is_local_aware():
     facts = compute_facts(seeded())
     assert facts and all(isinstance(f, Fact) for f in facts)
+
+
+# ---------------------------------------------------------------- next steps
+
+
+def steps_seed(*, electrical=True, quiet=True):
+    from jarvis.facts import compute_next_steps  # noqa: F401 (import check)
+    conn = db.connect(":memory:")
+    ms(conn, 1, "Core demo", 6, 1, "2026-10-18T07:00:00Z")
+    ms(conn, 2, "v1.0", 2, 0, "2026-10-31T00:00:00Z")
+    issue(conn, 31, "Timestamp each detection when its run closes", milestone=1,
+          labels=["phase-2"])
+    issue(conn, 12, "servo_write returns a status", milestone=1, labels=["phase-2"])
+    issue(conn, 9, "State machine: survey / track / lost", milestone=1, labels=["phase-2"])
+    issue(conn, 15, "Calibrate the sweep", milestone=1, labels=["phase-1"])
+    issue(conn, 26, "Core demo plan", milestone=1)
+    issue(conn, 30, "Someday driver", milestone=1, labels=["phase-3"])
+    issue(conn, 2, "Down sweeps read wider", milestone=2, labels=["phase-1"])
+    issue(conn, 40, "UART command interface", milestone=2, labels=["phase-1"])
+    when = "2026-10-06T01:52:25Z" if quiet else "2026-10-08T15:00:00Z"
+    commit(conn, "02fb2d2aaaa", "Report detections as their run closes, with timestamps", when)
+    if electrical:
+        for k, (cid, st) in enumerate([("rail_budget:5V", "unknown"),
+                                       ("voltage_window:MG90S", "unknown"),
+                                       ("missing:rails.5V.max_current_a", "unknown"),
+                                       ("missing:rails.5V.tolerance_pct", "unknown")]):
+            conn.execute("INSERT INTO electrical_findings (check_id, status, title) "
+                         "VALUES (?, ?, ?)", (cid, st, cid))
+            if not cid.startswith("missing:"):
+                conn.execute("INSERT INTO cards (type, title, why, check_id, status, "
+                             "fingerprint) VALUES ('electrical', ?, 'w', ?, 'active', ?)",
+                             (cid, cid, f"fp{k}"))
+        conn.commit()
+    return conn
+
+
+def test_next_steps_ranking_maybe_done_first_then_phase_order_blockers_and_gap():
+    from jarvis.facts import NEXT_STEPS_MAX, compute_next_steps
+    steps = compute_next_steps(steps_seed(), now=NOW)
+    assert [s.rank for s in steps] == list(range(1, len(steps) + 1))
+    assert len(steps) == NEXT_STEPS_MAX
+    kinds = [s.kind for s in steps]
+    assert kinds == ["verify_close", "milestone_issue", "milestone_issue", "blocker",
+                     "quiet_gap"]
+    v = steps[0]
+    assert not v.certain and "#31" in v.text and "may already be done" in v.text
+    assert "#31" in v.evidence and "commit:02fb2d2" in v.evidence
+    # nearest-due milestone (Core demo), phase-1 before phase-2, then by number;
+    # #31 is skipped (maybe done)
+    assert "#15" in steps[1].text and "#9 " in steps[2].text
+    assert "milestone Core demo" in steps[1].text and "Oct 18" in steps[1].text
+    b = steps[3]
+    assert "2 hardware.yaml values" in b.text and "rails.5V.max_current_a" in b.text
+    assert "2 electrical check cards" in b.text
+    assert "check:missing:rails.5V.tolerance_pct" in b.evidence
+    assert steps[4].text == "No commits for 3 days; the last was 02fb2d2 on Oct 5."
+
+
+def test_next_steps_fill_with_milestone_issues_when_no_blockers_or_gap():
+    from jarvis.facts import compute_next_steps
+    steps = compute_next_steps(steps_seed(electrical=False, quiet=False), now=NOW)
+    assert [s.kind for s in steps] == ["verify_close"] + ["milestone_issue"] * 4
+    nums = [s.evidence[0] for s in steps[1:]]
+    assert nums == ["#15", "#9", "#12", "#30"]  # phase-1, phase-2 by number, phase-3
+
+
+def test_next_steps_fact_is_low_priority_and_carries_evidence():
+    from jarvis.facts import NEXT_STEPS_PRIORITY
+    facts = compute_facts(steps_seed(), now=NOW)
+    f = by_id(facts)["next_steps"]
+    assert f.priority == NEXT_STEPS_PRIORITY and facts[-1].id == "next_steps"
+    assert f.text.startswith("Suggested next steps (computed by Jarvis, not a schedule): 1.")
+    assert "#15" in f.evidence and len(f.data["steps"]) == 5
+    assert not f.certain
+
+
+def test_no_next_steps_on_empty_db():
+    from jarvis.facts import compute_next_steps
+    conn = db.connect(":memory:")
+    assert compute_next_steps(conn, now=NOW) == []
+    assert "next_steps" not in by_id(compute_facts(conn, now=NOW))

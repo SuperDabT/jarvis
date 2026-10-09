@@ -493,3 +493,137 @@ def test_stable_prefix_goes_in_system_message_before_history(tmp_path):
     assert rest[-1]["content"].startswith("CONTEXT, part 2:\nNOW:\nLocal time: 10:00")
     assert rest[-1]["content"].endswith("QUESTION: When is Core demo due?")
     assert [s.ref for s in ans.sources] == ["milestone:Core demo"]
+
+
+# ---------------------------------------------------------------- thinking mode
+
+
+def test_chat_stream_think_true_payload_and_thinking_field_never_yielded():
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, content=ndjson(
+            {"message": {"role": "assistant", "content": "", "thinking": "Let me "}},
+            {"message": {"role": "assistant", "content": "", "thinking": "count: 3+4."}},
+            {"message": {"role": "assistant", "content": "Core demo"}},
+            {"message": {"role": "assistant", "content": " is due Oct 18."}},
+            {"message": {"content": ""}, "done": True, "eval_count": 9},
+        ))
+
+    got_thinking = []
+    with stream_client(handler) as c:
+        out = list(c.chat_stream([{"role": "user", "content": "hi"}], think=True,
+                                 keep_alive="10m", on_thinking=got_thinking.append))
+        assert c.last_thinking_s is not None and c.last_thinking_s >= 0
+        assert c.last_thinking_chars == len("Let me count: 3+4.")
+    assert out == ["Core demo", " is due Oct 18."]
+    assert got_thinking == ["Let me ", "count: 3+4."]
+    assert seen["body"]["think"] is True and seen["body"]["keep_alive"] == "10m"
+
+
+def test_chat_stream_think_true_is_not_silently_dropped_when_rejected():
+    def handler(request):
+        return httpx.Response(400, json={"error": "model does not support thinking"})
+
+    with stream_client(handler) as c, pytest.raises(OllamaError, match="400"):
+        list(c.chat_stream([], think=True))
+
+
+def test_ask_think_passes_flag_and_reports_thinking_time(tmp_path):
+    class ThinkingFake(FakeClient):
+        last_thinking_s = None
+
+        def chat_stream(self, messages, options=None, think=None, on_thinking=None):
+            self.think = think
+            if think and on_thinking:
+                on_thinking("hmm")
+                self.last_thinking_s = 2.25
+            yield from self.chunks
+
+    client = ThinkingFake(["Core demo is due Oct 18.\nSOURCES: milestone:Core demo"])
+    seen = []
+    ans = chat.ask(seeded(), cfg(tmp_path), "When?", [], client, now=NOW, think=True,
+                   on_thinking=seen.append)
+    assert client.think is True and seen == ["hmm"] and ans.thinking_s == 2.25
+    # think=None: no keyword passed at all (old clients keep working)
+    ans = chat.ask(seeded(), cfg(tmp_path), "When?", [], FakeClient(client.chunks), now=NOW)
+    assert ans.thinking_s is None and ans.text == "Core demo is due Oct 18."
+
+
+def test_context_has_suggested_next_steps_section(tmp_path):
+    conn = seeded()
+    for stable in (False, True):
+        ctx = chat.build_context(conn, cfg(tmp_path), "what now?", NOW, stable_prefix=stable)
+        assert chat.NEXT_STEPS_TITLE + ":" in ctx.text
+        sec = ctx.text.split(chat.NEXT_STEPS_TITLE)[1]
+        assert "[fact:next_steps] Ranked by Jarvis" in sec
+        assert "1. (uncertain) Confirm and close 1 issue that may already be done: #31" in sec
+        assert "2. Work on #10 Kalman filter on x/y" in sec
+        assert "fact:next_steps" in ctx.next_step_refs and "#31" in ctx.next_step_refs
+        assert ctx.next_steps[0].kind == "verify_close"
+        # not duplicated in FACTS
+        assert ctx.text.count("[fact:next_steps]") == 1
+        if stable:
+            assert chat.NEXT_STEPS_TITLE in ctx.stable_text
+
+
+def test_cited_sources_exclude_fact_expansion_and_cap(tmp_path):
+    conn = seeded()
+    for n in range(40, 50):
+        issue(conn, n, f"Extra task {n}", milestone=1)
+    ctx = chat.build_context(conn, cfg(tmp_path), "what now?", NOW)
+    a = chat.validate_answer("#31 may be done.\nSOURCES: fact:next_steps", ctx, "what now?")
+    refs = [s.ref for s in a.sources]
+    cited = [s.ref for s in a.cited_sources]
+    assert cited == ["fact:next_steps", "#31"] and a.cited_more_count == 0
+    assert len(refs) > len(cited)  # sources still carries the evidence expansion
+    many = ", ".join(f"#{n}" for n in range(40, 50))
+    a = chat.validate_answer(f"Lots to do.\nSOURCES: {many}", ctx, "q")
+    assert len(a.cited_sources) == chat.CITED_SOURCES_MAX
+    assert a.cited_more_count == 10 - chat.CITED_SOURCES_MAX
+    a = chat.validate_answer("SOURCES: #31, #12, commits:0", ctx, "q")
+    assert a.text == "" and a.cited_sources == [] and a.cited_more_count == 0
+    assert "commits:0" in a.dropped_refs
+
+
+@pytest.mark.parametrize("text,bad", [
+    ("No commits were made since Oct 8.", True),   # last commit is Oct 5 local
+    ("There have been no commits since Oct 5.", False),
+    ("No new commits since October 6th.", False),  # one day of slack
+    ("No commits since Oct 2.", True),              # there was one after Oct 2
+    ("The last commit was on Oct 5 (02fb2d2).", False),
+    ("The last commit was Oct 7.", True),
+    ("The last commit was today.", True),
+    ("Core demo is due Oct 18.", False),
+])
+def test_commit_date_claims_checked_against_last_commit(tmp_path, text, bad):
+    ctx = chat.build_context(seeded(), cfg(tmp_path), "any work?", NOW)
+    assert ctx.last_commit == ("02fb2d2", NOW.date().replace(day=5))
+    a = chat.validate_answer(text + "\nSOURCES: fact:activity", ctx, "any work?")
+    assert bool(a.claim_errors) == bad
+    assert any("last synced commit is 02fb2d2, on Oct 5" in n for n in a.notes) == bad
+
+
+def test_invalid_refs_listed(tmp_path):
+    ctx = chat.build_context(seeded(), cfg(tmp_path), "q", NOW)
+    a = chat.validate_answer("#99 and commit abc1234 are done.", ctx, "q")
+    assert a.invalid_refs == ["#99", "abc1234"]
+
+
+def test_chat_stream_thinking_budget_closes_the_request():
+    import itertools
+
+    def handler(request):
+        lines = itertools.chain(
+            [{"message": {"content": "", "thinking": "x" * 10}}] * 3,
+            [{"message": {"content": "late"}}, {"message": {"content": ""}, "done": True}])
+        return httpx.Response(200, content=ndjson(*lines))
+
+    from jarvis.ollama import ThinkingBudgetExceeded
+    with stream_client(handler) as c:
+        with pytest.raises(ThinkingBudgetExceeded):
+            list(c.chat_stream([], think=True, max_thinking_s=-1))
+        assert c.last_thinking_s is not None
+        # within budget: the answer streams normally
+        assert list(c.chat_stream([], think=True, max_thinking_s=60)) == ["late"]
