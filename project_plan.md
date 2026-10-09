@@ -106,7 +106,7 @@ Each phase ends with something you can run and check, so a broken phase is caugh
 4. **Electrical cards (done).** Add `hardware.yaml` to the repo listing each part with its voltage and current limits from the datasheets, and fetch it via the contents API. Python runs every check and produces deterministic findings with template text, no model yet. Then add Gemma only to link each finding to a related issue and polish the wording. Cards appear in the window below the briefing.
 5. **Fast loop (done).** Poll the repo events endpoint and `hardware.yaml` with ETags, re-run checks only when something changed, and auto-resolve electrical cards whose check now passes.
 6. **Research loop.** Every few hours, fetch from the research sources, dedupe by arXiv id, have Ollama keep only what relates to open issues, and make research cards. Auto-resolve them when their issue closes.
-7. **Daily use.** (done) Headless daemon as a systemd user service, `notify-send` notifications for new cards, and a Hyprland keybind to open the window. Add a tray icon only if your bar shows one.
+7. **Daily use (done).** Headless daemon as a systemd user service, `notify-send` notifications for new cards, and a Hyprland keybind to open the window. Add a tray icon only if your bar shows one.
 8. **Tune.** Use it for a week, then fix the cards that annoyed you: repeats, vague titles or wrong math. This phase decides whether you keep using it.
 
 ## Risks
