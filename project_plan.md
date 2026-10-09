@@ -2,7 +2,7 @@
 
 Oct 8, 2026 · @Tal Elbert
 
-A Linux desktop app that reads your pan-tilt repo on GitHub, uses gemma4:26b through Ollama to write suggestion cards, and gives each card a button that copies a ready-made prompt for Claude.
+A Linux desktop app that reads your pan-tilt repo on GitHub and hands you the state of the project in plain language: a short, objective briefing at the top, and suggestion cards below it, each with a button that copies a ready-made prompt for Claude. It uses gemma4:26b through Ollama for the wording only.
 
 ## At a glance
 
@@ -12,10 +12,11 @@ The two loops feed the model, the model asks Python for the numbers, and the car
 
 ## What v1 does
 
-v1 watches one project, the pan-tilt tracker, and shows two kinds of suggestion cards: electrical sanity checks and research updates.
+v1 watches one project, the pan-tilt tracker. Its home screen is a briefing: where the project stands, what changed, and what may need attention. Below it are two kinds of suggestion cards: electrical sanity checks and research updates.
 
 **In v1**
 
+- A plain-language briefing: deadlines, progress, recent work, and open issues that recent commits may already have finished.
 - Reads the repo's issues, milestones and commits from GitHub. It does not read the code, to keep the local model fast. The one exception is `hardware.yaml`, fetched through the contents API with its own ETag, so a wiring change in a commit refreshes the checks.
 - Electrical cards and research cards, each tied to something real in the repo, such as an open servo issue.
 - A copy button on every card that puts a ready-made prompt on the clipboard for Claude.
@@ -47,6 +48,16 @@ Stale suggestions are what would make you stop trusting the app, so freshness is
    - Research: `research + paper_id + issue`, so the same paper never returns, even for another issue.
 
 **Cheap polling.** Rate limits are not a concern (5,000 authenticated requests an hour against roughly 60 used). The repo events endpoint gives one "what changed" call, and conditional requests (saved ETags) make unchanged answers a short 304.
+
+## Briefing
+
+The briefing turns the raw repo state into a few sentences you can read in ten seconds. It must stay objective.
+
+1. **Python finds the facts.** Days left, closed counts, gaps between commits, commits that match open issues. Each fact has an id and points to the issues or commits behind it. The model never computes or invents a number.
+2. **The model only phrases them.** Gemma gets the facts and returns sentences, each citing the fact ids it uses. Any sentence that cites nothing, or cites a fact that does not exist, is dropped.
+3. **Uncertainty is stated.** A heuristic match reads "may be done", never "is done", and shows its evidence.
+4. **Neutral tone.** No praise, no scolding, no motivational filler.
+5. **Cached.** The briefing is stored with a hash of its facts and regenerated only when the facts change. If Ollama is down, a plain template version of the same facts is shown.
 
 ## Cards
 
@@ -90,18 +101,20 @@ The backend (loops, GitHub, Ollama, database) lives in its own package and runs 
 Each phase ends with something you can run and check, so a broken phase is caught before the next one builds on it.
 
 1. **Project state reader.** Pull issues, milestones and commits from the pan-tilt repo into SQLite and print a plain summary of what is open, what is done and what changed recently. No AI yet.
-2. **Electrical cards.** Add `hardware.yaml` to the repo listing each part with its voltage and current limits from the datasheets, and fetch it via the contents API. Python runs every check and produces deterministic findings with template text, no model yet. Then add Gemma only to link each finding to a related issue and polish the wording. Print the cards in the terminal.
-3. **The window.** Show the cards, with a copy-prompt button, a done button and a "not useful" button with a reason. Done writes the fingerprint to the database.
-4. **Fast loop.** Poll the repo events endpoint and `hardware.yaml` with ETags, re-run checks only when something changed, and auto-resolve electrical cards whose check now passes.
-5. **Research loop.** Every few hours, fetch from the research sources, dedupe by arXiv id, have Ollama keep only what relates to open issues, and make research cards. Auto-resolve them when their issue closes.
-6. **Daily use.** Headless daemon as a systemd user service, `notify-send` notifications for new cards, and a Hyprland keybind to open the window. Add a tray icon only if your bar shows one.
-7. **Tune.** Use it for a week, then fix the cards that annoyed you: repeats, vague titles or wrong math. This phase decides whether you keep using it.
+2. **Briefing.** Python computes the facts with evidence, Gemma phrases them, uncited sentences are dropped, and the result is cached in SQLite. `jarvis` prints it in the terminal.
+3. **The window.** The briefing at the top, then the cards (empty until phase 4), with a copy-prompt button, a done button and a "not useful" button with a reason. Done writes the fingerprint to the database.
+4. **Electrical cards.** Add `hardware.yaml` to the repo listing each part with its voltage and current limits from the datasheets, and fetch it via the contents API. Python runs every check and produces deterministic findings with template text, no model yet. Then add Gemma only to link each finding to a related issue and polish the wording. Cards appear in the window below the briefing.
+5. **Fast loop.** Poll the repo events endpoint and `hardware.yaml` with ETags, re-run checks only when something changed, and auto-resolve electrical cards whose check now passes.
+6. **Research loop.** Every few hours, fetch from the research sources, dedupe by arXiv id, have Ollama keep only what relates to open issues, and make research cards. Auto-resolve them when their issue closes.
+7. **Daily use.** Headless daemon as a systemd user service, `notify-send` notifications for new cards, and a Hyprland keybind to open the window. Add a tray icon only if your bar shows one.
+8. **Tune.** Use it for a week, then fix the cards that annoyed you: repeats, vague titles or wrong math. This phase decides whether you keep using it.
 
 ## Risks
 
 | Risk | What could go wrong | Plan |
 | --- | --- | --- |
 | Model speed | A 26B model that does not fit fully in GPU memory slows down a lot, and the fast loop would lag | Run `ollama ps` in phase 2 to see whether it runs fully on the GPU. Send only issue summaries, never code. If it is slow, use a smaller model for the fast loop |
+| Briefing drifts from the facts | The model adds a claim, a number or an opinion the data does not support | Every sentence must cite fact ids; uncited or invalid sentences are dropped; a template fallback exists |
 | Wrong electrical math | Language models make arithmetic mistakes, and a confident wrong number is worse than none | Python does every calculation from the hardware file. The model only chooses which checks apply and writes the card text |
 | Stale or repeated cards | One repeated suggestion is enough to make you stop trusting it | One fingerprint table including check or paper ids, auto-resolve when the check passes, and the full card history |
 | Database locked | Daemon writes while the window reads | SQLite WAL mode from phase 1 |
@@ -130,4 +143,4 @@ Rules:
 Phase 1 only: fetch issues, milestones, recent commits and hardware.yaml (if present) for the repo into SQLite, then print a plain summary of what is open, what is closed and what changed recently. No AI and no window yet. Include a README with setup steps and tests for the ETag handling.
 ```
 
-After phase 1 works, ask Claude Code for phase 2 from the build order above.
+Phase 1 is done. Phase 2 is the briefing.

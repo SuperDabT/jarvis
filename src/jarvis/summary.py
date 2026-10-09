@@ -12,6 +12,16 @@ def _d(ts: str | None) -> str:
     return ts[:10] if ts else "?"
 
 
+def _local(ts: str | None) -> str:
+    """ISO timestamp -> local 'YYYY-MM-DD HH:MM'."""
+    if not ts:
+        return "never"
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
 def render_summary(
     conn: sqlite3.Connection, days: int = 7, repo: str | None = None, now: datetime | None = None
 ) -> str:
@@ -20,7 +30,7 @@ def render_summary(
     out: list[str] = []
     last = conn.execute("SELECT MAX(ran_at) FROM sync_log").fetchone()[0]
     out.append(f"Jarvis summary: {repo}")
-    out.append(f"Last sync: {last or 'never'}")
+    out.append(f"Last sync: {_local(last)}")
 
     out += ["", "Open milestones"]
     ms = conn.execute(

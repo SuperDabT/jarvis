@@ -78,6 +78,18 @@ CREATE TABLE IF NOT EXISTS cards (
     created_at TEXT,
     updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS briefings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    facts_hash TEXT NOT NULL,
+    headline TEXT,
+    sentences_json TEXT,
+    source TEXT CHECK (source IN ('model', 'template')),
+    model TEXT,
+    created_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS briefings_hash ON briefings (facts_hash, id);
 """
 
 ISSUE_COLUMNS = (
@@ -184,3 +196,22 @@ def log_sync(conn: sqlite3.Connection, resource: str, status: int, changed: bool
         (now_iso(), resource, status, int(changed)),
     )
     conn.commit()
+
+
+def latest_briefing(conn: sqlite3.Connection, facts_hash: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM briefings WHERE facts_hash = ? ORDER BY id DESC LIMIT 1", (facts_hash,)
+    ).fetchone()
+
+
+def insert_briefing(
+    conn: sqlite3.Connection, facts_hash: str, headline: str, sentences_json: str,
+    source: str, created_at: str, model: str | None = None,
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO briefings (facts_hash, headline, sentences_json, source, model, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (facts_hash, headline, sentences_json, source, model, created_at),
+    )
+    conn.commit()
+    return cur.lastrowid
