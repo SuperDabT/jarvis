@@ -57,13 +57,16 @@ def win(app, tmp_path):
     conn.close()
 
 
-def test_rail_lists_the_five_workspaces_and_starts_on_projects(win):
+def test_rail_lists_the_five_workspaces_and_starts_on_home(win):
     assert shell.KEYS == KEYS
     assert list(win.rail.buttons) == list(KEYS) == list(win.workspaces)
     assert [b.ws.name for b in win.rail.buttons.values()] == [
         "Home", "Tasks", "School", "Projects", "Knowledge"]
-    assert win.workspace == "projects" and win.rail.current == "projects"
+    assert win.workspace == "home" and win.rail.current == "home"
     assert win.stack.count() == 5
+    assert win.crumb.text() == "/ home"
+    assert win.hint_label.text() == SHELL_HINT
+    win.show_workspace("projects")
     assert win.crumb.text() == "/ projects / robot"
     assert win.hint_label.text() == IDLE_HINT
     assert win.rail.buttons["tasks"].toolTip() == "Tasks (Ctrl+2)"
@@ -101,18 +104,20 @@ def test_unknown_workspace_is_an_error(win):
 
 
 def test_placeholders_say_so_and_offer_real_actions(win, app):
-    for key in ("home", "tasks", "school", "knowledge"):
+    for key in ("school", "knowledge"):
         page = win.workspaces[key]
         assert isinstance(page, PlaceholderPage)
         assert page.badge.text() == "not built yet"
         assert page.title.text() == key.capitalize() and page.plan.text()
-    tasks = win.workspaces["tasks"]
-    win.show_workspace("tasks")
-    tasks.capture_btn.click()
+    assert not isinstance(win.workspaces["home"], PlaceholderPage)
+    assert not isinstance(win.workspaces["tasks"], PlaceholderPage)
+    school = win.workspaces["school"]
+    win.show_workspace("school")
+    school.capture_btn.click()
     app.processEvents()
     assert win.capture.isVisible()
     win._on_escape()
-    tasks.projects_btn.click()
+    school.projects_btn.click()
     assert win.workspace == "projects"
 
 
@@ -125,6 +130,8 @@ def motion_on(app):
 
 
 def test_cockpit_lives_in_projects_and_pauses_when_hidden(win, app, motion_on):
+    win.show_workspace("projects")
+    app.processEvents()
     win.graph._sync_timer()
     projects = win.workspaces["projects"]
     for w in (win.graph, win.hud, win.inspector, win.stream, win.right, win.vitals,
@@ -182,6 +189,8 @@ def test_esc_order_is_unchanged(win, app):
 
 
 def test_layout_at_desktop_and_minimum_size(win, app):
+    win.show_workspace("projects")
+    app.processEvents()
     assert win.rail.wide and win.rail.width() == shell.RAIL_WIDE
     assert win.left_column.width() == LEFT_W and win.right.width() == RIGHT_W
     assert win.minimumWidth() == 980 and win.minimumHeight() == 600

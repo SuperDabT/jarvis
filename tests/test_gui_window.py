@@ -58,7 +58,7 @@ def setup(app, tmp_path):
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
     ids = seed(conn, n_cards=2)
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, scheme="light")
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects", scheme="light")
     win.resize(1400, 920)
     win.show()
     app.processEvents()
@@ -94,7 +94,7 @@ def test_window_shows_cockpit(setup):
 def test_window_without_hardware_says_why(app, tmp_path):
     cfg = _cfg(tmp_path, hardware=False)
     conn = db.connect(cfg.db_path)
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects")
     texts = [win.power.body.itemAt(i).widget().text() for i in range(win.power.body.count())
              if win.power.body.itemAt(i).widget()]
     assert any("hardware.yaml" in t.lower() for t in texts)
@@ -212,7 +212,7 @@ def test_chat_streams_tokens_then_shows_answer_and_sources(app, tmp_path):
         gate.wait(5)
         return _answer()
 
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, ask_fn=fake_ask)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects", ask_fn=fake_ask)
     chat = win.chat
     assert chat.empty.isVisibleTo(chat) and len(chat.suggestion_buttons) == 3
     chat.composer.edit.setPlainText("What's left for Core demo?")
@@ -254,7 +254,7 @@ def test_chat_errors_show_inline(app, tmp_path):
     def broken(*_a):
         raise RuntimeError("socket closed")
 
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, ask_fn=broken)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects", ask_fn=broken)
     win.chat.suggestion_buttons[1].click()  # a suggested question
     win.chat.wait()
     bot = win.chat.messages[-1]
@@ -326,7 +326,7 @@ def test_refresh_runs_in_background_and_reloads(app, tmp_path):
                                briefing=SimpleNamespace(fallback_reason="model unavailable: x"),
                                cards_new=1, cards_resolved=0, notes=[])
 
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, refresh_fn=fake_refresh)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects", refresh_fn=fake_refresh)
     assert win.hud.data is None and win.graph.graph.count("card") == 0
     win.refresh()
     assert win.refreshing and not win.refresh_btn.isEnabled()
@@ -348,7 +348,7 @@ def test_refresh_error_goes_to_status_line(app, tmp_path):
     def broken(_conn, _cfg):
         raise RuntimeError("GitHub exploded")
 
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, refresh_fn=broken)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects", refresh_fn=broken)
     win.refresh()
     win.wait_for_refresh()
     assert "GitHub exploded" in win.status_label.text()
@@ -364,7 +364,7 @@ def test_refresh_while_daemon_holds_lock_reports_busy(app, tmp_path):
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
     calls = []
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False,
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects",
                      refresh_fn=lambda c, _cfg: calls.append(1))
     with refresh_lock(cfg.db_path):  # e.g. `jarvis watch` mid-tick
         win.refresh()
@@ -384,7 +384,7 @@ def test_header_shows_watch_heartbeat(app, tmp_path):
 
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects")
     assert win.pulse_text.text() == "not watching" and win.state_pill.text() == "idle"
     tick_at = (datetime.now(UTC) - timedelta(minutes=2)).isoformat(timespec="seconds")
     db.update_daemon_state(conn, pid=1234, interval_s=180, last_tick_at=tick_at)

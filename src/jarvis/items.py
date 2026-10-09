@@ -16,10 +16,12 @@ time. Bookkeeping times are UTC instants, as everywhere else.
 An item's *when* is its due time, or its reminder time if it has no due time.
 Relative to ``now`` (converted to ``tz``, default the system zone):
 
-- overdue: open, and its when is a date before today or a time before now
-- today:   open, its when is today, and it is not overdue
+- overdue:  open, and its when is a date before today or a time before now
+- today:    open, its when is today, and it is not overdue
+- upcoming: open, its when is after today
+- someday:  open, with no when
 
-so the two never overlap. Items without a when are in neither. Deleted items
+so every open item is in exactly one of the four (``grouped_items``). Deleted items
 (soft deleted, ``deleted_at`` set) are left out of every query unless asked.
 
 Links
@@ -52,6 +54,9 @@ _WHEN = "COALESCE(due_at, remind_at)"
 _OVERDUE = (f"(CASE WHEN length({_WHEN}) = 10 THEN {_WHEN} < :today "
             f"ELSE {_WHEN} < :now END)")
 _TODAY = f"(substr({_WHEN}, 1, 10) = :today AND NOT {_OVERDUE})"
+_UPCOMING = f"(substr({_WHEN}, 1, 10) > :today)"
+_SOMEDAY = f"({_WHEN} IS NULL)"
+GROUPS = ("overdue", "today", "upcoming", "someday")
 _ORDER = f"ORDER BY {_WHEN} IS NULL, {_WHEN}, priority DESC, id"
 
 
@@ -171,6 +176,13 @@ def _wall_clock(value: Any, field: str, tz: tzinfo | None, *, need_time: bool) -
         raise ItemError(f"{field} {value!r} is not a valid date and time "
                         "(YYYY-MM-DD or YYYY-MM-DDTHH:MM)", field) from None
     return dt.strftime(MINUTE_FMT)
+
+
+def wall_clock(value: Any, field: str = "due", tz: tzinfo | None = None, *,
+               need_time: bool = False) -> str | None:
+    """A due / remind value as stored ("YYYY-MM-DD" or "YYYY-MM-DDTHH:MM"), or
+    ItemError: the same check create_item and update_item use."""
+    return _wall_clock(value, field, tz, need_time=need_time)
 
 
 def _title(value: Any) -> str:
@@ -442,6 +454,42 @@ def today_items(conn: sqlite3.Connection, now: datetime | None = None,
                 kinds: Iterable[str] | str | None = None) -> list[Item]:
     """Open items whose when is later today (or today, with no time)."""
     return _dated(conn, _TODAY, now, tz, project, kinds)
+
+
+def upcoming_items(conn: sqlite3.Connection, now: datetime | None = None,
+                   tz: tzinfo | None = None, *, project: int | str | Project | None = None,
+                   kinds: Iterable[str] | str | None = None) -> list[Item]:
+    """Open items whose when is after today, soonest first."""
+    return _dated(conn, _UPCOMING, now, tz, project, kinds)
+
+
+def someday_items(conn: sqlite3.Connection, *, project: int | str | Project | None = None,
+                  kinds: Iterable[str] | str | None = None) -> list[Item]:
+    """Open items with no due or reminder time, highest priority first."""
+    return _dated(conn, _SOMEDAY, None, None, project, kinds)
+
+
+def grouped_items(conn: sqlite3.Connection, now: datetime | None = None,
+                  tz: tzinfo | None = None, *, project: int | str | Project | None = None,
+                  kinds: Iterable[str] | str | None = None) -> dict[str, list[Item]]:
+    """Every open item in one of GROUPS (overdue, today, upcoming, someday), each
+    list in the open order, all against the same ``now``."""
+    now = local_now(now, tz)
+    return {"overdue": overdue_items(conn, now, tz, project=project, kinds=kinds),
+            "today": today_items(conn, now, tz, project=project, kinds=kinds),
+            "upcoming": upcoming_items(conn, now, tz, project=project, kinds=kinds),
+            "someday": someday_items(conn, project=project, kinds=kinds)}
+
+
+def deleted_items(conn: sqlite3.Connection, *, project: int | str | Project | None = None,
+                  kinds: Iterable[str] | str | None = None, limit: int = 50) -> list[Item]:
+    """Soft-deleted items, most recently deleted first (to restore)."""
+    where, params = _filters(conn, project, kinds, include_deleted=True)
+    where.append("deleted_at IS NOT NULL")
+    params["limit"] = limit
+    sql = (f"SELECT * FROM items WHERE {' AND '.join(where)} "
+           "ORDER BY deleted_at DESC, id DESC LIMIT :limit")
+    return [_row_to_item(r) for r in conn.execute(sql, params)]
 
 
 # ---------------------------------------------------------------- related links

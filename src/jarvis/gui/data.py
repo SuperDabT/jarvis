@@ -97,6 +97,7 @@ class WindowData:
     power: tuple[RailPower, ...] = ()
     power_note: str | None = None  # why there is no power section (no/invalid hardware.yaml)
     rows: tuple[SuggestionRow, ...] = ()
+    next_steps: tuple[Any, ...] = ()  # facts.NextStep, ranked (computed, never the model)
 
     @property
     def card_count(self) -> int:
@@ -345,9 +346,15 @@ def load_window_data(conn: sqlite3.Connection, repo: str,
         errors.append(f"Could not read the project data: {e}")
     power, power_note = load_power(conn, hardware_path)
     rows = build_rows(groups, status_by_check)
+    next_steps: tuple = ()
+    for f in facts:
+        if f.kind == "next_steps":
+            from jarvis.facts import NextStep
+
+            next_steps = tuple(NextStep(**d) for d in f.data["steps"])
     return WindowData(repo, briefing, groups, synced, tuple(errors), watch,
                       kpis=kpis, timeline=timeline, grid=grid, phases=phases,
-                      power=power, power_note=power_note, rows=rows)
+                      power=power, power_note=power_note, rows=rows, next_steps=next_steps)
 
 
 # ---------------------------------------------------------------- refresh outcome

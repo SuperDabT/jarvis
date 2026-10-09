@@ -59,7 +59,10 @@ from jarvis.gui.cockpit import (
     set_pill,
 )
 from jarvis.gui.data import WindowData, describe_error, load_window_data, local_stamp, refresh_message
+from jarvis.gui.home_data import build_home
+from jarvis.gui.home_view import HomeView
 from jarvis.gui.shell import WIDE_FROM, WORKSPACES, NavRail, PlaceholderPage
+from jarvis.gui.tasks_view import TasksView
 from jarvis.gui.widgets import ICON_SIZE, PulseDot, _label, refresh_icon, repolish
 from jarvis.lock import RefreshBusy, refresh_lock
 
@@ -77,7 +80,7 @@ CLOCK_MS = 1_000
 IDLE_HINT = ("hover = inspect · click = lock · scroll = zoom · Ctrl+R refresh · "
              "Ctrl+N capture · Ctrl+K ask · Ctrl+Space talk · Esc release")
 SHELL_HINT = "Ctrl+1–5 switch · Ctrl+N capture · Ctrl+K ask · Ctrl+Space talk"
-START_WORKSPACE = "projects"  # the only built workspace so far
+START_WORKSPACE = "home"
 BUSY_TEXT = "A refresh is already running in the background"
 SPIN_MS = 33
 SPIN_DEG_PER_S = 300
@@ -190,6 +193,8 @@ class MainWindow(QMainWindow):
         voice: dict[str, Any] | None = None,
         capture_fn: CaptureFn | None = None,
         plain_capture_fn: PlainFn | None = None,
+        start: str | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg or Config.from_env()
@@ -209,6 +214,7 @@ class MainWindow(QMainWindow):
         self._ask_fn = ask_fn
         self._voice_kw = dict(voice or {})
         self._capture_fns = (capture_fn, plain_capture_fn)
+        self._now_fn = clock or (lambda: datetime.now().astimezone())
         self._status_sticky = False
 
         self.setWindowTitle(f"Jarvis · {self.cfg.repo.split('/')[-1]}")
@@ -216,7 +222,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(980, 600)
         self._build()
         self._shortcuts()
-        self.show_workspace(START_WORKSPACE)
+        self.show_workspace(start or START_WORKSPACE)
         self.set_chat_open(chat_open, focus=False)
 
         self._status_timer = QTimer(self, singleShot=True, interval=STATUS_CLEAR_MS)
@@ -266,6 +272,17 @@ class MainWindow(QMainWindow):
         for ws in WORKSPACES:
             if ws.key == "projects":
                 w = self._build_projects()
+            elif ws.key == "tasks":
+                w = self.tasks_view = TasksView(self.conn, self.tokens, now_fn=self._now_fn)
+                w.changed.connect(self.reload)
+                w.status.connect(lambda text, level: self.set_status(text, level))
+                w.capture_requested.connect(self.open_capture)
+            elif ws.key == "home":
+                w = self.home_view = HomeView(self.tokens)
+                w.open_workspace.connect(self.show_workspace)
+                w.capture_requested.connect(self.open_capture)
+                w.complete.connect(self.complete_item)
+                w.open_node.connect(self.select_node)
             else:
                 w = PlaceholderPage(ws.key, self.tokens)
                 w.open_projects.connect(lambda: self.show_workspace("projects"))
@@ -516,6 +533,41 @@ class MainWindow(QMainWindow):
 
         self.set_status(summary(result), "ok")
         self._place_capture()
+        self.reload()  # Tasks and Home show it straight away
+
+    # ------------------------------------------------------------ tasks + home
+
+    def _project_name(self) -> str:
+        from jarvis import items
+
+        try:
+            return items.get_project(self.conn, self.cfg.repo).name
+        except (items.ItemError, sqlite3.Error):
+            return self.cfg.repo.split("/")[-1]
+
+    def _reload_life(self, data: Any, brain: Any) -> None:
+        """Tasks and Home: items are cheap to read, and each view rebuilds only
+        when its own data changed."""
+        self.tasks_view.reload()
+        try:
+            home = build_home(self.conn, data, brain, self._now_fn(),
+                              project_name=self._project_name())
+        except sqlite3.Error as e:
+            self.set_status(f"Could not read Home: {e}", "warn", sticky=True)
+            return
+        self.home_view.set_data(home)
+
+    def complete_item(self, item_id: int) -> None:
+        """Tick an item off (from Home)."""
+        from jarvis import items
+
+        try:
+            item = items.complete_item(self.conn, item_id)
+        except items.ItemError as e:
+            self.set_status(f"Not changed: {e}", "warn")
+            return
+        self.set_status(f"Done: “{item.title}”", "ok")
+        self.reload()
 
     # ------------------------------------------------------------ chat
 
@@ -634,6 +686,7 @@ class MainWindow(QMainWindow):
             self.stream.set_data(brain.stream, animate=anim and old_brain is not None)
             if not self._status_sticky and not self._status_timer.isActive():
                 self._idle_ticker()
+        self._reload_life(new, brain)
         errors = new.errors + brain.errors
         if errors:
             self.set_status(" · ".join(errors), "warn", sticky=True)

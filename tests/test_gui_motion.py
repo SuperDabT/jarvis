@@ -206,7 +206,7 @@ def test_graph_paints_mid_reveal(app, tmp_path, motion_off):
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
     seed(conn)
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects")
     win.show()
     _pump()
     g = win.graph
@@ -229,7 +229,7 @@ def _window(tmp_path, n_cards=2):
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
     ids = seed(conn, n_cards=n_cards)
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, scheme="light")
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects", scheme="light")
     win.resize(1400, 920)
     win.show()
     _pump()
@@ -340,7 +340,7 @@ def test_chat_has_orb_and_thinking_orb(app, tmp_path, motion_off):
         gate.wait(5)
         return _answer()
 
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, ask_fn=slow)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects", ask_fn=slow)
     win.show()
     chat = win.chat
     assert isinstance(chat.orb, orb.Orb) and chat.orb.state == "idle"
@@ -457,7 +457,7 @@ def test_orb_paints_every_state_in_both_themes(app, motion_off):
 def test_chat_orb_moves_to_stage_and_back(app, tmp_path, motion_on):
     cfg = _cfg(tmp_path)
     conn = db.connect(cfg.db_path)
-    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, chat_open=True)
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects", chat_open=True)
     win.show()
     _pump()
     chat = win.chat

@@ -247,16 +247,6 @@ class PlaceholderText:
 
 
 PLACEHOLDERS = {
-    "home": PlaceholderText(
-        "Home", "Your day at a glance.",
-        "Today's tasks, what's due soon, the project briefing headline, next steps and the "
-        "latest thoughts from Jarvis, all from data you already have.",
-        "Coming in Phase 1, step 8. The project cockpit is in Projects (Ctrl+4)."),
-    "tasks": PlaceholderText(
-        "Tasks", "Everything you've captured.",
-        "Overdue, today, upcoming and someday lists of your tasks, ideas and reminders, with "
-        "editing, done and delete. What you capture now is already saved for it.",
-        "Coming in Phase 1, step 7. Capture something now with Ctrl+N."),
     "school": PlaceholderText(
         "School", "Courses, assignments and exams.",
         "A home for classes and their deadlines, linked to your tasks.",

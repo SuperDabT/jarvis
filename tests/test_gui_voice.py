@@ -184,6 +184,7 @@ class Rig:
 
             self.conn = db.connect(self.cfg.db_path)
             self.win = MainWindow(self.cfg, self.conn, auto_refresh=False, watch=False,
+                                  start="projects",
                                   ask_fn=self._ask, voice=kw, scheme="light")
             self.panel = self.win.chat
         else:

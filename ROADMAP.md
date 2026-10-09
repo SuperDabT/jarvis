@@ -14,9 +14,9 @@ existing project cockpit.
 | 4 | `jarvis/capture.py`: natural-language capture (local model fills a form; Python checks every field) | done |
 | 5 | App shell: navigation rail, Home / Tasks / School / Projects / Knowledge, chat at shell level | done |
 | 6 | Quick capture: Ctrl+N overlay and `jarvis add "..."` | done |
-| 7 | Tasks workspace v0: Overdue / Today / Upcoming / Someday | next |
-| 8 | Home dashboard v0 from stored data | |
-| 9 | Task items in the graph | |
+| 7 | Tasks workspace v0: Overdue / Today / Upcoming / Someday | done |
+| 8 | Home dashboard v0 from stored data | done |
+| 9 | Task items in the graph | next |
 
 Decided for Phase 1: GitHub issues stay in Projects (not copied into tasks); in-app capture only
 (no global hotkey); reminder times are stored and shown, no notifications; School and Knowledge

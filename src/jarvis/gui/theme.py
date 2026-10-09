@@ -372,6 +372,74 @@ QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
 #placeholderText {{ color: {t.text}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
 #placeholderWhen {{ color: {t.signal_text}; font-family: {mono}; font-size: 11px; }}
 
+/* workspaces: Tasks + Home */
+#wsTitle {{ color: {t.text}; font-family: {sans}; font-size: 22px; font-weight: 600; }}
+#wsSub {{ color: {t.faint}; font-family: {mono}; font-size: 11px; }}
+#homeAttention {{ color: {t.muted}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
+#taskSection {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 10px; }}
+#sectionHead {{ color: {t.muted}; font-family: {mono}; font-size: 11px; }}
+#sectionHead[group="overdue"] {{ color: {t.red}; }}
+#sectionCount {{ color: {t.faint}; font-family: {mono}; font-size: 11px; }}
+#taskRow {{ background: transparent; border: 1px solid transparent; border-radius: 8px; }}
+#taskRow:hover {{ background: {t.hover}; }}
+#taskRow[selected="true"] {{
+    background: {mix(t.bg, t.signal, 0.08)}; border-color: {mix(t.bg, t.signal, 0.35)};
+}}
+#taskTitle {{ color: {t.text}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
+#taskTitle[done="true"] {{ color: {t.faint}; text-decoration: line-through; }}
+#taskMeta {{ color: {t.muted}; font-family: {mono}; font-size: 11px; }}
+#taskBody {{ color: {t.faint}; font-family: {sans}; font-size: 12px; font-weight: 400; }}
+#taskPrio {{ color: {t.signal}; font-family: {mono}; font-size: 12px; font-weight: 700; }}
+QPushButton#rowAction {{
+    border: none; color: {t.faint}; font-size: 15px; padding: 0 6px; background: transparent;
+}}
+QPushButton#rowAction:hover {{ color: {t.red}; }}
+QPushButton#filterChip {{
+    border: 1px solid {t.border_strong}; border-radius: 11px; padding: 2px 10px;
+    font-family: {mono}; font-size: 11px; color: {t.muted}; background: transparent;
+}}
+QPushButton#filterChip:hover {{ color: {t.text}; border-color: {t.btn_line}; }}
+QPushButton#filterChip:checked {{
+    color: {t.signal}; border-color: {live_line}; background: {t.signal_soft};
+}}
+QPushButton#linkBtn {{
+    border: none; color: {t.signal_text}; font-family: {mono}; font-size: 11px;
+    padding: 0 2px; background: transparent;
+}}
+QPushButton#linkBtn:hover {{ color: {t.text}; }}
+QComboBox {{
+    background: {t.inset}; color: {t.text}; border: 1px solid {t.border_strong};
+    border-radius: 6px; padding: 3px 8px; font-family: {mono}; font-size: 11px;
+}}
+QComboBox:hover {{ border-color: {t.btn_line}; }}
+QComboBox::drop-down {{ border: none; width: 16px; }}
+QComboBox QAbstractItemView {{
+    background: {t.inset}; color: {t.text}; border: 1px solid {t.border_strong};
+    selection-background-color: {t.hover}; selection-color: {t.signal}; outline: none;
+}}
+QLineEdit#field, QPlainTextEdit#fieldBody {{
+    background: {t.inset}; color: {t.text}; border: 1px solid {t.border_strong};
+    border-radius: 6px; padding: 5px 8px; font-family: {sans}; font-size: 13px;
+    selection-background-color: {sel};
+}}
+QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_line}; }}
+#fieldLabel {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
+#fieldError {{ color: {t.red}; font-family: {sans}; font-size: 12px; font-weight: 400; }}
+#undoBar {{ background: {t.fill2}; border: 1px solid {t.border_strong}; border-radius: 8px; }}
+#undoText {{ color: {t.text}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
+#emptyState {{ background: {t.panel}; border: 1px dashed {t.border_strong}; border-radius: 10px; }}
+#emptyTitleSm {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
+#homeHeadline {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
+#deadlineWhen {{ color: {t.muted}; }}
+#deadlineTitle {{ color: {t.text}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
+#deadlineTag {{ color: {t.faint}; }}
+#deadlineTag[kind="milestone"] {{ color: {t.signal_text}; }}
+#stepNum {{ color: {t.signal}; font-family: {mono}; font-size: 13px; font-weight: 600; }}
+#stepText {{ color: {t.text}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
+#stepReason {{ color: {t.faint}; font-family: {sans}; font-size: 12px; font-weight: 400; }}
+#homeEmpty {{ color: {t.muted}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
+#homeEmptyHint {{ color: {t.faint}; font-family: {sans}; font-size: 12px; font-weight: 400; }}
+
 /* quick capture (Ctrl+N) */
 #capture {{
     background: {mix(t.bg, t.inset, 0.6)}; border: 1px solid {live_line}; border-radius: 12px;
@@ -432,5 +500,7 @@ def apply(app: QGuiApplication, scheme: str | None = None) -> Tokens:
     load_fonts()
     app.setPalette(palette(t))
     if hasattr(app, "setStyleSheet"):
-        app.setStyleSheet(stylesheet(t))
+        sheet = stylesheet(t)
+        if app.styleSheet() != sheet:  # re-applying restyles every live widget
+            app.setStyleSheet(sheet)
     return t

@@ -78,7 +78,11 @@ Python from the synced data and `hardware.yaml`; the model only writes the brief
 and chat answers.
 
 Workspaces in the left rail (Ctrl+1 to Ctrl+5): Home, Tasks, School, Projects and Knowledge.
-Projects is the project cockpit described here; the others are placeholders for now.
+Jarvis opens on Home: what's overdue and due today (tick things off there), deadlines for the
+next two weeks including project milestones, the project's briefing headline, vitals and
+computed next steps, and recent activity. Tasks lists everything you've captured in Overdue,
+Today, Upcoming and Someday, with filters, an editor (click a row), done, delete and undo.
+Projects is the project cockpit described here; School and Knowledge are placeholders.
 
 "Ask Jarvis" on the right (Ctrl+K to type, Ctrl+J to show or hide) answers questions from the
 synced data with sources (issues, commits, checks), using the local model; answers stream in

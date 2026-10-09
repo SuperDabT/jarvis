@@ -1,6 +1,6 @@
 # Current state
 
-Updated after Phase 1, step 5 (see ROADMAP.md).
+Updated after Phase 1, steps 7 and 8 (see ROADMAP.md).
 
 ## Database
 
@@ -78,15 +78,28 @@ Updated after Phase 1, step 5 (see ROADMAP.md).
 - `gui/window.py` `MainWindow`: top bar, then rail | workspaces (`QStackedWidget`) | chat,
   then the ticker. `gui/shell.py` has the rail (`NavRail`, painted icons) and the placeholder
   pages. Workspaces in order, Ctrl+1 .. Ctrl+5: Home, Tasks, School, Projects, Knowledge;
-  `show_workspace(key)`, `workspace`. It opens on Projects (the only built one).
+  `show_workspace(key)`, `workspace`. It opens on Home (`start=` to choose another).
 - Projects holds the whole engineering cockpit unchanged (status line, vitals / milestones /
   pulse / power, graph + briefing, inspector + stream). Its widgets are still attributes of
   the window (`win.graph`, `win.hud`, `win.inspector`, ...). Picking a graph reference from
   anywhere switches to Projects.
 - The chat is at shell level: Ctrl+K / Ctrl+J / Ctrl+Space work in every workspace; in
   Projects it still takes the inspector column. Esc order: capture, voice, graph lock, chat.
-- Home, Tasks, School and Knowledge are labelled placeholders ("not built yet", what they will
-  hold, when), with only real actions (quick capture, open Projects).
+- School and Knowledge are labelled placeholders ("not built yet", what they will hold),
+  with only real actions (quick capture, open Projects).
+- Tasks (`gui/tasks_view.py`, data in `gui/tasks_data.py`): open items in Overdue / Today /
+  Upcoming / Someday (`items.grouped_items`: every open item in exactly one), filters by
+  type and project, a side editor (due / remind accept dates or phrases like "tomorrow 5pm",
+  worked out without a model), done / reopen, delete with Undo, and Done / Deleted sections to
+  reopen or restore. New items come from quick capture. GitHub issues never appear here.
+- Home (`gui/home_view.py`, data in `gui/home_data.py`): greeting and what needs attention,
+  today (overdue first, tick off in place), upcoming deadlines (items and open milestones,
+  14 days), the project's briefing headline and vitals, the computed next steps (top 3, from
+  `WindowData.next_steps`, never the model) and recent activity. Three columns, two below
+  1000 px. Each section fails on its own.
+- The window's `reload()` (file watcher, 30 s poll, after capture and after every write)
+  refreshes Tasks and Home; each rebuilds only when its data changed. A `clock=` argument
+  fixes "now" for tests and screenshots.
 - Below 1320 px wide the rail is compact (icon over caption); below 1200 px the cockpit's side
   columns narrow (272 / 256) so the graph keeps about 330 px at the 980x600 minimum.
 - Palette (`theme.py`): forest-green near-black `#031211`, grey-green ink `#DCE8E2`, teal mint
@@ -102,8 +115,9 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 703 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 756 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,
-`tests/test_capture.py` capture and `jarvis add`, `tests/test_gui_capture.py` the overlay, `tests/test_gui_shell.py` the shell.
+`tests/test_capture.py` capture and `jarvis add`, `tests/test_gui_capture.py` the overlay, `tests/test_gui_shell.py` the shell,
+`tests/test_tasks_data.py` and `tests/test_gui_life.py` Tasks and Home.
