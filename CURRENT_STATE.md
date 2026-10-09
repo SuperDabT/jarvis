@@ -1,28 +1,51 @@
 # Current state
 
-Updated after Phase 1, step 1 (see ROADMAP.md).
+Updated after Phase 1, step 2 (see ROADMAP.md).
 
 ## Database
 
-- Schema version 1 (`db.latest_version()`). Version 1 is the baseline: every table that existed
-  before versioning (`db.BASELINE_SCHEMA` plus `db.BASELINE_COLUMNS`). A version 0 database
-  (made before versioning) upgrades to it with no data change.
+- Schema version 2 (`db.latest_version()`), built by `db.MIGRATIONS`:
+  1. Baseline: every table that existed before versioning (`BASELINE_SCHEMA`,
+     `BASELINE_COLUMNS`). A version 0 database upgrades to it with no data change.
+  2. Life OS core (`LIFE_OS_SCHEMA`): `projects`, `items`, `links`, and the first project
+     (`lidar`, "LiDAR Scanner", `SuperDabT/stm32-lidar-scanner`).
 - `db.connect()` upgrades under `<db>.migrate.lock`, after a verified backup
   (`<db>.bak-v<N>-<time>`), in one transaction. Failure raises `db.MigrationError` and leaves the
   old version. `db.restore_backup()` puts a backup back (see README).
-- `db.py` owns the whole schema; `chat.py` no longer creates `chat_messages` itself.
-- To add a table or column: append `Migration(N + 1, "...", fn)` to `db.MIGRATIONS`, and add a
-  test that upgrades `tests/fixtures/schema_v0.sql` through it. Never edit a released step.
+- `db.py` owns the whole schema. To change it: append `Migration(N + 1, ...)`, never edit a
+  released step, and test the upgrade from `tests/fixtures/schema_v0.sql`.
+
+### Life OS tables (version 2)
+
+- `projects`: `slug` (lowercase, for `#slug` capture), `name`, optional unique `github_repo`
+  (`owner/name`, case-insensitive), `status` active / paused / archived. A project with items
+  cannot be deleted; archive it.
+- `items`: `kind` task / idea / reminder, `title`, `body`, `status` open / done (done iff
+  `completed_at`), `priority` 0-3, `due_at`, `remind_at`, optional `project_id`, `deleted_at`
+  for soft delete.
+- `links`: `src_type`/`src_id` (item or project) `--kind-->` `dst_type`/`dst_id` (item,
+  project, `issue` "owner/name#N", `commit` "owner/name@sha"), kind `about` or `related`.
+  Item and project ends must exist and their links go with them; GitHub ends are checked for
+  format only and never copied into `issues`. Links are immutable.
+- Times: bookkeeping columns are UTC instants (`now_iso()`); `due_at` ("YYYY-MM-DD" or
+  "YYYY-MM-DDTHH:MM") and `remind_at` ("YYYY-MM-DDTHH:MM") are local wall-clock times, as typed.
+- The new tables are `STRICT` (SQLite 3.37+) with CHECK constraints and triggers, so bad rows
+  are refused by the database itself, not only by Python. Foreign keys are on for every
+  `db.connect()` connection (a raw `sqlite3.connect` does not enforce them).
+- Not yet: no Python service for items (step 3), no UI. Courses, notes, recurrence and
+  notifications are later phases; they would add tables and `links` types in a new step.
 
 ## The real database
 
-On 2026-10-09 the real `~/.local/share/jarvis/jarvis.db` was upgraded to version 1 by a
-`jarvis watch --once` run during step 1's verification. Its pre-upgrade backup is
-`jarvis.db.bak-v0-20261009T221204Z` (verified, 800 rows). Nothing but routine tick bookkeeping
-changed since. The running `jarvis watch` service (older code) works with version 1 unchanged.
+The real `~/.local/share/jarvis/jarvis.db` is at version 1 (upgraded on 2026-10-09 during
+step 1; pre-upgrade backup `jarvis.db.bak-v0-20261009T221204Z`). The installed `jarvis`
+commands run this checkout (editable install), so the next start of the window, the CLI or the
+service upgrades it to version 2, after a verified backup. The running service keeps its old
+code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 460 pass.
-`tests/test_migrations.py` covers upgrade, idempotence, backup, restore, failure rollback, a
-newer database, lock timeout, and six processes racing a writer.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 545 pass.
+`tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
+and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
+`tests/test_life_os_schema.py` the version 2 tables.

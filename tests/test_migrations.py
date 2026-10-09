@@ -149,12 +149,13 @@ def test_failed_step_rolls_back_everything(tmp_path, monkeypatch):
     path = tmp_path / "jarvis.db"
     make_v0(path)
     state = dump(path)
-    monkeypatch.setattr(db, "MIGRATIONS", (*db.MIGRATIONS, db.Migration(2, "boom", _boom)))
+    boom = db.latest_version() + 1
+    monkeypatch.setattr(db, "MIGRATIONS", (*db.MIGRATIONS, db.Migration(boom, "boom", _boom)))
     with pytest.raises(db.MigrationError) as e:
         db.connect(path)
     msg = str(e.value)
-    assert "step 2 (boom)" in msg and "left at version 0" in msg and "simulated" in msg
-    # step 1 was rolled back too: the file is exactly as it was
+    assert f"step {boom} (boom)" in msg and "left at version 0" in msg and "simulated" in msg
+    # the earlier steps were rolled back too: the file is exactly as it was
     assert version_of(path) == 0 and dump(path) == state
     [bak] = backups(path)
     assert dump(bak) == state
@@ -163,10 +164,12 @@ def test_failed_step_rolls_back_everything(tmp_path, monkeypatch):
 def test_failure_from_an_upgraded_database_keeps_its_version(tmp_path, monkeypatch):
     path = tmp_path / "jarvis.db"
     db.connect(path).close()
-    monkeypatch.setattr(db, "MIGRATIONS", (*db.MIGRATIONS, db.Migration(2, "boom", _boom)))
-    with pytest.raises(db.MigrationError, match="left at version 1"):
+    latest = db.latest_version()
+    monkeypatch.setattr(db, "MIGRATIONS",
+                        (*db.MIGRATIONS, db.Migration(latest + 1, "boom", _boom)))
+    with pytest.raises(db.MigrationError, match=f"left at version {latest}"):
         db.connect(path)
-    assert version_of(path) == 1
+    assert version_of(path) == latest
     c = sqlite3.connect(path)
     assert "half" not in {r[1] for r in c.execute("PRAGMA table_info(issues)")}
     assert c.execute("SELECT name FROM sqlite_master WHERE name = 'half_done'").fetchone() is None

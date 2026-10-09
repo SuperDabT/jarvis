@@ -22,7 +22,8 @@ A database at the current version costs one PRAGMA read on connect. A database
 newer than this code (an older Jarvis checkout) is refused, not touched.
 ``restore_backup`` puts a backup back.
 
-Never edit a released step (or ``BASELINE_SCHEMA``); add a new one.
+Never edit a released step (or ``BASELINE_SCHEMA`` / ``LIFE_OS_SCHEMA``); add a
+new one.
 """
 from __future__ import annotations
 
@@ -312,9 +313,158 @@ def _v1_baseline(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_}")
 
 
+# Version 2: the Life OS core (projects, items, links). Frozen.
+#
+# Times. Bookkeeping times (created_at, updated_at, completed_at, deleted_at) are
+# UTC instants like every other table ("2026-10-09T22:12:04+00:00", ``now_iso``).
+# Times the user gives (due_at, remind_at) are local wall-clock times, stored as
+# typed: "YYYY-MM-DD" (due that day, no time) or "YYYY-MM-DDTHH:MM". They sort as
+# text, and a date-only due sorts before the timed ones of that day.
+#
+# References in ``links``. A row says "src --kind--> dst". Both ends are typed:
+#   item / project   the row's id as decimal text ("12"); must exist (trigger), and
+#                    the link goes when the record is deleted (trigger).
+#   issue            "owner/name#N", a GitHub issue ("SuperDabT/stm32-lidar-scanner#7")
+#   commit           "owner/name@sha" with 7-40 lowercase hex characters
+# External ends (issue, commit) are checked for format only, never copied and not
+# required to exist locally: an issue may not be synced yet, and the issues table
+# stays GitHub's mirror. Readers resolve them against the mirror when shown.
+# Links cannot be updated (delete and re-add). Kinds: "about" (the source is
+# about the target, e.g. a task about an issue) and "related".
+LIFE_OS_SCHEMA = """
+CREATE TABLE projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE
+        CHECK (length(slug) BETWEEN 1 AND 40 AND slug NOT GLOB '*[^a-z0-9-]*'
+               AND slug NOT GLOB '-*' AND slug NOT GLOB '*-'),
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    github_repo TEXT COLLATE NOCASE UNIQUE
+        CHECK (github_repo IS NULL OR (github_repo GLOB '?*/?*'
+               AND github_repo NOT GLOB '*/*/*'
+               AND github_repo NOT GLOB '*[^A-Za-z0-9._/-]*')),
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'archived')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN ('task', 'idea', 'reminder')),
+    title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+    body TEXT,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+    priority INTEGER NOT NULL DEFAULT 0 CHECK (priority BETWEEN 0 AND 3),
+    due_at TEXT CHECK (due_at IS NULL
+        OR (due_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(due_at) IS due_at)
+        OR (due_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-2][0-9]:[0-5][0-9]'
+            AND substr(due_at, 12, 2) < '24'
+            AND strftime('%Y-%m-%dT%H:%M', due_at) IS due_at)),
+    remind_at TEXT CHECK (remind_at IS NULL
+        OR (remind_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-2][0-9]:[0-5][0-9]'
+            AND substr(remind_at, 12, 2) < '24'
+            AND strftime('%Y-%m-%dT%H:%M', remind_at) IS remind_at)),
+    project_id INTEGER REFERENCES projects (id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    deleted_at TEXT,
+    CHECK ((status = 'done') = (completed_at IS NOT NULL))
+) STRICT;
+
+CREATE INDEX items_project ON items (project_id);
+CREATE INDEX items_open_due ON items (due_at) WHERE status = 'open' AND deleted_at IS NULL;
+CREATE INDEX items_open_remind ON items (remind_at)
+    WHERE remind_at IS NOT NULL AND status = 'open' AND deleted_at IS NULL;
+
+CREATE TABLE links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_type TEXT NOT NULL CHECK (src_type IN ('item', 'project')),
+    src_id TEXT NOT NULL CHECK (src_id GLOB '[1-9]*' AND src_id NOT GLOB '*[^0-9]*'),
+    dst_type TEXT NOT NULL CHECK (dst_type IN ('item', 'project', 'issue', 'commit')),
+    dst_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('about', 'related')),
+    created_at TEXT NOT NULL,
+    UNIQUE (src_type, src_id, dst_type, dst_id, kind),
+    CHECK (NOT (src_type = dst_type AND src_id = dst_id)),
+    CHECK (CASE dst_type
+        WHEN 'issue' THEN dst_id GLOB '?*/?*#[1-9]*'
+            AND dst_id NOT GLOB '*/*/*' AND dst_id NOT GLOB '*#*#*'
+            AND substr(dst_id, instr(dst_id, '#') + 1) NOT GLOB '*[^0-9]*'
+            AND substr(dst_id, 1, instr(dst_id, '#') - 1) NOT GLOB '*[^A-Za-z0-9._/-]*'
+        WHEN 'commit' THEN dst_id GLOB '?*/?*@*'
+            AND dst_id NOT GLOB '*/*/*' AND dst_id NOT GLOB '*@*@*'
+            AND length(substr(dst_id, instr(dst_id, '@') + 1)) BETWEEN 7 AND 40
+            AND substr(dst_id, instr(dst_id, '@') + 1) NOT GLOB '*[^0-9a-f]*'
+            AND substr(dst_id, 1, instr(dst_id, '@') - 1) NOT GLOB '*[^A-Za-z0-9._/-]*'
+        ELSE dst_id GLOB '[1-9]*' AND dst_id NOT GLOB '*[^0-9]*'
+    END)
+) STRICT;
+
+CREATE INDEX links_dst ON links (dst_type, dst_id);
+
+CREATE TRIGGER links_ends_exist BEFORE INSERT ON links
+BEGIN
+    SELECT RAISE(ABORT, 'links: the source record does not exist')
+    WHERE (NEW.src_type = 'item'
+           AND NOT EXISTS (SELECT 1 FROM items WHERE id = CAST(NEW.src_id AS INTEGER)))
+       OR (NEW.src_type = 'project'
+           AND NOT EXISTS (SELECT 1 FROM projects WHERE id = CAST(NEW.src_id AS INTEGER)));
+    SELECT RAISE(ABORT, 'links: the target record does not exist')
+    WHERE (NEW.dst_type = 'item'
+           AND NOT EXISTS (SELECT 1 FROM items WHERE id = CAST(NEW.dst_id AS INTEGER)))
+       OR (NEW.dst_type = 'project'
+           AND NOT EXISTS (SELECT 1 FROM projects WHERE id = CAST(NEW.dst_id AS INTEGER)));
+END;
+
+CREATE TRIGGER links_immutable BEFORE UPDATE ON links
+BEGIN
+    SELECT RAISE(ABORT, 'links cannot be changed; delete the link and add a new one');
+END;
+
+CREATE TRIGGER items_keep_id BEFORE UPDATE OF id ON items WHEN NEW.id IS NOT OLD.id
+BEGIN
+    SELECT RAISE(ABORT, 'items: the id cannot change');
+END;
+
+CREATE TRIGGER projects_keep_id BEFORE UPDATE OF id ON projects WHEN NEW.id IS NOT OLD.id
+BEGIN
+    SELECT RAISE(ABORT, 'projects: the id cannot change');
+END;
+
+CREATE TRIGGER items_drop_links AFTER DELETE ON items
+BEGIN
+    DELETE FROM links WHERE (src_type = 'item' AND src_id = CAST(OLD.id AS TEXT))
+                         OR (dst_type = 'item' AND dst_id = CAST(OLD.id AS TEXT));
+END;
+
+CREATE TRIGGER projects_drop_links AFTER DELETE ON projects
+BEGIN
+    DELETE FROM links WHERE (src_type = 'project' AND src_id = CAST(OLD.id AS TEXT))
+                         OR (dst_type = 'project' AND dst_id = CAST(OLD.id AS TEXT));
+END;
+"""
+
+# The project Jarvis was built for, registered as the first project. A literal on
+# purpose (not config.DEFAULT_REPO): a released step must not change.
+FIRST_PROJECT = {"slug": "lidar", "name": "LiDAR Scanner",
+                 "github_repo": "SuperDabT/stm32-lidar-scanner"}
+
+
+def _v2_life_os_core(conn: sqlite3.Connection) -> None:
+    for stmt in _statements(LIFE_OS_SCHEMA):
+        conn.execute(stmt)
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO projects (slug, name, github_repo, created_at, updated_at) "
+        "VALUES (:slug, :name, :github_repo, :now, :now) ON CONFLICT DO NOTHING",
+        {**FIRST_PROJECT, "now": now})
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline: GitHub mirror, cards, briefings, checks, daemon, research, chat",
               _v1_baseline),
+    Migration(2, "Life OS core: projects, items, links", _v2_life_os_core),
 )
 
 

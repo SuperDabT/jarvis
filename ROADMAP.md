@@ -9,8 +9,8 @@ existing project cockpit.
 | Step | What | Status |
 |---|---|---|
 | 1 | Versioned migrations (`user_version`), verified backups, restore, one schema owner | done |
-| 2 | Core data: `projects` (LiDAR repo as project 1), `items` (task / idea / reminder), `links` | next |
-| 3 | `jarvis/items.py`: item service (CRUD, complete, soft delete, open / today / overdue) | |
+| 2 | Core data: `projects` (LiDAR repo as project 1), `items` (task / idea / reminder), `links` | done |
+| 3 | `jarvis/items.py`: item service (CRUD, complete, soft delete, open / today / overdue) | next |
 | 4 | `jarvis/capture.py`: deterministic quick-capture parser (no model) | |
 | 5 | App shell: navigation rail, Home / Tasks / School / Projects / Knowledge, chat at shell level | |
 | 6 | Quick capture: Ctrl+N overlay and `jarvis add "..."` | |
