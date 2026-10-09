@@ -477,3 +477,10 @@ def test_loop_notifies_only_when_cards_are_new(env):
     assert first.cards_new > 0
     assert len(sent) == 1  # first tick only; later skipped ticks stay quiet
     assert sent[0][0].startswith(f"{first.cards_new} new suggestion")
+
+
+def test_token_interval_floor_without_token():
+    from jarvis.daemon import NO_TOKEN_MIN_INTERVAL_S, token_interval
+    assert token_interval(180, "tok") == 180
+    assert token_interval(180, None) == NO_TOKEN_MIN_INTERVAL_S
+    assert token_interval(3600, None) == 3600

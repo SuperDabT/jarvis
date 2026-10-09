@@ -348,6 +348,11 @@ def compute_facts(
     if elec is not None:
         facts.append(elec)
 
+    # 11: research (active research cards and the issues they point at)
+    res = research_fact(conn)
+    if res is not None:
+        facts.append(res)
+
     return sorted(facts, key=lambda f: (f.priority, f.id))
 
 
@@ -375,6 +380,33 @@ def electrical_fact(conn: sqlite3.Connection) -> Fact | None:
              f"{', '.join(parts)}.",
         data={"active": n, "by_status": by},
         evidence=["cards:electrical"],
+    )
+
+
+def research_fact(conn: sqlite3.Connection) -> Fact | None:
+    """Count active research cards and name the issues (or libraries) they point at."""
+    rows = conn.execute(
+        """SELECT c.source_ref, i.number, i.title FROM cards c
+           LEFT JOIN issues i ON c.source_ref = '#' || i.number
+           WHERE c.type = 'research' AND c.status = 'active' ORDER BY c.id"""
+    ).fetchall()
+    if not rows:
+        return None
+    issues: dict[int, str] = {}
+    libraries: list[str] = []
+    for r in rows:
+        if r["number"] is not None:
+            issues.setdefault(r["number"], r["title"])
+        elif r["source_ref"] and r["source_ref"] not in libraries:
+            libraries.append(r["source_ref"])
+    targets = [f"#{n} {t}" for n, t in sorted(issues.items())] + libraries
+    n = len(rows)
+    return Fact(
+        id="research", kind="research", priority=4,
+        text=f"{plural(n, 'research card')} {'is' if n == 1 else 'are'} active, for "
+             f"{'; '.join(targets)}.",
+        data={"active": n, "issues": sorted(issues), "libraries": libraries},
+        evidence=[f"#{x}" for x in sorted(issues)],
     )
 
 

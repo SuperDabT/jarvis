@@ -125,11 +125,92 @@ CREATE TABLE IF NOT EXISTS daemon_state (
     facts_hash TEXT,
     model_pending INTEGER DEFAULT 0
 );
+
+-- Phase 6: the research loop.
+-- Papers seen on arXiv (and their cached embedding for one embed model).
+CREATE TABLE IF NOT EXISTS research_papers (
+    paper_id TEXT PRIMARY KEY,
+    title TEXT,
+    authors_json TEXT,
+    abstract TEXT,
+    published TEXT,
+    url TEXT,
+    categories TEXT,
+    embed_model TEXT,
+    embedding BLOB,
+    fetched_at TEXT
+);
+
+-- Every (paper, issue) pair the model judged, accepted or not, so it is never
+-- judged twice. Model errors are not stored.
+CREATE TABLE IF NOT EXISTS research_seen (
+    paper_id TEXT NOT NULL,
+    issue_number INTEGER NOT NULL,
+    verdict TEXT,
+    confidence TEXT,
+    applies_to TEXT,
+    why TEXT,
+    reason TEXT,
+    similarity REAL,
+    judged_at TEXT,
+    model TEXT,
+    PRIMARY KEY (paper_id, issue_number)
+);
+
+-- Model-proposed search queries per issue, keyed by a hash of the issue text.
+CREATE TABLE IF NOT EXISTS research_queries (
+    issue_number INTEGER PRIMARY KEY,
+    key TEXT,
+    worthy INTEGER,
+    reason TEXT,
+    queries_json TEXT,
+    model TEXT,
+    created_at TEXT
+);
+
+-- arXiv answers per search string (paper ids in rank order), reused for a while so
+-- re-runs do not ask arXiv again.
+CREATE TABLE IF NOT EXISTS research_searches (
+    query TEXT PRIMARY KEY,
+    paper_ids TEXT,
+    fetched_at TEXT
+);
+
+-- Library release baselines: the newest tag seen per repo.
+CREATE TABLE IF NOT EXISTS research_releases (
+    repo TEXT PRIMARY KEY,
+    tag TEXT,
+    url TEXT,
+    source TEXT,
+    baseline_at TEXT,
+    updated_at TEXT
+);
+-- Chat: questions asked in the window and Jarvis's answers, per window session.
+-- sources_json (assistant rows): {"sources": [...], "notes": [...], "unverified_numbers": [...]}.
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT CHECK (role IN ('user', 'assistant')),
+    content TEXT,
+    sources_json TEXT,
+    created_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS chat_messages_session ON chat_messages (session_id, id);
 """
+
+# Columns added after a table first shipped: (table, column, type). Applied with
+# ALTER TABLE ADD COLUMN when missing, so an existing database migrates in place.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("daemon_state", "last_research_at", "TEXT"),
+    ("daemon_state", "next_research_at", "TEXT"),
+    ("daemon_state", "research_summary", "TEXT"),
+)
 
 DAEMON_STATE_COLUMNS = (
     "pid", "started_at", "last_tick_at", "last_change_at", "last_error", "interval_s",
     "next_tick_at", "hardware_hash", "facts_hash", "model_pending",
+    "last_research_at", "next_research_at", "research_summary",
 )
 
 ISSUE_COLUMNS = (
@@ -156,8 +237,21 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    migrate(conn)
     conn.commit()
     return conn
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Add any MIGRATIONS column that is missing. Idempotent."""
+    for table, column, type_ in MIGRATIONS:
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_}")
+            except sqlite3.OperationalError as e:  # another process added it meanwhile
+                if "duplicate column" not in str(e).lower():
+                    raise
 
 
 def _upsert(

@@ -1,0 +1,53 @@
+# research.yaml: optional settings for the research loop (phase 6).
+#
+# Copy to ~/.config/jarvis/research.yaml (or point $JARVIS_RESEARCH at it).
+# Every key is optional; without the file Jarvis uses the defaults shown here.
+# A broken file is reported in the log and the defaults are used instead.
+
+# Two lines of context for the judge and for every Claude prompt.
+project: >-
+  An STM32F446RE (NUCLEO-F446RE) pan-tilt tracker in bare-metal C: two hobby servos
+  sweep a single-beam Benewake TF-Luna LiDAR over UART to detect and follow a person
+  in a room (a 2D scan of a few hundred points per sweep).
+setup: STM32F446RE, single-beam TF-Luna on a pan-tilt, no RTOS
+# What the judge treats as "transfers to this hardware".
+constraints: >-
+  Firmware is bare-metal C on the microcontroller (no OS; tools that need another
+  language or runtime on the device do not apply). One distance reading at a time, a
+  few hundred points per sweep, no camera, no GPU.
+
+# Libraries whose new releases become research cards: owner/repo -> issue number
+# (or null for "the whole project"). The first time a library is seen, its latest
+# release or version tag is recorded as a baseline, without a card. Issues mapped
+# here are not searched on arXiv.
+libraries:
+  STMicroelectronics/STM32CubeF4: null
+  FreeRTOS/FreeRTOS-Kernel: 18
+
+# Replace the automatic arXiv queries for an issue (plain words, ANDed by arXiv).
+queries:
+  # 10: [Kalman filter target tracking 2D LiDAR]
+  # 24: [RANSAC line extraction 2D laser scan]
+
+# Never research these issues / always research these (overrides the chore filter
+# and the model's "not research-worthy").
+skip_issues: []
+include_issues: []
+
+# Few and good: new cards per run, and research cards active at once.
+max_cards_per_run: 3
+max_active: 8
+# Upper bound on model judgements per run (the rest wait for the next run).
+max_judge_per_run: 60
+
+# Embedding prefilter: cosine similarity floor and how many papers per issue go to
+# the judge. Calibrated with qwen3-embedding:0.6b on the pan-tilt repo's issues.
+min_similarity: 0.4
+top_k: 5
+embed_model: qwen3-embedding:0.6b
+
+# arXiv: how far back, how many results per query, and the sensor words a
+# title-derived query is anchored to (any one must appear in the paper).
+years: 3
+results_per_query: 25
+domain_terms: [LiDAR, laser scanner, rangefinder]

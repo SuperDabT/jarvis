@@ -27,9 +27,16 @@ back to the normal interval after a clean tick. While Ollama is down the checks
 and briefing use their templates and ``model_pending`` makes the next tick run
 again, so the model wording arrives once Ollama is back.
 
+The slow loop (phase 6) lives in the same process: every
+``JARVIS_RESEARCH_INTERVAL`` hours (default 6, min 1; the first run waits about two
+minutes after startup and respects the stored schedule) one research pass runs under
+the same refresh lock (:mod:`jarvis.research`): arXiv and library releases -> a
+few research cards, one notification per run with new cards, one log line per run.
+Every fast tick also auto-resolves research cards whose issue was closed.
+
 SIGTERM / SIGINT stop the loop: a tick that is talking to GitHub finishes (it
 is bounded by the HTTP timeout and keeps ETags consistent with the stored data);
-a tick waiting on the model is aborted. Locks are released and the exit code is 0.
+a tick waiting on the model, or a research pass, is aborted. Locks are released and the exit code is 0.
 """
 from __future__ import annotations
 
@@ -59,16 +66,26 @@ from jarvis.hardware import find_hardware
 from jarvis.lock import DaemonLock, DaemonRunning, RefreshBusy, refresh_lock
 from jarvis.ollama import OllamaClient
 from jarvis.pipeline import run_checks
+from jarvis.research.runner import resolve_closed, run_research
+from jarvis.research.settings import load_settings
+from jarvis.research.sources import ArxivClient
 from jarvis.sync import sync
 
 DEFAULT_INTERVAL_S = 180
 MIN_INTERVAL_S = 60
+NO_TOKEN_MIN_INTERVAL_S = 600  # ~6 requests per tick -> ~36/hour of the 60 allowed
 HW_POLL_S = 10
 BUSY_RETRY_S = 30
 BACKOFF_BASE_S = 60
 BACKOFF_CAP_S = 900
 RATE_LIMIT_SLACK_S = 5
 STOP_POLL_S = 0.5
+# The slow loop (research): every JARVIS_RESEARCH_INTERVAL hours, first run a little
+# after startup so it does not compete with the first fast tick.
+DEFAULT_RESEARCH_HOURS = 6.0
+MIN_RESEARCH_HOURS = 1.0
+RESEARCH_STARTUP_DELAY_S = 120
+RESEARCH_RETRY_S = 1800
 
 
 class Shutdown(BaseException):
@@ -86,6 +103,11 @@ def effective_interval(requested: float, poll_interval: float | None = None) -> 
     return int(max(requested, poll_interval or 0, MIN_INTERVAL_S))
 
 
+def token_interval(requested: int, token: str | None) -> int:
+    """Unauthenticated, even 304s count against GitHub's 60 requests/hour."""
+    return requested if token else max(requested, NO_TOKEN_MIN_INTERVAL_S)
+
+
 def interval_from_env(env: Mapping[str, str] | None = None) -> int:
     raw = (env if env is not None else os.environ).get("JARVIS_INTERVAL", "").strip()
     if not raw:
@@ -94,6 +116,16 @@ def interval_from_env(env: Mapping[str, str] | None = None) -> int:
         return int(float(raw))
     except ValueError:
         return DEFAULT_INTERVAL_S
+
+
+def research_interval_from_env(env: Mapping[str, str] | None = None) -> int:
+    """Seconds between research runs: $JARVIS_RESEARCH_INTERVAL hours (default 6, min 1)."""
+    raw = (env if env is not None else os.environ).get("JARVIS_RESEARCH_INTERVAL", "").strip()
+    try:
+        hours = float(raw) if raw else DEFAULT_RESEARCH_HOURS
+    except ValueError:
+        hours = DEFAULT_RESEARCH_HOURS
+    return int(max(hours, MIN_RESEARCH_HOURS) * 3600)
 
 
 @dataclass
@@ -288,6 +320,8 @@ def _tick_locked(conn, cfg, gh, ollama, now, abortable, res: TickResult) -> None
                     if outcome.startswith("error"):
                         _note_error(res, f"{name}: {outcome.removeprefix('error: ')}", now)
 
+    # Research cards whose issue is now closed: local and cheap, every tick.
+    res.cards_resolved = resolve_closed(conn)
     hw = hardware_hash(conn, cfg)
     fh = facts_hash(compute_facts(conn, now=now))
     github = res.sync if res.sync is not None else None
@@ -298,7 +332,8 @@ def _tick_locked(conn, cfg, gh, ollama, now, abortable, res: TickResult) -> None
     if res.decision.run:
         res.ran = True
         with abortable():
-            res.cards_new, res.cards_resolved, res.notes = run_checks(conn, cfg, ollama)
+            res.cards_new, resolved, res.notes = run_checks(conn, cfg, ollama)
+            res.cards_resolved += resolved
             res.briefing = build_briefing(conn, ollama, now=now)
         down = _model_down(res.briefing, res.notes)
         res.model_pending = down is not None
@@ -357,6 +392,8 @@ def format_line(res: TickResult, now: datetime, next_in: float | None = None) ->
 
 def _human_s(s: float) -> str:
     s = int(round(s))
+    if s >= 3600 and s % 3600 == 0:
+        return f"{s // 3600}h"
     return f"{s}s" if s < 120 else f"{s // 60}m{s % 60:02d}s" if s % 60 else f"{s // 60}m"
 
 
@@ -409,6 +446,9 @@ class Daemon:
         stop: threading.Event | None = None,
         hw_poll_s: float = HW_POLL_S,
         notify: Callable[[str, str], Any] | None = None,
+        research: Callable[[datetime], Any] | None = None,
+        research_interval: int = int(DEFAULT_RESEARCH_HOURS * 3600),
+        research_delay: float = RESEARCH_STARTUP_DELAY_S,
     ) -> None:
         self.cfg, self.conn = cfg, conn
         self.interval = interval
@@ -420,6 +460,12 @@ class Daemon:
         self.sleep = sleep or self._sleep
         self.hw_poll_s = hw_poll_s
         self.notify = notify
+        # The slow loop: ``research(now)`` runs one research pass (see jarvis.research)
+        # and returns a result with .new, .errors, .error and .summary().
+        self.research = research
+        self.research_interval = max(int(research_interval), int(MIN_RESEARCH_HOURS * 3600))
+        self.research_delay = research_delay
+        self.research_runs: list[Any] = []
         self.backoff = Backoff()
         self.in_model = False
         self.ticks: list[TickResult] = []
@@ -502,6 +548,72 @@ class Daemon:
             except Exception as e:  # noqa: BLE001
                 self.out(f"  notify failed: {_short(str(e), 120)}")
 
+    # -- the slow loop (research) ------------------------------------------
+    def first_research_delay(self) -> float:
+        """Seconds until the first research run: at least ``research_delay`` after
+        startup, and not before the stored schedule (last run + interval)."""
+        wait = float(self.research_delay)
+        try:
+            row = db.get_daemon_state(self.conn)
+            last = row["last_research_at"] if row is not None else None
+        except Exception:  # noqa: BLE001
+            last = None
+        if last:
+            try:
+                due = datetime.fromisoformat(last) + timedelta(seconds=self.research_interval)
+                wait = max(wait, (due - self.wall()).total_seconds())
+            except ValueError:
+                pass
+        return wait
+
+    def _set_next_research(self, delay: float) -> None:
+        db.update_daemon_state(self.conn, next_research_at=(
+            self.wall() + timedelta(seconds=delay)).isoformat(timespec="seconds"))
+
+    def run_research(self) -> float:
+        """One research pass under the refresh lock, logged. Returns the delay until
+        the next one. Abortable on SIGTERM like a model call."""
+        t0 = self.clock()
+        now = self.wall()
+        ts = now.astimezone().strftime("%H:%M:%S")
+        try:
+            with refresh_lock(self.cfg.db_path), self._abortable():
+                r = self.research(now)
+        except RefreshBusy:
+            self.out(f"{ts} research: busy, retry in {BUSY_RETRY_S}s")
+            return BUSY_RETRY_S
+        except Shutdown:
+            raise
+        except Exception as e:  # noqa: BLE001 - the loop must survive anything
+            try:
+                self.conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            delay = min(RESEARCH_RETRY_S, self.research_interval)
+            text = _short(f"{type(e).__name__}: {e}", 240)
+            self.out(f"{ts} research: failed ({self.clock() - t0:.1f}s) ! {text}; "
+                     f"retry in {_human_s(delay)}")
+            db.update_daemon_state(self.conn, research_summary=f"failed: {text}")
+            return delay
+        self.research_runs.append(r)
+        delay = self.research_interval
+        line = f"{ts} research: {r.summary()}"
+        if r.error:
+            delay = min(RESEARCH_RETRY_S, self.research_interval)
+            line += f" ! {_short(r.error, 240)}; retry in {_human_s(delay)}"
+        self.out(line)
+        if self.verbose:
+            for n in getattr(r, "notes", []) or []:
+                self.out(f"  note: {n}")
+        if self.notify and r.new:
+            try:
+                self.notify(*new_card_message(self.conn, r.new))
+            except Exception as e:  # noqa: BLE001
+                self.out(f"  notify failed: {_short(str(e), 120)}")
+        db.update_daemon_state(self.conn, last_research_at=now.isoformat(timespec="seconds"),
+                               research_summary=_short(r.summary(), 300))
+        return delay
+
     def _hardware_edited(self) -> bool:
         try:
             return hardware_hash(self.conn, self.cfg) != load_state(self.conn).hardware_hash
@@ -518,9 +630,16 @@ class Daemon:
                 interval_s=self.current_interval(), next_tick_at=None)
             self.out(f"{self.wall().astimezone():%H:%M:%S} watching {self.cfg.repo} every "
                      f"{self.current_interval()}s, hardware file {self.cfg.hardware_path} "
-                     f"every {self.hw_poll_s:g}s (db {self.cfg.db_path})")
+                     f"every {self.hw_poll_s:g}s (db {self.cfg.db_path})"
+                     + (f", research every {_human_s(self.research_interval)}"
+                        if self.research is not None else ""))
         hw_sig = _file_sig(self.cfg.hardware_path)
         next_full = self.clock()
+        next_research: float | None = None
+        if self.research is not None and not once:
+            first = self.first_research_delay()
+            next_research = self.clock() + first
+            self._set_next_research(first)
         code = 0
         try:
             while not self.stop.is_set():
@@ -538,6 +657,10 @@ class Daemon:
                         self.conn, interval_s=self.current_interval(),
                         next_tick_at=(self.wall() + timedelta(seconds=delay))
                         .isoformat(timespec="seconds"))
+                elif next_research is not None and self.clock() >= next_research:
+                    delay = self.run_research()
+                    next_research = self.clock() + delay
+                    self._set_next_research(delay)
                 else:
                     sig = _file_sig(self.cfg.hardware_path)
                     if sig != hw_sig:
@@ -548,7 +671,8 @@ class Daemon:
                                 hw_sig = sig  # busy: try again on the next poll
                         else:
                             hw_sig = sig
-                remaining = next_full - self.clock()
+                wake = next_full if next_research is None else min(next_full, next_research)
+                remaining = wake - self.clock()
                 if remaining > 0 and not self.stop.is_set():
                     self.sleep(min(remaining, self.hw_poll_s))
         except Shutdown:
@@ -585,6 +709,11 @@ def run_watch(cfg: Config, interval: int | None = None, once: bool = False,
     if requested < MIN_INTERVAL_S:
         print(f"interval {requested}s is below the {MIN_INTERVAL_S}s floor; "
               f"using {MIN_INTERVAL_S}s", file=sys.stderr)
+    floored = token_interval(requested, cfg.token)
+    if floored != requested:
+        print(f"no GITHUB_TOKEN: checking every {floored}s instead of "
+              f"{requested}s to stay under GitHub's unauthenticated limit", file=sys.stderr)
+        requested = floored
     lock = DaemonLock(cfg.db_path)
     if not once:
         try:
@@ -597,8 +726,16 @@ def run_watch(cfg: Config, interval: int | None = None, once: bool = False,
     conn = db.connect(cfg.db_path)
     gh = GitHubClient(cfg.repo, cfg.token, conn)
     ollama = OllamaClient(cfg.ollama_url, cfg.model)
+    arxiv = ArxivClient()
+
+    def research(now: datetime):
+        settings, note = load_settings(cfg.research_path)
+        return run_research(conn, settings, repo=cfg.repo, ollama=ollama, arxiv=arxiv, gh=gh,
+                            now=now, notes=[note] if note else None)
+
     daemon = Daemon(cfg, conn, interval=requested, gh=gh, ollama=ollama, verbose=verbose,
-                    notify=None if once else notify.send)
+                    notify=None if once else notify.send, research=research,
+                    research_interval=research_interval_from_env())
     old = install_signal_handlers(daemon)
     try:
         return daemon.run(once=once)
@@ -607,5 +744,6 @@ def run_watch(cfg: Config, interval: int | None = None, once: bool = False,
             signal.signal(sig, handler)
         gh.close()
         ollama.close()
+        arxiv.close()
         conn.close()
         lock.release()

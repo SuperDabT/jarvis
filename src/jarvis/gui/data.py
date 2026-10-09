@@ -270,6 +270,12 @@ def watch_status(row: sqlite3.Row | dict | None, now: datetime | None = None) ->
         tips.append(f"Next check: {local_stamp(row['next_tick_at'], now)}")
     if row["last_error"]:
         tips.append(f"Last error: {row['last_error']}")
+    keys = row.keys() if hasattr(row, "keys") else ()
+    if "last_research_at" in keys and row["last_research_at"]:
+        line = f"Research: last {local_stamp(row['last_research_at'], now)}"
+        if fresh and "next_research_at" in keys and row["next_research_at"]:
+            line += f", next {local_stamp(row['next_research_at'], now)}"
+        tips.append(line)
     if fresh:
         return WatchView(True, f"watching · checked {ago(age)}", "\n".join(tips))
     tips.insert(0, "jarvis watch is not running")

@@ -10,6 +10,7 @@ from jarvis.electrical import sync_cards
 from jarvis.github import GitHubClient
 from jarvis.hardware import Hardware, HardwareError, HardwareSource, find_hardware, load_hardware
 from jarvis.ollama import OllamaClient
+from jarvis.research.runner import resolve_closed
 from jarvis.sync import sync
 
 
@@ -64,6 +65,7 @@ def refresh(conn: sqlite3.Connection, cfg: Config, use_model: bool = True,
     ollama = OllamaClient(cfg.ollama_url, cfg.model) if use_model else None
     try:
         new, resolved, notes = run_checks(conn, cfg, ollama)
+        resolved += resolve_closed(conn)  # research cards whose issue closed
         briefing = build_briefing(conn, ollama, force=force_briefing)
     finally:
         if ollama:

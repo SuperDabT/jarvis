@@ -153,6 +153,15 @@ class GitHubClient:
     def get(self, path: str, params: dict | None = None) -> FetchResult:
         return self._get(path, params)[0]
 
+    def get_unconditional(self, path: str, params: dict | None = None) -> FetchResult:
+        """Plain GET that neither sends nor stores an ETag (dry runs, first sightings)."""
+        resp = self._http.get(path, params=params)
+        if resp.status_code == 404:
+            return FetchResult(changed=False, status=404, data=None)
+        if resp.status_code != 200:
+            raise GitHubError(resp.status_code, _error_message(resp), str(resp.url))
+        return FetchResult(changed=True, status=200, data=self._parse(resp, str(resp.url)))
+
     def get_paginated(self, path: str, params: dict | None = None) -> FetchResult:
         params = {"per_page": 100, **(params or {})}
         resp, key, data = self._conditional(path, params)

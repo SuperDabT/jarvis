@@ -155,6 +155,23 @@ def _run_cards(conn, show_all: bool) -> None:
         print(f"{c.id:>4}  {c.status:<13} {c.type:<10} {c.title}")
 
 
+def _run_research(cfg: Config, conn, dry_run: bool, verbose: bool,
+                  issue: int | None) -> int:
+    from jarvis.research.runner import render_result, run_research
+    from jarvis.research.settings import load_settings
+    from jarvis.research.sources import ArxivClient
+
+    settings, note = load_settings(cfg.research_path)
+    if not cfg.token:
+        print("GITHUB_TOKEN not set; release checks run unauthenticated", file=sys.stderr)
+    with GitHubClient(cfg.repo, cfg.token, conn) as gh, ArxivClient() as arxiv, \
+            OllamaClient(cfg.ollama_url, cfg.model) as ollama:
+        res = run_research(conn, settings, repo=cfg.repo, ollama=ollama, arxiv=arxiv, gh=gh,
+                           dry_run=dry_run, only_issue=issue, notes=[note] if note else None)
+    print(render_result(res, settings, verbose=verbose), end="")
+    return 1 if res.errors and not res.cards else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="jarvis")
     sub = parser.add_subparsers(dest="cmd")
@@ -175,6 +192,15 @@ def main(argv: list[str] | None = None) -> int:
     gp.add_argument("id", type=int)
     dp = sub.add_parser("done", help="mark a card done (it never comes back)")
     dp.add_argument("id", type=int)
+    rp = sub.add_parser("research", help="search arXiv and library releases for open issues")
+    rp.add_argument("--dry-run", action="store_true",
+                    help="show queries, candidates, verdicts and the cards it would create; "
+                         "write nothing")
+    rp.add_argument("--verbose", action="store_true",
+                    help="list skipped issues, queries, similarities and verdicts")
+    rp.add_argument("--issue", type=int, default=None, help="only this issue number")
+    ap = sub.add_parser("ask", help="ask a question about the project (answered from synced data)")
+    ap.add_argument("question", nargs="+")
     wp = sub.add_parser("watch", help="keep the database current (the fast loop daemon)")
     wp.add_argument("--interval", type=int, default=None,
                     help="seconds between GitHub checks (default $JARVIS_INTERVAL or 180; "
@@ -184,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = Config.from_env()
+    if args.cmd == "ask":
+        from jarvis.chat import _main as ask_main
+
+        return ask_main([" ".join(args.question)])
     if args.cmd == "watch":
         from jarvis.daemon import run_watch
 
@@ -192,6 +222,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "summary":
             print(render_summary(conn, days=args.days, repo=cfg.repo), end="")
+        elif args.cmd == "research":
+            try:
+                with refresh_lock(cfg.db_path):
+                    return _run_research(cfg, conn, args.dry_run, args.verbose, args.issue)
+            except RefreshBusy:
+                print(f"{BUSY}; try again in a moment.", file=sys.stderr)
+                return 75
         elif args.cmd in ("sync", "brief", "checks"):
             # These write what a refresh writes (and may call the model): one at a time.
             try:
