@@ -34,7 +34,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from jarvis.briefing import (
     DATE_RE,
@@ -92,7 +92,10 @@ sentence saying Jarvis only knows this project's data.
 say "may", for example "#28 is open but may already be done: commit 02fb2d2 looks like \
 the same work". Never state a guess as fact.
 - Do no arithmetic: do not add, subtract or count anything yourself. Quote numbers, \
-counts and dates exactly as the CONTEXT gives them.
+counts and dates exactly as the CONTEXT gives them. Every count you need is already in \
+the CONTEXT (the "counts:" part of each milestone line, the section totals): quote counts \
+from the CONTEXT; never compute them. Do not write "plus N more", "N others" or "the \
+remaining N" unless that exact count is in the CONTEXT; name the items instead.
 - For a milestone question, start with its due date, days left and closed count exactly \
 as the milestone line gives them.
 - Refer to issues as #N with a few words of the title, and to commits by their \
@@ -110,6 +113,19 @@ not measurements); say so when you answer about them.
 - End with one last line: "SOURCES: " then the references you used, without brackets, \
 separated by commas, for example: SOURCES: #31, commit:02fb2d2, milestone:Core demo, \
 check:rail_budget:5V, fact:activity
+"""
+
+# Appended to SYSTEM_PROMPT for brevity="voice": the answer is read aloud.
+VOICE_RULES = """
+This answer will be spoken aloud by a text-to-speech voice. These rules override the \
+length rule above:
+- Answer in 1 to 3 short spoken sentences. No lists, no bullet points, no headings, no \
+markdown, no tables, no references in square brackets, no parentheses if you can avoid them.
+- Never read out a list of issue numbers. Give the count exactly as the CONTEXT states \
+it (for example the milestone's "counts:"), then name at most 2 issues, each by number \
+and a few words of its title.
+- Keep hedges for uncertain items ("may already be done").
+- Still end with the SOURCES line as described above; it is not spoken.
 """
 
 UNREACHABLE = ("The local model isn't reachable (Ollama at {url}). "
@@ -190,6 +206,10 @@ def _labels(row: sqlite3.Row) -> list[str]:
 
 def _issue_url(repo: str, row: sqlite3.Row) -> str:
     return row["html_url"] or f"https://github.com/{repo}/issues/{row['number']}"
+
+
+def plural_issues(n: int) -> str:
+    return f"{n} issue" if n == 1 else f"{n} issues"
 
 
 def mentioned_issues(text: str) -> list[int]:
@@ -435,6 +455,8 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
     except Exception as e:  # noqa: BLE001 - facts are useful, not essential
         facts = []
         header.append(f"(Facts unavailable: {_one_line(str(e), 120)})")
+    maybe_nums = {int(f.data["issue"]) for f in facts
+                  if f.kind == "maybe_done" and "issue" in f.data}
     fact_lines = []
     fact_evidence: dict[str, list[str]] = {}
     for f in facts:
@@ -467,6 +489,14 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
             line += f"; open: {', '.join(f'#{n}' for n in nums_open)}"
         if nums_closed:
             line += f"; closed: {', '.join(f'#{n}' for n in nums_closed)}"
+        # Counts the model must quote rather than compute (it otherwise invents
+        # "plus 6 more"-style totals).
+        maybe = [n for n in nums_open if n in maybe_nums]
+        maybe_txt = f" ({', '.join(f'#{n}' for n in maybe)})" if maybe else ""
+        line += (f"; counts: {len(nums_open)} open, {len(nums_closed)} closed, "
+                 f"{len(nums_open) + len(nums_closed)} total in the synced data, "
+                 f"{len(maybe)} open but may be done{maybe_txt}, "
+                 f"{len(nums_open) - len(maybe)} open and not marked may-be-done")
         ms_lines.append(line)
 
     # --- open issues (relevant first, then by milestone due order, then number)
@@ -565,13 +595,17 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
         card_lines.append(f"[{ref}] {row['type']} card{src}: {row['title']}. "
                           f"{_one_line(row['why'], WHY_CHARS)}")
 
+    no_ms = sum(1 for i in open_issues if i["milestone_number"] is None)
+    open_title = (f"OPEN ISSUES ({plural_issues(len(open_issues))} open in total, "
+                  f"{no_ms} of them with no milestone)")
+
     # --- assemble within the budget
     sections = {
         "header": _Section("PROJECT", header, required=True),
         "facts": _Section("FACTS (computed by Jarvis)", fact_lines or ["(none)"], required=True),
         "milestones": _Section("MILESTONES", ms_lines or ["(none)"], required=True),
         "asked": _Section("ISSUES ASKED ABOUT", asked_lines),
-        "open": _Section("OPEN ISSUES", open_lines or ["(none)"]),
+        "open": _Section(open_title, open_lines or ["(none)"]),
         "electrical": _Section("ELECTRICAL (hardware.yaml checks)", elec_lines),
         "commits": _Section(commits_title, commit_lines),
         "closed": _Section(closed_title, closed_lines),
@@ -619,6 +653,60 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
 
 
 # ---------------------------------------------------------------- streaming display
+
+
+_THINK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.S)
+
+
+class ThinkFilter:
+    """Drop ``<think>...</think>`` blocks from streamed text (thinking models leaking).
+
+    Text that could still be the start of a "<think>" tag is held back briefly.
+    """
+
+    OPEN, CLOSE = "<think>", "</think>"
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._inside = False
+
+    def feed(self, chunk: str) -> str:
+        self._buf += chunk
+        out: list[str] = []
+        while self._buf:
+            if self._inside:
+                k = self._buf.find(self.CLOSE)
+                if k < 0:
+                    # Keep only a possible partial closing tag.
+                    keep = max((n for n in range(1, len(self.CLOSE))
+                                if self._buf.endswith(self.CLOSE[:n])), default=0)
+                    self._buf = self._buf[len(self._buf) - keep:] if keep else ""
+                    break
+                self._buf = self._buf[k + len(self.CLOSE):].lstrip("\n")
+                self._inside = False
+                continue
+            k = self._buf.find(self.OPEN)
+            if k >= 0:
+                out.append(self._buf[:k])
+                self._buf = self._buf[k + len(self.OPEN):]
+                self._inside = True
+                continue
+            keep = max((n for n in range(1, len(self.OPEN))
+                        if self._buf.endswith(self.OPEN[:n])), default=0)
+            out.append(self._buf[: len(self._buf) - keep])
+            self._buf = self._buf[len(self._buf) - keep:]
+            break
+        return "".join(out)
+
+    def flush(self) -> str:
+        rest = "" if self._inside else self._buf
+        self._buf = ""
+        return rest
+
+
+def strip_think(text: str) -> str:
+    """``text`` without ``<think>...</think>`` blocks (an unclosed one runs to the end)."""
+    return _THINK_RE.sub("", text).lstrip("\n") if "<think>" in text else text
 
 
 class SourcesLineFilter:
@@ -873,9 +961,13 @@ def load_history(conn: sqlite3.Connection, session_id: str,
 # ---------------------------------------------------------------- ask
 
 
-def build_messages(ctx: Context, question: str,
-                   history: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+Brevity = Literal["text", "voice"]
+
+
+def build_messages(ctx: Context, question: str, history: Sequence[tuple[str, str]],
+                   brevity: Brevity = "text") -> list[dict[str, str]]:
+    system = SYSTEM_PROMPT + VOICE_RULES if brevity == "voice" else SYSTEM_PROMPT
+    msgs = [{"role": "system", "content": system}]
     msgs += [{"role": r, "content": c} for r, c in trim_history(history)]
     msgs.append({"role": "user", "content":
                  f"CONTEXT:\n{ctx.text}\n\nEND OF CONTEXT.\n\nQUESTION: {question}"})
@@ -885,7 +977,8 @@ def build_messages(ctx: Context, question: str,
 def ask(conn: sqlite3.Connection, cfg: Config, question: str,
         history: Sequence[tuple[str, str]], client: OllamaClient | None,
         on_token: Callable[[str], None] | None = None, now: datetime | None = None, *,
-        session_id: str | None = None, use_embeddings: bool = False) -> Answer:
+        session_id: str | None = None, use_embeddings: bool = False,
+        brevity: Brevity = "text", budget_tokens: int = CONTEXT_TOKEN_BUDGET) -> Answer:
     """Answer one question from the synced data. Never raises for model failures.
 
     ``history`` is the earlier (role, content) messages of this conversation (only
@@ -893,6 +986,10 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
     the SOURCES line held back; replace it with ``answer.display_text`` when this
     returns. With ``session_id`` the question and answer are stored in
     chat_messages. ``client`` None -> a client for cfg.ollama_url / cfg.model.
+    ``brevity="voice"`` adds VOICE_RULES (1-3 short spoken sentences, no lists or
+    markdown); grounding and validation are unchanged. ``<think>`` blocks a thinking
+    model may emit are removed from the stream and the answer. ``budget_tokens``
+    caps the context size (smaller = faster first token, less detail).
     """
     t0 = time.monotonic()
     question = question.strip()
@@ -905,8 +1002,10 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
         if session_id:
             save_message(conn, session_id, "user", question)
         ctx = build_context(conn, cfg, question, now, history=history,
-                            embedder=client if use_embeddings else None)
-        messages = build_messages(ctx, question, history)
+                            embedder=client if use_embeddings else None,
+                            budget_tokens=budget_tokens)
+        messages = build_messages(ctx, question, history, brevity)
+        think = ThinkFilter()
         filt = SourcesLineFilter()
         chunks: list[str] = []
         first: float | None = None
@@ -917,14 +1016,14 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
                     first = time.monotonic() - t0
                 chunks.append(chunk)
                 if on_token:
-                    shown = filt.feed(chunk)
+                    shown = filt.feed(think.feed(chunk))
                     if shown:
                         on_token(shown)
-            if on_token and (tail := filt.flush()):
+            if on_token and (tail := filt.feed(think.flush()) + filt.flush()):
                 on_token(tail)
         except OllamaError as e:
             error = str(e)
-        raw = "".join(chunks)
+        raw = strip_think("".join(chunks))
         if error is not None and not raw.strip():
             msg = (UNREACHABLE.format(url=cfg.ollama_url) if "cannot reach" in error
                    else f"The local model failed: {error}")

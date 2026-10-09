@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 from jarvis import cards as cards_mod
 from jarvis import db
 from jarvis.config import Config
-from jarvis.gui import theme
+from jarvis.gui import motion, theme
 from jarvis.gui.charts import (
     ContributionGridChart,
     MilestoneTimelineChart,
@@ -61,11 +61,14 @@ from jarvis.gui.widgets import (
     TEMPLATE_TIP,
     BriefingCallout,
     Columns,
+    ICON_SIZE,
     KpiRow,
+    PulseDot,
     SuggestionsTable,
     _clear,
     _label,
     repolish,
+    refresh_icon,
     section_header,
 )
 from jarvis.lock import RefreshBusy, refresh_lock
@@ -79,6 +82,11 @@ IDLE_HINT = "Ctrl+R refresh  ·  Ctrl+K ask Jarvis  ·  Ctrl+J toggle chat"
 EMPTY_CARDS = SuggestionsTable.EMPTY
 BUSY_TEXT = "A refresh is already running in the background"
 SECTION_GAP = 40
+SPIN_MS = 33  # Refresh icon frame interval while refreshing (~30 fps)
+SPIN_DEG_PER_S = 300
+
+REFRESH_TEXT = " Refresh"
+REFRESHING_TEXT = " Refreshing…"
 
 RefreshFn = Callable[[sqlite3.Connection, Config], Any]
 
@@ -167,9 +175,10 @@ class MainWindow(QMainWindow):
 
         self._status_timer = QTimer(self, singleShot=True, interval=STATUS_CLEAR_MS)
         self._status_timer.timeout.connect(lambda: self.set_status(IDLE_HINT, "idle"))
-        self._spin_timer = QTimer(self, interval=350)
+        self._spin_timer = QTimer(self, interval=SPIN_MS)
         self._spin_timer.timeout.connect(self._spin)
         self._spin_step = 0
+        self._spin_angle = 0.0
 
         self.reload(force=True)
 
@@ -262,12 +271,14 @@ class MainWindow(QMainWindow):
         self.crumb = _label(f"📡  {self.cfg.repo.split('/')[-1]}", "crumbStrong")
         lay.addWidget(self.crumb)
         lay.addStretch(1)
-        self.refresh_btn = QPushButton("↻  Refresh")
+        self.refresh_btn = QPushButton(REFRESH_TEXT)
         self.refresh_btn.setObjectName("ghost")
         self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.refresh_btn.setToolTip("Sync GitHub, run checks and rewrite the briefing (Ctrl+R)")
+        self.refresh_btn.setIconSize(ICON_SIZE)
+        self.refresh_btn.setIcon(refresh_icon(self.tokens.muted))
         fm = self.refresh_btn.fontMetrics()
-        self.refresh_btn.setMinimumWidth(fm.horizontalAdvance("↻  Refreshing...") + 24)
+        self.refresh_btn.setMinimumWidth(fm.horizontalAdvance(REFRESHING_TEXT) + 44)
         self.refresh_btn.clicked.connect(self.refresh)
         lay.addWidget(self.refresh_btn)
         self.chat_btn = QPushButton("✦  Ask Jarvis")
@@ -288,7 +299,7 @@ class MainWindow(QMainWindow):
 
         meta = QHBoxLayout()
         meta.setSpacing(8)
-        self.watch_dot = _label("●", "metaDot")
+        self.watch_dot = PulseDot()
         self.watch_label = _label("", "meta")
         self.watch_sep = _label("·", "metaSep")
         self.meta_label = _label("", "meta")
@@ -374,7 +385,7 @@ class MainWindow(QMainWindow):
 
     def _on_escape(self) -> None:
         """Esc closes the peek drawer if it is open; otherwise it does nothing."""
-        if self.peek.isVisible():
+        if self.peek.is_open:
             self.peek.hide_panel()
 
     def open_peek(self, row: SuggestionRow) -> None:
@@ -383,8 +394,12 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ data
 
-    def reload(self, force: bool = False) -> None:
-        """Re-read the DB; rebuild only the sections whose data changed."""
+    def reload(self, force: bool = False, animate: bool = True) -> None:
+        """Re-read the DB; rebuild only the sections whose data changed.
+
+        Rebuilt sections animate in (``animate``); unchanged ones are left alone,
+        so the 30 s poll with nothing new does no work and starts no animation.
+        """
         try:
             new = load_window_data(self.conn, self.cfg.repo,
                                    hardware_path=self.cfg.hardware_path)
@@ -398,28 +413,29 @@ class MainWindow(QMainWindow):
         def changed(attr: str) -> bool:
             return force or old is None or getattr(new, attr) != getattr(old, attr)
 
+        anim = animate and motion.enabled()
         self._render_meta()
         if changed("briefing"):
-            self.briefing_view.set_data(new.briefing, self.tokens)
+            self.briefing_view.set_data(new.briefing, self.tokens, animate=anim)
         if changed("kpis"):
-            self.kpi_row.set_kpis(new.kpis)
+            self.kpi_row.set_kpis(new.kpis, animate=anim)
         if changed("timeline"):
             self.timeline.set_tokens(self.tokens)
-            self.timeline.set_data(new.timeline)
+            self.timeline.set_data(new.timeline, animate=anim)
         if changed("grid"):
             self.grid_chart.set_tokens(self.tokens)
-            self.grid_chart.set_data(new.grid)
+            self.grid_chart.set_data(new.grid, animate=anim)
             self.grid_caption.setText(new.grid.caption if new.grid else "")
         if changed("phases"):
             self.phase_chart.set_tokens(self.tokens)
-            self.phase_chart.set_data(new.phases)
+            self.phase_chart.set_data(new.phases, animate=anim)
             n = new.phases.total_open if new.phases else 0
             self.phase_caption.setText(f"{n} open issue{'s' if n != 1 else ''}; "
                                        "an issue counts once, under its lowest phase label")
         if changed("power") or changed("power_note"):
-            self._render_power(new.power, new.power_note)
+            self._render_power(new.power, new.power_note, anim)
         if changed("rows"):
-            self._render_rows(new.rows)
+            self._render_rows(new.rows, anim)
         if new.errors:
             self.set_status(" · ".join(new.errors), "warn", sticky=True)
 
@@ -429,8 +445,9 @@ class MainWindow(QMainWindow):
         self.watch_label.setText(watch.text if watch else "")
         self.watch_label.setToolTip(watch.tooltip if watch else "")
         self.watch_dot.setToolTip(watch.tooltip if watch else "")
-        color = self.tokens.green if watch and watch.watching else self.tokens.faint
-        self.watch_dot.setStyleSheet(f"color: {color}; font-size: 11px;")
+        watching = bool(watch and watch.watching)
+        self.watch_dot.set_color(self.tokens.green if watching else self.tokens.faint)
+        self.watch_dot.set_breathing(watching)
         for w in (self.watch_label, self.watch_dot, self.watch_sep):
             w.setVisible(bool(watch and watch.text))
         parts, tips = [], []
@@ -447,7 +464,8 @@ class MainWindow(QMainWindow):
         self.meta_label.setText("  ·  ".join(parts) if parts else "not synced yet")
         self.meta_label.setToolTip("\n".join(tips))
 
-    def _render_power(self, rails: tuple[RailPower, ...], note: str | None) -> None:
+    def _render_power(self, rails: tuple[RailPower, ...], note: str | None,
+                      animate: bool = False) -> None:
         _clear(self.power_box)
         self.power_widgets = []
         self.budget_charts: list[RailBudgetChart] = []
@@ -484,7 +502,7 @@ class MainWindow(QMainWindow):
                 lay.addWidget(_label("Worst-case current", "sectionHint"))
                 lay.addSpacing(6)
                 ch = RailBudgetChart(self.tokens, colors)
-                ch.set_data(b)
+                ch.set_data(b, animate=animate)
                 lay.addWidget(ch)
                 lay.addSpacing(6)
                 lay.addWidget(_label(b.caption, "caption", wrap=True))
@@ -495,7 +513,7 @@ class MainWindow(QMainWindow):
                 lay.addWidget(_label("Voltage window", "sectionHint"))
                 lay.addSpacing(6)
                 vc = VoltageWindowChart(self.tokens, colors)
-                vc.set_data(r.window)
+                vc.set_data(r.window, animate=animate)
                 lay.addWidget(vc)
                 lay.addSpacing(6)
                 lay.addWidget(_label(r.window.caption, "caption", wrap=True))
@@ -504,9 +522,9 @@ class MainWindow(QMainWindow):
             self.power_box.addWidget(cols)
             self.power_widgets.append(cols)
 
-    def _render_rows(self, rows: tuple[SuggestionRow, ...]) -> None:
-        open_id = self.peek.row.id if self.peek.isVisible() and self.peek.row else None
-        self.table.set_rows(rows, self.tokens)
+    def _render_rows(self, rows: tuple[SuggestionRow, ...], animate: bool = False) -> None:
+        open_id = self.peek.row.id if self.peek.is_open and self.peek.row else None
+        self.table.set_rows(rows, self.tokens, animate=animate)
         n = len(rows)
         self.suggestions_head.head.setText(f"SUGGESTIONS  ·  {n}" if n else "SUGGESTIONS")
         if open_id is not None:
@@ -565,8 +583,9 @@ class MainWindow(QMainWindow):
         self._refreshing = True
         self.refresh_btn.setEnabled(False)
         self._spin_step = 0
+        self.refresh_btn.setText(REFRESHING_TEXT)
         self._spin()
-        self._spin_timer.start()
+        self._sync_spinner()
         self.set_status("Syncing GitHub and writing the briefing. The model can take a while.",
                         "idle", sticky=True)
         # A daemon thread, so closing the window never waits on a slow model call.
@@ -578,13 +597,19 @@ class MainWindow(QMainWindow):
         self._thread.start()
 
     def _spin(self) -> None:
-        self.refresh_btn.setText("↻  Refreshing" + "." * (self._spin_step % 4))
+        """Turn the Refresh icon (only while refreshing and visible)."""
+        if not self.isVisible() or self.isMinimized():
+            return
         self._spin_step += 1
+        self._spin_angle = (self._spin_angle + SPIN_DEG_PER_S * SPIN_MS / 1000) % 360
+        self.refresh_btn.setIcon(refresh_icon(self.tokens.muted, self._spin_angle))
 
     def _end_refresh(self) -> None:
         self._refreshing = False
         self._spin_timer.stop()
-        self.refresh_btn.setText("↻  Refresh")
+        self._spin_angle = 0.0
+        self.refresh_btn.setIcon(refresh_icon(self.tokens.muted))
+        self.refresh_btn.setText(REFRESH_TEXT)
         self.refresh_btn.setEnabled(True)
 
     def _on_refresh_ok(self, result: Any) -> None:
@@ -630,7 +655,8 @@ class MainWindow(QMainWindow):
         self.peek.tokens = self.tokens
         self.peek.shadow.tokens = self.tokens
         self.chat.set_tokens(self.tokens)
-        self.reload(force=True)
+        self.refresh_btn.setIcon(refresh_icon(self.tokens.muted, self._spin_angle))
+        self.reload(force=True, animate=False)  # a theme switch is not new data
         if self.peek.isVisible() and self.peek.row is not None:
             self.peek.show_row(self.peek.row)
 
@@ -673,6 +699,27 @@ class MainWindow(QMainWindow):
             if missing:
                 self._watcher.addPaths(missing)
         self._debounce.start()
+
+    def _sync_spinner(self) -> None:
+        run = (self._refreshing and motion.enabled() and self.isVisible()
+               and not self.isMinimized())
+        if run and not self._spin_timer.isActive():
+            self._spin_timer.start()
+        elif not run:
+            self._spin_timer.stop()
+
+    def showEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().showEvent(e)
+        self._sync_spinner()
+
+    def hideEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().hideEvent(e)
+        self._spin_timer.stop()
+
+    def changeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().changeEvent(e)
+        if e.type() == QEvent.Type.WindowStateChange:
+            self._sync_spinner()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         if self._owns_conn:

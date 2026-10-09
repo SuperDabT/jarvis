@@ -5,8 +5,20 @@ from __future__ import annotations
 import re
 from html import escape
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QMouseEvent
+import math
+import time
+
+from PySide6.QtCore import Property, QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QBoxLayout,
     QFrame,
@@ -21,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from jarvis.gui.data import BriefingView as BriefingData
 from jarvis.gui.data import EvidenceLink, Kpi, SentenceView, SuggestionRow
+from jarvis.gui import motion
 from jarvis.gui.theme import Tokens
 
 UNSURE_TIP = (
@@ -190,7 +203,8 @@ class BriefingCallout(QFrame):
         outer.addLayout(self._lay, 1)
         self.set_data(None)
 
-    def set_data(self, data: BriefingData | None, tokens: Tokens | None = None) -> None:
+    def set_data(self, data: BriefingData | None, tokens: Tokens | None = None,
+                 animate: bool = False) -> None:
         self.tokens = tokens or self.tokens
         self.data = data
         _clear(self._lay)
@@ -211,6 +225,12 @@ class BriefingCallout(QFrame):
             row = SentenceRow(s, self.tokens)
             self.rows.append(row)
             self._lay.addWidget(row)
+        if animate:
+            # headline first, then the sentences one after another, fading and rising
+            motion.fade_rise(self.headline, 6, motion.BASE + 80)
+            for i, row in enumerate(self.rows):
+                motion.fade_rise(row, motion.RISE, motion.BASE + 120,
+                                 delay=90 + i * motion.STAGGER)
 
 
 # ---------------------------------------------------------------- KPI tiles
@@ -239,6 +259,12 @@ class KpiTile(QFrame):
         if kpi.tooltip:
             self.setToolTip(kpi.tooltip)
 
+    def animate_in(self, delay: int = 0) -> None:
+        """The number counts up (keeping its format), then the sub-line fades in."""
+        motion.count_up_text(self.value, self.kpi.value, motion.SLOW + 200, delay)
+        if self.kpi.sub:
+            motion.fade_in(self.sub, motion.BASE + 100, delay + motion.SLOW - 200)
+
 
 class KpiRow(QWidget):
     """Four tiles in a row; two by two when the page is narrow."""
@@ -254,10 +280,13 @@ class KpiRow(QWidget):
         self.tiles: list[KpiTile] = []
         self._cols = 4
 
-    def set_kpis(self, kpis: tuple[Kpi, ...]) -> None:
+    def set_kpis(self, kpis: tuple[Kpi, ...], animate: bool = False) -> None:
         _clear(self.grid)
         self.tiles = [KpiTile(k) for k in kpis]
         self._place()
+        if animate:
+            for i, tile in enumerate(self.tiles):
+                tile.animate_in(i * motion.STAGGER)
 
     def _place(self) -> None:
         for t in self.tiles:
@@ -383,7 +412,72 @@ class TableRow(QFrame):
 
         self._flash = QTimer(self, singleShot=True, interval=self.FLASH_MS)
         self._flash.timeout.connect(self._unflash)
+        self.tokens = tokens
+        self._tint = 0.0  # hover tint 0..1 (animated)
+        self._glow = 0.0  # "new card" highlight 0..1 (animated)
+        self._tint_anim = None
         self._elide()
+
+    # hover tint and "new" highlight, painted under the cells
+    def _get_tint(self) -> float:
+        return self._tint
+
+    def _set_tint(self, v: float) -> None:
+        self._tint = float(v)
+        self.update()
+
+    tint = Property(float, _get_tint, _set_tint)
+
+    def _get_glow(self) -> float:
+        return self._glow
+
+    def _set_glow(self, v: float) -> None:
+        self._glow = float(v)
+        self.update()
+
+    glow = Property(float, _get_glow, _set_glow)
+
+    def flash_new(self, delay: int = 0) -> None:
+        """A soft accent highlight that fades out (cards flagged new)."""
+        if motion.enabled():
+            motion.animate(self, b"glow", 1.0, 0.0, 1800, "inout", delay)
+
+    def _hover_to(self, target: float) -> None:
+        if self._tint_anim is not None:
+            try:
+                self._tint_anim.stop()
+            except RuntimeError:
+                pass
+        self._tint_anim = motion.animate(self, b"tint", self._tint, target,
+                                         motion.FAST if target else motion.BASE, "out")
+
+    def enterEvent(self, e) -> None:  # noqa: N802 - Qt API
+        self._hover_to(1.0)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:  # noqa: N802 - Qt API
+        self._hover_to(0.0)
+        super().leaveEvent(e)
+
+    def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
+        selected = self.property("selected") == "true"
+        amount = 1.0 if selected else self._tint
+        if amount > 0.001 or self._glow > 0.001:
+            p = QPainter(self)
+            r = self.rect().adjusted(0, 0, 0, -1)  # keep the bottom hairline
+            if amount > 0.001:
+                c = QColor(self.tokens.fill)
+                c.setAlphaF(min(1.0, amount))
+                p.fillRect(r, c)
+            if self._glow > 0.001:
+                c = QColor(self.tokens.accent)
+                c.setAlphaF(0.14 * self._glow)
+                p.fillRect(r, c)
+                bar = QColor(self.tokens.accent)
+                bar.setAlphaF(0.85 * self._glow)
+                p.fillRect(QRectF(0, 0, 2.5, r.height()), bar)
+            p.end()
+        super().paintEvent(e)
 
     @property
     def card(self):
@@ -461,9 +555,22 @@ class SuggestionsTable(QWidget):
         self.body.setSpacing(0)
         lay.addLayout(self.body)
         self.empty_label: QLabel | None = None
+        self._leaving: set[int] = set()
 
-    def set_rows(self, rows: tuple[SuggestionRow, ...], tokens: Tokens | None = None) -> None:
-        self.tokens = tokens or self.tokens
+    def set_rows(self, rows: tuple[SuggestionRow, ...], tokens: Tokens | None = None,
+                 animate: bool = False) -> None:
+        new_tokens = tokens or self.tokens
+        same = (new_tokens is self.tokens and list(self.rows) == [r.id for r in rows]
+                and all(self.rows[r.id].row == r for r in rows) and (rows or self.empty_label))
+        if (not rows and not self.rows and self._leaving and new_tokens is self.tokens):
+            return  # the last row is still sliding out; it shows the empty state after
+        if same:
+            # e.g. the reload right after a Done: keep the widgets (and the running
+            # slide-out of the removed one)
+            return
+        before = set(self.rows)
+        first = not before and self.empty_label is None
+        self.tokens = new_tokens
         _clear(self.body)
         self.rows = {}
         self.empty_label = None
@@ -472,22 +579,167 @@ class SuggestionsTable(QWidget):
             self.empty_label.setContentsMargins(6, 14, 6, 6)
             self.body.addWidget(self.empty_label)
             return
+        k = 0
         for r in rows:
             w = TableRow(r, self.tokens)
             w.opened.connect(self.opened)
             w.copied.connect(self.copied)
             self.rows[r.id] = w
             self.body.addWidget(w)
+            # new cards (flagged new, or arriving after the first load) flash softly
+            if animate and r.is_new and (first or r.id not in before):
+                w.flash_new(300 + k * motion.STAGGER)
+                k += 1
 
     def remove(self, card_id: int) -> None:
+        """Drop a row now (``rows`` no longer has it); it slides out and collapses,
+        then is deleted."""
         w = self.rows.pop(card_id, None)
-        if w is not None:
-            self.body.removeWidget(w)
-            w.setParent(None)
-            w.deleteLater()
-        if not self.rows:
-            self.set_rows(())
+        last = not self.rows
+
+        def gone() -> None:
+            self._leaving.discard(card_id)
+            if w is not None:
+                try:
+                    self.body.removeWidget(w)
+                    w.setParent(None)
+                    w.deleteLater()
+                except RuntimeError:  # already cleared by a rebuild
+                    pass
+            if last and not self.rows and self.empty_label is None:
+                self.set_rows(())
+
+        if w is None:
+            gone()
+            return
+        w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        if motion.enabled():
+            self._leaving.add(card_id)
+        motion.collapse(w, on_done=gone)
 
     def select(self, card_id: int | None) -> None:
         for cid, w in self.rows.items():
             w.set_selected(cid == card_id)
+
+
+# ---------------------------------------------------------------- live indicators
+
+
+class PulseDot(QWidget):
+    """The "watching" dot. While ``breathing`` it slowly pulses its opacity.
+
+    Its timer runs at a low rate (``FPS``) and only while the dot is visible and
+    motion is on, so an idle window stays near zero CPU.
+    """
+
+    PERIOD_S = 2.8
+    FPS = 10
+    MIN_ALPHA = 0.35
+
+    def __init__(self, parent: QWidget | None = None, diameter: int = 8):
+        super().__init__(parent)
+        self.setObjectName("metaDot")
+        self._d = diameter
+        self.setFixedSize(diameter + 6, diameter + 6)
+        self.color = QColor("#888888")
+        self._breathing = False
+        self._t0 = time.monotonic()
+        self._timer = QTimer(self, interval=round(1000 / self.FPS))
+        self._timer.timeout.connect(self.update)
+
+    @property
+    def breathing(self) -> bool:
+        return self._breathing
+
+    @property
+    def running(self) -> bool:
+        return self._timer.isActive()
+
+    def set_color(self, color: str) -> None:
+        self.color = QColor(color)
+        self.update()
+
+    def set_breathing(self, on: bool) -> None:
+        self._breathing = bool(on)
+        self._sync()
+        self.update()
+
+    def _sync(self) -> None:
+        w = self.window()
+        run = (self._breathing and motion.enabled() and self.isVisible()
+               and not (w is not None and w.isMinimized()))
+        if run and not self._timer.isActive():
+            self._t0 = time.monotonic()
+            self._timer.start()
+        elif not run and self._timer.isActive():
+            self._timer.stop()
+
+    def alpha(self) -> float:
+        if not (self._breathing and self._timer.isActive()):
+            return 1.0
+        x = (time.monotonic() - self._t0) / self.PERIOD_S
+        return self.MIN_ALPHA + (1 - self.MIN_ALPHA) * (0.5 + 0.5 * math.cos(2 * math.pi * x))
+
+    def showEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().showEvent(e)
+        self._sync()
+
+    def hideEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().hideEvent(e)
+        self._timer.stop()
+
+    def changeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().changeEvent(e)
+        self._sync()
+
+    def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QColor(self.color)
+        a = self.alpha()
+        center = QPointF(self.width() / 2, self.height() / 2 + 1)
+        if self._breathing and a < 1.0:  # a faint halo that swells as it brightens
+            halo = QColor(c)
+            halo.setAlphaF(0.18 * (a - self.MIN_ALPHA) / (1 - self.MIN_ALPHA))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(halo)
+            p.drawEllipse(center, self._d / 2 + 2.5, self._d / 2 + 2.5)
+        c.setAlphaF(a)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawEllipse(center, self._d / 2, self._d / 2)
+        p.end()
+
+
+def refresh_icon(color: str, angle: float = 0.0, px: int = 14, ratio: float = 2.0) -> QIcon:
+    """A circular-arrow icon rotated by ``angle`` degrees (the Refresh spinner)."""
+    size = round(px * ratio)
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    pm.setDevicePixelRatio(ratio)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.translate(px / 2, px / 2)
+    p.rotate(angle)
+    c = QColor(color)
+    pen = QPen(c, 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    r = px / 2 - 2
+    p.drawArc(QRectF(-r, -r, 2 * r, 2 * r), 60 * 16, 280 * 16)
+    # arrowhead at the arc's start (60 deg, pointing counter-clockwise)
+    a = math.radians(60)
+    tip = QPointF(r * math.cos(a), -r * math.sin(a))
+    head = QPainterPath()
+    head.moveTo(tip + QPointF(3.4, -0.6))
+    head.lineTo(tip + QPointF(-0.4, -2.8))
+    head.lineTo(tip + QPointF(0.4, 1.4))
+    head.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(c)
+    p.drawPath(head)
+    p.end()
+    return QIcon(pm)
+
+
+ICON_SIZE = QSize(14, 14)

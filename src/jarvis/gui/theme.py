@@ -41,6 +41,8 @@ class Tokens:
     grid: tuple[str, str, str, str, str]  # contribution grid levels 0..4
     series: tuple[str, ...]  # categorical chart order (validated for CVD)
     tags: dict[str, tuple[str, str]] = field(default_factory=dict)  # name -> (bg, fg)
+    orb_core: str = "#3d9df0"  # the arc-reactor orb's core (cyan in dark)
+    orb_ring: str = "#2383e2"  # its rings (the accent)
 
     def tag(self, name: str) -> tuple[str, str]:
         return self.tags.get(name) or self.tags["gray"]
@@ -81,6 +83,8 @@ LIGHT = Tokens(
         "pink": ("#f5e0e9", "#4c2337"),
         "red": ("#ffe2dd", "#5d1715"),
     },
+    orb_core="#3d9df0",
+    orb_ring="#2383e2",
 )
 
 DARK = Tokens(
@@ -118,6 +122,8 @@ DARK = Tokens(
         "pink": ("#4e2c3c", "#f0c9db"),
         "red": ("#522e2a", "#f6c7c1"),
     },
+    orb_core="#7ee8ff",
+    orb_ring="#3d8fe0",
 )
 
 BODY_PX = 14
@@ -257,7 +263,7 @@ QToolTip {{
 #tableHead {{ border-top: 1px solid {t.border}; border-bottom: 1px solid {t.border}; }}
 #colHead {{ color: {t.muted}; font-size: 12px; }}
 #row {{ border-bottom: 1px solid {t.border}; background: transparent; }}
-#row:hover, #row[selected="true"] {{ background: {t.fill}; }}
+/* row hover / selected tint is painted by TableRow (animated) */
 #rowTitle {{ color: {t.text}; font-size: {BODY_PX}px; }}
 #rowWhy {{ color: {t.faint}; font-size: 12px; }}
 #tag {{ border-radius: 3px; padding: 1px 6px; font-size: 12px; }}

@@ -10,6 +10,11 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_MODEL = "gemma4:26b"
 DEFAULT_HARDWARE_PATH = Path("~/.config/jarvis/hardware.yaml")
 DEFAULT_RESEARCH_PATH = Path("~/.config/jarvis/research.yaml")
+# Voice mode: a smaller model that fits fully on the GPU, plus local STT/TTS services.
+DEFAULT_VOICE_MODEL = "qwen3:14b"
+DEFAULT_STT_URL = "http://127.0.0.1:5092"   # Parakeet (parakeet-stt.service)
+DEFAULT_TTS_URL = "http://127.0.0.1:8880"   # Kokoro (kokoro-tts.service)
+DEFAULT_VOICE = "bm_george"
 
 
 @dataclass(frozen=True)
@@ -23,6 +28,10 @@ class Config:
     hardware_path: Path = DEFAULT_HARDWARE_PATH.expanduser()
     # Optional research loop settings (phase 6); defaults apply when the file is absent.
     research_path: Path = DEFAULT_RESEARCH_PATH.expanduser()
+    voice_model: str = DEFAULT_VOICE_MODEL
+    stt_url: str = DEFAULT_STT_URL
+    tts_url: str = DEFAULT_TTS_URL
+    voice: str = DEFAULT_VOICE
 
     @classmethod
     def from_env(cls) -> Config:
@@ -37,4 +46,8 @@ class Config:
             model=os.environ.get("JARVIS_MODEL") or DEFAULT_MODEL,
             hardware_path=Path(hw).expanduser() if hw else DEFAULT_HARDWARE_PATH.expanduser(),
             research_path=Path(rs).expanduser() if rs else DEFAULT_RESEARCH_PATH.expanduser(),
+            voice_model=os.environ.get("JARVIS_VOICE_MODEL") or DEFAULT_VOICE_MODEL,
+            stt_url=os.environ.get("JARVIS_STT_URL") or DEFAULT_STT_URL,
+            tts_url=os.environ.get("JARVIS_TTS_URL") or DEFAULT_TTS_URL,
+            voice=os.environ.get("JARVIS_VOICE") or DEFAULT_VOICE,
         )

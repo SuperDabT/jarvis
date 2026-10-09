@@ -8,7 +8,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 from jarvis.config import Config
-from jarvis.gui import theme
+from jarvis.gui import motion, theme
 
 APP_ID = "jarvis"  # app id on Wayland; target it in Hyprland with class:^(jarvis)$
 
@@ -31,7 +31,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-refresh", action="store_true",
                         help="show cached data only; do not refresh on open")
     parser.add_argument("--theme", choices=("system", "light", "dark"), default="system")
+    parser.add_argument("--no-animations", action="store_true",
+                        help="reduce motion: no animations (also JARVIS_REDUCE_MOTION=1)")
     args = parser.parse_args(argv)
+    if args.no_animations:
+        motion.set_enabled(False)
     scheme = None if args.theme == "system" else args.theme
 
     app = make_app(scheme=scheme)

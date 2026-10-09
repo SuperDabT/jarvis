@@ -23,9 +23,12 @@ class OllamaClient:
         model: str = DEFAULT_MODEL,
         timeout: float = 180,
         transport: httpx.BaseTransport | None = None,
+        keep_alive: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
+        # Sent as "keep_alive" with chat_stream requests (e.g. "10m"); None = server default.
+        self.keep_alive = keep_alive
         self._http = httpx.Client(base_url=self.base_url, timeout=timeout, transport=transport)
         self._think_supported = True
         # The final NDJSON object of the last chat_stream (timings, eval_count), or None.
@@ -95,7 +98,8 @@ class OllamaClient:
         return [[float(x) for x in v] for v in vecs]
 
     def chat_stream(
-        self, messages: list[dict[str, str]], options: dict[str, Any] | None = None
+        self, messages: list[dict[str, str]], options: dict[str, Any] | None = None,
+        keep_alive: str | None = None,
     ) -> Iterator[str]:
         """Stream a plain-text chat reply as content chunks (POST /api/chat, stream=true).
 
@@ -104,6 +108,7 @@ class OllamaClient:
         A line with ``error`` (e.g. the model crashed mid-reply), a non-200 status, a
         connection failure, or a stream that ends without ``done`` raises OllamaError.
         Thinking is disabled like ``chat_json`` (retried without it if rejected).
+        ``keep_alive`` (or the client's ``keep_alive``) is passed on when set.
         """
         self.last_stream_stats = None
         payload: dict[str, Any] = {
@@ -112,6 +117,8 @@ class OllamaClient:
             "options": {"temperature": 0.2, **(options or {})},
             "messages": messages,
         }
+        if (ka := keep_alive or self.keep_alive) is not None:
+            payload["keep_alive"] = ka
         for _attempt in range(2):
             if self._think_supported:
                 payload["think"] = False

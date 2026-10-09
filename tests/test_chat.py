@@ -387,3 +387,64 @@ def test_no_note_when_answer_already_says_issue_is_missing(tmp_path):
     for text in ("There is no issue #99 in the synced data.", "#99 does not exist in this repo."):
         assert chat.validate_answer(text, ctx, "Is #99 done?").notes == []
     assert chat.validate_answer("#99 is done.", ctx, "q").notes
+
+
+# ---------------------------------------------------------------- voice brevity, counts, think
+
+
+def test_chat_stream_keep_alive_only_when_set():
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, content=ndjson({"message": {"content": "x"}, "done": True}))
+
+    with stream_client(handler) as c:
+        list(c.chat_stream([{"role": "user", "content": "hi"}]))
+        list(c.chat_stream([{"role": "user", "content": "hi"}], keep_alive="5m"))
+    with OllamaClient("http://ollama.test", "m1", keep_alive="10m",
+                      transport=httpx.MockTransport(handler)) as c:
+        list(c.chat_stream([{"role": "user", "content": "hi"}]))
+    assert "keep_alive" not in bodies[0]
+    assert bodies[1]["keep_alive"] == "5m" and bodies[2]["keep_alive"] == "10m"
+
+
+def test_voice_brevity_prompt_only_for_voice(tmp_path):
+    conn = seeded()
+    for brevity, expect in (("text", False), ("voice", True)):
+        client = FakeClient(["Core demo is due Oct 18.\n", "SOURCES: milestone:Core demo"])
+        chat.ask(conn, cfg(tmp_path), "When is Core demo due?", [], client, now=NOW,
+                 brevity=brevity)
+        system = client.messages[0]["content"]
+        assert system.startswith(chat.SYSTEM_PROMPT)
+        assert ("1 to 3 short spoken sentences" in system) is expect
+        assert "SOURCES" in system
+
+
+def test_context_gives_precomputed_counts(tmp_path):
+    conn = seeded()
+    ctx = chat.build_context(conn, cfg(tmp_path), "What's left for Core demo?", NOW)
+    line = next(l for l in ctx.text.splitlines() if l.startswith("[milestone:Core demo]"))
+    # #31 may be done (commit 02fb2d2); #10, #12 are open with no sign of being done.
+    assert ("counts: 3 open, 0 closed, 3 total in the synced data, "
+            "1 open but may be done (#31), 2 open and not marked may-be-done") in line
+    assert "OPEN ISSUES (4 issues open in total, 1 of them with no milestone):" in ctx.text
+    assert "never compute them" in chat.SYSTEM_PROMPT
+    # A "the other 2" answer is verified against the precomputed count, not flagged.
+    ans = chat.validate_answer("#31 may already be done; the other 2 are still open.",
+                               ctx, "What's left for Core demo?")
+    assert ans.unverified_numbers == []
+
+
+def test_think_blocks_never_reach_display_or_answer(tmp_path):
+    f = chat.ThinkFilter()
+    parts = [f.feed(c) for c in ["Hi <thi", "nk>secret 42</th", "ink>\n\nThere", " <b>x"]]
+    assert "".join(parts) + f.flush() == "Hi There <b>x"
+    assert chat.strip_think("<think>a</think>\nAnswer") == "Answer"
+    conn = seeded()
+    shown = []
+    client = FakeClient(["<think>count 3+4</think>", "Core demo is due Oct 18.\n",
+                         "SOURCES: milestone:Core demo"])
+    ans = chat.ask(conn, cfg(tmp_path), "When?", [], client, on_token=shown.append, now=NOW)
+    assert "".join(shown) == "Core demo is due Oct 18.\n"
+    assert ans.text == "Core demo is due Oct 18." and ans.unverified_numbers == []

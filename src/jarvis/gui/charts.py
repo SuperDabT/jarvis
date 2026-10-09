@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import date
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import Property, QPointF, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -32,6 +32,8 @@ from jarvis.gui.data import (
     fmt_day,
     fmt_num,
 )
+from jarvis.gui import motion
+from jarvis.gui.motion import ease_out, phase, stagger
 from jarvis.gui.theme import Tokens
 
 
@@ -67,6 +69,7 @@ class Chart(QWidget):
         self.data = None
         self.hits: list[Hit] = []
         self.hover_key: object = None
+        self._progress = 1.0  # 0..1 load animation; marks scale with it in paint()
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
@@ -76,10 +79,24 @@ class Chart(QWidget):
         self.tokens = tokens
         self.update()
 
-    def set_data(self, data) -> None:
+    def set_data(self, data, animate: bool = False) -> None:
         self.data = data
         self.setFixedHeight(self.preferred_height())
+        if animate and data is not None:
+            motion.grow(self, b"progress", motion.SLOW + 300)
+        else:
+            self._progress = 1.0
         self.update()
+
+    def _get_progress(self) -> float:
+        return self._progress
+
+    def set_progress(self, value: float) -> None:
+        self._progress = motion.clamp01(float(value))
+        self.update()
+
+    # Animated 0 -> 1 when new data arrives (``set_data(..., animate=True)``).
+    progress = Property(float, _get_progress, set_progress)
 
     def preferred_height(self) -> int:
         return 120
@@ -260,8 +277,13 @@ class MilestoneTimelineChart(Chart):
         if not tl.bars:
             self.text(p, x0, top + self.ROW_H / 2, "No open milestones.", t.muted, 13)
 
+        prog = self._progress
+        nbars = len(tl.bars)
         for i, b in enumerate(tl.bars):
             cy = top + i * self.ROW_H + self.ROW_H / 2
+            # track grows first, then the closed fill and the hatch sweep in
+            pi = stagger(prog, i, nbars, 0.7)
+            p_track, p_fill = ease_out(phase(pi, 0.0, 0.6)), ease_out(phase(pi, 0.25, 1.0))
             hovered = self.hover_key == b.number
             if hovered:
                 self.rounded(p, QRectF(0, cy - self.ROW_H / 2 + 2, self.width(), self.ROW_H - 4),
@@ -271,14 +293,17 @@ class MilestoneTimelineChart(Chart):
             self.text(p, 0, cy, title, t.muted if faded else t.text, 13, weight=QFont.Weight.Medium)
             end_x = self.x_of(b.due) if b.due else x1
             start_x = x0
-            track = QRectF(start_x, cy - self.BAR_H / 2, max(2.0, end_x - start_x), self.BAR_H)
+            full_track = QRectF(start_x, cy - self.BAR_H / 2, max(2.0, end_x - start_x),
+                                self.BAR_H)
+            track = QRectF(full_track)
+            track.setWidth(max(2.0, full_track.width() * p_track))
             overdue = b.due is not None and b.due < tl.today
             if faded:
                 p.setOpacity(0.55)
             self.rounded(p, track, qc(t.fill2), 3)
             if b.total:
-                w_closed = track.width() * b.closed / b.total
-                w_maybe = track.width() * b.maybe / b.total
+                w_closed = full_track.width() * b.closed / b.total * p_fill
+                w_maybe = full_track.width() * b.maybe / b.total * p_fill
                 if w_maybe > 0:
                     r = QRectF(track.left(), track.top(), w_closed + w_maybe, track.height())
                     self.hatch(p, r, qc(t.amber, 0.9), blend(t.amber, t.bg, 0.72), 3)
@@ -290,8 +315,9 @@ class MilestoneTimelineChart(Chart):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRoundedRect(track.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
                 p.setOpacity(1.0)
-            else:
+            elif p_track > 0.98:
                 # due marker: a small diamond at the due date
+                p.setOpacity(phase(pi, 0.55, 0.8))
                 c = QColor(t.red if overdue else t.text)
                 p.setPen(QPen(qc(t.bg), 2))
                 p.setBrush(c)
@@ -303,8 +329,11 @@ class MilestoneTimelineChart(Chart):
                 diamond.lineTo(end_x - s, cy)
                 diamond.closeSubpath()
                 p.drawPath(diamond)
+                p.setOpacity(1.0)
             label_x = (end_x + 12) if not faded else x1 + 12
+            p.setOpacity(phase(pi, 0.6, 1.0))
             self.text(p, label_x, cy, b.label, t.faint if faded else t.muted, 12)
+            p.setOpacity(1.0)
             when = ("no due date" if b.due is None else
                     f"due {fmt_day(b.due)} ({_days_phrase((b.due - tl.today).days)})")
             maybe = (f"; {b.maybe} more may be done (unconfirmed: commits resemble them)"
@@ -315,15 +344,26 @@ class MilestoneTimelineChart(Chart):
             self.hits.append(Hit(QRectF(0, cy - self.ROW_H / 2, self.width(), self.ROW_H), tip,
                                  b.number, b.url))
 
-        # today line (on top of the bars)
+        # today line (on top of the bars); it pulses softly once as the load ends
         tx = round(self.x_of(tl.today)) + 0.5
+        glow = motion.pulse(phase(prog, 0.62, 1.0)) if prog < 1.0 else 0.0
+        if glow > 0:
+            for wdt, a in ((9, 0.10), (5, 0.18)):
+                p.setPen(QPen(qc(t.red, a * glow), wdt, Qt.PenStyle.SolidLine,
+                              Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(tx, top - 6), QPointF(tx, bottom + 2))
+        p.setOpacity(0.35 + 0.65 * phase(prog, 0.0, 0.25))
         p.setPen(self.dashed(t.red, 1.2, (4, 3)))
         p.drawLine(QPointF(tx, top - 6), QPointF(tx, bottom + 2))
         tw = self.text_width("Today", 11, QFont.Weight.DemiBold) + 10
         pill = QRectF(tx - tw / 2, top - 24, tw, 16)
+        if glow > 0:
+            g = 3 * glow
+            self.rounded(p, pill.adjusted(-g, -g, g, g), qc(t.red, 0.22 * glow), 4 + g)
         self.rounded(p, pill, qc(t.red), 4)
         self.text(p, tx, pill.center().y(), "Today", "#ffffff", 11, "center",
                   QFont.Weight.DemiBold)
+        p.setOpacity(1.0)
 
         # legend
         ly = bottom + self.BOTTOM / 2 + 3
@@ -394,9 +434,21 @@ class ContributionGridChart(Chart):
             self.text(p, x, self.TOP - 9, name, t.faint, 11)
         for row, name in ((0, "Mon"), (2, "Wed"), (4, "Fri")):
             self.text(p, 0, self.TOP + row * step + c / 2, name, t.faint, 11)
+        prog = self._progress
+        cols = max(1, g.weeks)
         for d in g.days:
             r = QRectF(self.LEFT + d.col * step, self.TOP + d.row * step, c, c)
-            self.rounded(p, r, qc(t.grid[d.level]), 2.5)
+            # week columns fill in left to right; each cell eases from the empty colour
+            pc = ease_out(stagger(prog, d.col, cols, 0.18)) if prog < 1.0 else 1.0
+            if pc >= 1.0 or d.level == 0:
+                self.rounded(p, r, qc(t.grid[d.level]), 2.5)
+            else:
+                self.rounded(p, r, qc(t.grid[0]), 2.5)
+                if pc > 0:
+                    k = 0.55 + 0.45 * pc
+                    inner = QRectF(r.center().x() - c * k / 2, r.center().y() - c * k / 2,
+                                   c * k, c * k)
+                    self.rounded(p, inner, qc(t.grid[d.level], pc), 2.5)
             if d.day == g.today:
                 p.setPen(QPen(qc(t.text, 0.85), 1.4))
                 p.setBrush(Qt.BrushStyle.NoBrush)
@@ -447,14 +499,17 @@ class PhaseBarsChart(Chart):
         if not pb.bars:
             self.text(p, 0, self.ROW_H / 2, "No issues synced yet.", t.muted, 13)
         open_c, closed_c = qc(t.series[0]), blend(t.green, t.bg, 0.55)
+        nb = len(pb.bars)
         for i, b in enumerate(pb.bars):
             cy = i * self.ROW_H + self.ROW_H / 2
+            pi = stagger(self._progress, i, nb, 0.6)
+            grow = ease_out(phase(pi, 0.0, 0.85))
             if self.hover_key == b.label:
                 self.rounded(p, QRectF(0, cy - self.ROW_H / 2 + 2, self.width(), self.ROW_H - 4),
                              qc(t.fill), 4)
             self.text(p, 0, cy, b.label, t.text, 13)
             x = x0
-            w_open, w_closed = b.open * scale, b.closed * scale
+            w_open, w_closed = b.open * scale * grow, b.closed * scale * grow
             gap = 2 if w_open and w_closed else 0
             if w_open:
                 self.rounded(p, QRectF(x, cy - self.BAR_H / 2, w_open, self.BAR_H), open_c, 3)
@@ -466,9 +521,11 @@ class PhaseBarsChart(Chart):
             if not b.total:
                 self.rounded(p, QRectF(x0, cy - 1, 4, 2), qc(t.fill2), 1)
             vx = x + 8
+            p.setOpacity(phase(pi, 0.45, 1.0))
             w = self.text(p, vx, cy, f"{b.open}", t.text, 13, weight=QFont.Weight.DemiBold)
             self.text(p, vx + w + 4, cy, "open" + (f" · {b.closed} closed" if b.closed else ""),
                       t.faint, 12)
+            p.setOpacity(1.0)
             nums = ", ".join(f"#{n}" for n in b.open_issues[:14])
             more = f" and {len(b.open_issues) - 14} more" if len(b.open_issues) > 14 else ""
             tip = f"{b.label}: {b.open} open, {b.closed} closed"
@@ -536,8 +593,10 @@ class RailBudgetChart(Chart):
 
         x = self.x_of(0)
         segs = [s for s in b.segments if s.amps]
+        prog = self._progress
+        grow = ease_out(phase(prog, 0.0, 0.75))
         for i, s in enumerate(segs):
-            w = self.x_of(s.amps) - self.x_of(0)
+            w = (self.x_of(s.amps) - self.x_of(0)) * grow
             gap = 2 if i < len(segs) - 1 else 0
             r = QRectF(x, y, max(1.5, w - gap), self.BAR_H)
             col = self.color(s.part, b.segments.index(s))
@@ -553,9 +612,11 @@ class RailBudgetChart(Chart):
                     else f"{fmt_num(s.amps)} A")
             tip = f"{s.part} {s.state}{' (planned, not counted)' if s.planned else ''}: {each}"
             self.hits.append(Hit(r, tip, s.part))
-            if w > 60:
+            if w > 60 and grow > 0.9:
+                p.setOpacity(phase(prog, 0.65, 0.95))
                 self.text(p, r.left() + 7, r.center().y(), fmt_num(s.amps) + " A", "#ffffff", 11,
                           weight=QFont.Weight.DemiBold)
+                p.setOpacity(1.0)
             x += w
 
         if b.rating_a is not None:
@@ -567,6 +628,7 @@ class RailBudgetChart(Chart):
                 self.text(p, mx, y - 14, label, t.text if solid else t.muted, 11, "center",
                           QFont.Weight.Medium if solid else QFont.Weight.Normal)
         total = b.worst_case_a
+        p.setOpacity(phase(prog, 0.7, 1.0))
         if total:
             tx = self.x_of(total + b.planned_a) + 8
             label = f"{fmt_num(total)} A"
@@ -574,6 +636,7 @@ class RailBudgetChart(Chart):
                 self.text(p, tx, y + self.BAR_H / 2, label, t.text, 13,
                           weight=QFont.Weight.DemiBold)
 
+        p.setOpacity(1.0)
         # axis
         ay = y + self.BAR_H + 13
         step = _nice_step(b.scale_max, 6)
@@ -629,12 +692,12 @@ class VoltageWindowChart(Chart):
         n = len(self.data.parts) if self.data else 1
         return self.TOP + n * self.ROW_H + self.AXIS_H
 
-    def set_data(self, data) -> None:
+    def set_data(self, data, animate: bool = False) -> None:
         names = [r.part for r in data.parts] if data else []
         widest = max((self.text_width(n, 13) for n in names), default=60)
         # name column, plus room for the left value label ("4.8") before the axis starts
         self.LABEL_W = int(min(190, widest + 46))
-        super().set_data(data)
+        super().set_data(data, animate)
 
     def x_of(self, v: float) -> float:
         w: VoltageWindow = self.data
@@ -651,7 +714,9 @@ class VoltageWindowChart(Chart):
             p.setPen(QPen(qc(t.border), 1))
             p.drawLine(QPointF(x, top - 2), QPointF(x, bottom))
             self.text(p, x, bottom + 12, f"{fmt_num(v)} V", t.faint, 11, "center")
-        # supply band
+        prog = self._progress
+        # supply band (fades in first)
+        p.setOpacity(ease_out(phase(prog, 0.0, 0.4)))
         bl, bh = self.x_of(w.band_lo), self.x_of(w.band_hi)
         band = QRectF(bl, top - 4, bh - bl, bottom - top + 6)
         p.setPen(Qt.PenStyle.NoPen)
@@ -672,13 +737,18 @@ class VoltageWindowChart(Chart):
             + (f"(an example ±{tol}%: the {w.rail} tolerance isn't in hardware.yaml)"
                if w.example else f"({fmt_num(w.nominal_v)} V ± {tol}%)")), "band"))
 
+        p.setOpacity(1.0)
+        n_parts = len(w.parts)
         for i, r in enumerate(w.parts):
             cy = top + i * self.ROW_H + self.ROW_H / 2
+            # bars grow from their low end; red segments fade in last
+            pi = stagger(phase(prog, 0.1, 0.8), i, n_parts, 0.7)
+            grow, p_red = ease_out(pi), ease_out(phase(prog, 0.78, 1.0))
             self.text(p, 0, cy, self.elide(r.part, self.LABEL_W - 40, 13), t.text, 13)
             lo = r.v_min if r.v_min is not None else w.axis_lo
             hi = r.v_max if r.v_max is not None else w.axis_hi
-            xr = QRectF(self.x_of(lo), cy - self.BAR_H / 2, self.x_of(hi) - self.x_of(lo),
-                        self.BAR_H)
+            xr = QRectF(self.x_of(lo), cy - self.BAR_H / 2,
+                        max(0.5, (self.x_of(hi) - self.x_of(lo)) * grow), self.BAR_H)
             col = QColor(self.colors.get(r.part) or t.series[i % len(t.series)])
             fill = blend(col.name(), t.bg, 0.45)
             if r.planned:
@@ -686,7 +756,7 @@ class VoltageWindowChart(Chart):
             else:
                 self.rounded(p, xr, fill, 3)
             # violations: where the band leaves this part's range
-            red = qc(t.red)
+            red = qc(t.red, p_red)
             if r.low_gap is not None and r.low_gap > 0:
                 vr = QRectF(self.x_of(w.band_lo), cy - self.BAR_H / 2 - 2,
                             self.x_of(r.v_min) - self.x_of(w.band_lo), self.BAR_H + 4)
@@ -696,16 +766,19 @@ class VoltageWindowChart(Chart):
                             self.x_of(w.band_hi) - self.x_of(r.v_max), self.BAR_H + 4)
                 self.rounded(p, vr, red, 2)
             # end values, outside any red segment
+            p.setOpacity(phase(pi, 0.6, 1.0))
+            full_right = self.x_of(hi)
             if r.v_min is not None:
                 lx = xr.left()
                 if r.low_gap is not None and r.low_gap > 0:
                     lx = self.x_of(w.band_lo)
                 self.text(p, lx - 6, cy, fmt_num(r.v_min), t.muted, 11, "right")
             if r.v_max is not None:
-                rx = xr.right()
+                rx = full_right
                 if r.high_gap is not None and r.high_gap > 0:
                     rx = self.x_of(w.band_hi)
                 self.text(p, rx + 6, cy, fmt_num(r.v_max), t.muted, 11)
+            p.setOpacity(1.0)
             if self.hover_key == r.part:
                 p.setPen(QPen(qc(t.text, 0.6), 1.2))
                 p.setBrush(Qt.BrushStyle.NoBrush)

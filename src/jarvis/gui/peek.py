@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from html import escape
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import Property, QPropertyAnimation, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter
 from PySide6.QtWidgets import (
     QFrame,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from jarvis.cards import FEEDBACK_REASONS
+from jarvis.gui import motion
 from jarvis.gui.data import SuggestionRow, local_stamp
 from jarvis.gui.theme import Tokens, mono_family
 from jarvis.gui.widgets import (
@@ -56,6 +57,34 @@ class _Shadow(QWidget):
         p.end()
 
 
+class _Backdrop(QWidget):
+    """A faint dim over the page behind the drawer; fades with it. It lets clicks
+    through, so another row can be picked while the drawer is open."""
+
+    def __init__(self, tokens: Tokens, parent: QWidget):
+        super().__init__(parent)
+        self.tokens = tokens
+        self._level = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.hide()
+
+    def _get_level(self) -> float:
+        return self._level
+
+    def _set_level(self, v: float) -> None:
+        self._level = float(v)
+        self.setVisible(self._level > 0.001)
+        self.update()
+
+    level = Property(float, _get_level, _set_level)
+
+    def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
+        p = QPainter(self)
+        a = (0.035 if self.tokens.name == "light" else 0.16) * self._level
+        p.fillRect(self.rect(), QColor(0, 0, 0, round(255 * a)))
+        p.end()
+
+
 class PeekPanel(QFrame):
     """Overlay drawer on the right edge of its parent widget."""
 
@@ -74,8 +103,11 @@ class PeekPanel(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # A soft shadow strip to the left (a sibling, so no graphics effect has to
         # re-render the text widgets inside the panel).
+        self.backdrop = _Backdrop(tokens, parent)
         self.shadow = _Shadow(tokens, parent)
         self.shadow.hide()
+        self._closing = False
+        self._backdrop_anim = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -149,8 +181,9 @@ class PeekPanel(QFrame):
         self._flash = QTimer(self, singleShot=True, interval=self.FLASH_MS)
         self._flash.timeout.connect(self._unflash)
         self._anim = QPropertyAnimation(self, b"geometry", self)
-        self._anim.setDuration(160)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.setDuration(motion.BASE)
+        self._anim.setEasingCurve(motion.curve("out"))
+        self._anim.finished.connect(self._anim_done)
         self.hide()
 
     # ------------------------------------------------------------ content
@@ -227,9 +260,22 @@ class PeekPanel(QFrame):
         g = self.geometry()
         self.shadow.setGeometry(g.left() - SHADOW_W, g.top(), SHADOW_W, g.height())
         self.shadow.setVisible(self.isVisible())
+        p = self.parentWidget()
+        self.backdrop.setGeometry(0, g.top(), max(0, g.left()), p.height() - g.top())
         if self.isVisible():
+            self.backdrop.raise_()
             self.shadow.raise_()
             self.raise_()
+
+    def _fade_backdrop(self, to: float) -> None:
+        self.backdrop.tokens = self.tokens
+        if self._backdrop_anim is not None:
+            try:
+                self._backdrop_anim.stop()
+            except RuntimeError:
+                pass
+        self._backdrop_anim = motion.animate(self.backdrop, b"level", self.backdrop.level, to,
+                                             motion.BASE, "out")
 
     def moveEvent(self, e) -> None:  # noqa: N802 - Qt API
         super().moveEvent(e)
@@ -246,6 +292,8 @@ class PeekPanel(QFrame):
     def hideEvent(self, e) -> None:  # noqa: N802 - Qt API
         super().hideEvent(e)
         self.shadow.hide()
+        if not motion.enabled():
+            self.backdrop.level = 0.0
 
     def target_rect(self) -> QRect:
         p = self.parentWidget()
@@ -256,15 +304,26 @@ class PeekPanel(QFrame):
     def reposition(self) -> None:
         if self.isVisible() and self._anim.state() != QPropertyAnimation.State.Running:
             self.setGeometry(self.target_rect())
+        elif self.backdrop.isVisible():
+            self._sync_shadow()
+
+    @property
+    def is_open(self) -> bool:
+        """Visible and not on its way out."""
+        return self.isVisible() and not self._closing
 
     def open_row(self, row: SuggestionRow, animate: bool = True) -> None:
-        was_open = self.isVisible()
+        was_open = self.is_open
+        if self._closing:  # reopened while sliding out
+            self._closing = False
+            self._anim.stop()
         self.show_row(row)
         end = self.target_rect()
         self.raise_()
-        if was_open or not animate:
+        if was_open or not animate or not motion.enabled():
             self.setGeometry(end)
             self.show()
+            self._fade_backdrop(1.0)
             return
         start = QRect(end)
         start.moveLeft(end.left() + 60)
@@ -274,12 +333,36 @@ class PeekPanel(QFrame):
         self._anim.setStartValue(start)
         self._anim.setEndValue(end)
         self._anim.start()
+        motion.track(self._anim)
+        self._fade_backdrop(1.0)
 
     def hide_panel(self) -> None:
-        if self.isVisible():
+        if not self.isVisible() or self._closing:
+            return
+        self.row = None
+        self._fade_backdrop(0.0)
+        if motion.enabled():
+            self._closing = True
+            start = self.geometry()
+            end = QRect(start)
+            end.moveLeft(start.left() + 60)
+            self._anim.stop()
+            self._anim.setStartValue(start)
+            self._anim.setEndValue(end)
+            self._anim.setEasingCurve(motion.curve("in"))
+            self._anim.setDuration(motion.FAST + 40)
+            self._anim.start()
+            motion.track(self._anim)
+        else:
             self.hide()
-            self.row = None
-            self.closed.emit()
+        self.closed.emit()
+
+    def _anim_done(self) -> None:
+        self._anim.setEasingCurve(motion.curve("out"))
+        self._anim.setDuration(motion.BASE)
+        if self._closing:
+            self._closing = False
+            self.hide()
 
     # ------------------------------------------------------------ actions
 

@@ -34,6 +34,8 @@ from PySide6.QtWidgets import (
 
 from jarvis import db
 from jarvis.config import Config
+from jarvis.gui import motion
+from jarvis.gui.orb import COMPACT, Orb
 from jarvis.gui.theme import Tokens
 from jarvis.gui.widgets import _clear, _label, repolish
 
@@ -44,6 +46,7 @@ SUGGESTED = (
     "What did I work on this week?",
 )
 THINKING_SHOW_SECONDS_AFTER = 3
+THINKING_ORB = 20  # px, the orb next to "thinking…" in a reply
 
 # ask_fn(conn, cfg, question, history, on_token, session_id) -> chat.Answer
 AskFn = Callable[[sqlite3.Connection, Config, str, list, Callable[[str], None], str], Any]
@@ -189,7 +192,16 @@ class BotMessage(QWidget):
         head.addWidget(self.meta)
         head.addStretch(1)
         lay.addLayout(head)
-        self.thinking = _label("thinking", "thinking")
+        # thinking indicator: a small orb in its thinking state + elapsed seconds
+        self.thinking = QWidget()
+        tl = QHBoxLayout(self.thinking)
+        tl.setContentsMargins(0, 2, 0, 2)
+        tl.setSpacing(8)
+        self.thinking_orb = Orb(tokens, THINKING_ORB, "thinking")
+        tl.addWidget(self.thinking_orb)
+        self.thinking_text = _label("thinking…", "thinking")
+        tl.addWidget(self.thinking_text)
+        tl.addStretch(1)
         lay.addWidget(self.thinking)
         self.body = _label("", "botText", wrap=True)
         self.body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
@@ -205,8 +217,7 @@ class BotMessage(QWidget):
         self.chips_box.hide()
         lay.addWidget(self.chips_box)
         self.chip_buttons: list[QPushButton] = []
-        self._dots = 0
-        self._timer = QTimer(self, interval=400)
+        self._timer = QTimer(self, interval=1000)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
         self._tick()
@@ -216,24 +227,28 @@ class BotMessage(QWidget):
         return self.thinking.isVisible() if self.isVisible() else not self.thinking.isHidden()
 
     def _tick(self) -> None:
-        self._dots = (self._dots + 1) % 4
         secs = int(time.monotonic() - self.started)
-        extra = f"  {secs} s" if secs >= THINKING_SHOW_SECONDS_AFTER else ""
-        self.thinking.setText("thinking" + "." * self._dots + " " * (3 - self._dots) + extra)
+        extra = f"  ·  {secs} s" if secs >= THINKING_SHOW_SECONDS_AFTER else ""
+        self.thinking_text.setText("thinking…" + extra)
+
+    def _stop_thinking(self) -> None:
+        self._timer.stop()
+        self.thinking.hide()  # hiding stops the orb's frame timer too
+        self.thinking_orb.set_state("idle")
 
     def add_token(self, text: str) -> None:
         if not text:
             return
-        self.thinking.hide()
+        if not self.thinking.isHidden():
+            self._stop_thinking()
         self.body.show()
         self.streamed += text
         self.body.setTextFormat(Qt.TextFormat.PlainText)
         self.body.setText(self.streamed + " ▍")
 
     def finish(self, answer: Any) -> None:
-        self._timer.stop()
+        self._stop_thinking()
         self.answer = answer
-        self.thinking.hide()
         self.body.show()
         error = getattr(answer, "error", None)
         text = (getattr(answer, "text", "") or "").strip()
@@ -259,8 +274,7 @@ class BotMessage(QWidget):
         self.meta.setText(" · ".join(bits))
 
     def fail(self, message: str) -> None:
-        self._timer.stop()
-        self.thinking.hide()
+        self._stop_thinking()
         self.body.setObjectName("botError")
         self.body.setTextFormat(Qt.TextFormat.PlainText)
         self.body.setText(message)
@@ -419,11 +433,16 @@ class ChatPanel(QFrame):
         outer.setSpacing(0)
 
         head = QWidget()
-        head.setFixedHeight(46)
+        head.setMinimumHeight(46)  # grows if the orb is expanded
         hl = QHBoxLayout(head)
-        hl.setContentsMargins(18, 0, 10, 0)
+        hl.setContentsMargins(12, 0, 10, 0)
         hl.setSpacing(8)
-        hl.addWidget(_label("✦  Ask Jarvis", "chatTitle"))
+        # Jarvis's presence: the arc-reactor orb (idle here; the voice flow drives it)
+        self.orb = Orb(tokens, COMPACT, "idle")
+        self.orb.setToolTip("Jarvis")
+        hl.addWidget(self.orb)
+        self._head_lay = hl
+        hl.addWidget(_label("Ask Jarvis", "chatTitle"))
         self.sub = _label(model_name or cfg.model, "chatSub")
         self.sub.setToolTip("Answers are written by the local model from the synced repo data "
                             "only; numbers and references are checked afterwards.")
@@ -446,6 +465,17 @@ class ChatPanel(QFrame):
         line.setObjectName("hairline")
         line.setFixedHeight(1)
         outer.addWidget(line)
+
+        # The orb's stage: in voice mode the header orb moves here and grows.
+        self.stage = QWidget()
+        sl = QHBoxLayout(self.stage)
+        sl.setContentsMargins(0, 14, 0, 6)
+        sl.addStretch(1)
+        sl.addStretch(1)
+        self._stage_lay = sl
+        self.stage.hide()
+        self._staged = False
+        outer.addWidget(self.stage)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -498,6 +528,37 @@ class ChatPanel(QFrame):
         return w
 
     # ------------------------------------------------------------ public
+
+    @property
+    def orb_staged(self) -> bool:
+        """Whether the orb is on its stage (expanded, voice mode)."""
+        return self._staged
+
+    def set_orb_staged(self, on: bool, animate: bool = True) -> None:
+        """Voice mode: move the orb from the header to a stage above the
+        conversation and grow it to ``orb.EXPANDED`` px (animated); ``False``
+        shrinks it and puts it back in the header."""
+        on = bool(on)
+        if on == self._staged:
+            return
+        self._staged = on
+        if on:
+            self._head_lay.removeWidget(self.orb)
+            self._stage_lay.insertWidget(1, self.orb)
+            self.stage.show()
+            self.orb.show()
+            self.orb.set_expanded(True, animate)
+            return
+
+        def back() -> None:
+            if self._staged:  # re-staged meanwhile
+                return
+            self._stage_lay.removeWidget(self.orb)
+            self._head_lay.insertWidget(0, self.orb)
+            self.orb.show()
+            self.stage.hide()
+
+        self.orb.set_expanded(False, animate, on_done=back)
 
     @property
     def busy(self) -> bool:
@@ -556,6 +617,7 @@ class ChatPanel(QFrame):
     def _add(self, w: QWidget) -> None:
         self.messages.append(w)
         self.list.insertWidget(self.list.count() - 1, w)
+        motion.fade_rise(w, 10, motion.BASE + 40)
 
     def _track_stick(self, value: int) -> None:
         bar = self.scroll.verticalScrollBar()
@@ -593,6 +655,11 @@ class ChatPanel(QFrame):
 
     def set_tokens(self, tokens: Tokens) -> None:
         self.tokens = tokens
+        self.orb.set_tokens(tokens)
+        for m in self.messages:
+            if isinstance(m, BotMessage):
+                m.tokens = tokens
+                m.thinking_orb.set_tokens(tokens)
 
 
 __all__ = ["ChatPanel", "BotMessage", "UserMessage", "SUGGESTED", "chip_text", "QLabel"]
