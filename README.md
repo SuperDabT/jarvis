@@ -84,6 +84,22 @@ and can take 10-25 s to start. Ctrl+R / F5 refresh, Esc closes the card drawer, 
 Commit history: the first sync after upgrading fetches the last 183 days of commits once
 (paginated, 100 per page); later syncs only fetch more when the newest page of commits changed.
 
+## Quick capture: `jarvis add` and Ctrl+N
+
+```sh
+uv run jarvis add "I need to finish my differential equations homework by Thursday"
+uv run jarvis add "remind me to buy cat food tomorrow at 5pm"
+uv run jarvis add --plain "call the landlord"   # as typed, no model
+```
+
+Type it the way you'd say it; in the window, Ctrl+N opens the same thing. The local model reads
+the text into a task, idea or reminder with an optional due date, reminder time, project
+(`#lidar` or naming it) and priority ("asap", "urgent"). Python checks the result before
+anything is saved: a date, project or priority you didn't write is dropped, common dates
+("Thursday", "tomorrow at 5pm", "Oct 12", "in 3 days") are worked out from today's date, and
+anything that could mean two things ("next Thursday", "at 5") is asked back with the choices.
+If the model is down, nothing is saved unless you choose to save the text as typed.
+
 ## Research loop: `jarvis research`
 
 ```sh

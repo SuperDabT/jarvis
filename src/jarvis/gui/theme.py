@@ -357,6 +357,24 @@ QMenu::item:selected {{ background: {t.hover}; color: {t.signal}; }}
 QMenu::item:disabled {{ color: {t.faint}; }}
 QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
 
+/* quick capture (Ctrl+N) */
+#capture {{
+    background: {mix(t.bg, t.inset, 0.6)}; border: 1px solid {live_line}; border-radius: 12px;
+}}
+#captureHead {{ color: {t.signal}; font-family: {mono}; font-size: 11px; }}
+#captureHint {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
+#captureOriginal {{ color: {t.muted}; font-family: {sans}; font-size: 12px; font-style: italic; }}
+#captureQuestion {{ color: {t.text}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
+#captureEdit {{
+    background: {t.inset}; color: {t.text}; border: 1px solid {t.border_strong};
+    border-radius: 8px; padding: 8px 10px; font-family: {sans}; font-size: 14px;
+    selection-background-color: {sel};
+}}
+#captureEdit:focus {{ border-color: {live_line}; }}
+#captureStatus {{ color: {t.muted}; font-family: {mono}; font-size: 12px; }}
+#captureStatus[level="ok"] {{ color: {t.signal}; }}
+#captureStatus[level="error"] {{ color: {t.red}; }}
+
 /* chat panel */
 #chat {{ background: {t.side}; border-left: 1px solid {t.border}; }}
 #chatTitle {{ color: {t.text}; }}

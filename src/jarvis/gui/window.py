@@ -42,6 +42,8 @@ from jarvis.config import Config
 from jarvis.gui import motion, theme
 from jarvis.gui.brain import BrainGraph
 from jarvis.gui.brain_data import FILTER_KINDS, BrainData, ago, load_brain, _parse
+from jarvis.gui.capture_overlay import WIDTH as CAPTURE_W
+from jarvis.gui.capture_overlay import CaptureFn, CaptureOverlay, PlainFn
 from jarvis.gui.chat_panel import AskFn, ChatPanel
 from jarvis.gui.cockpit import (
     BriefingHud,
@@ -67,7 +69,7 @@ DEBOUNCE_MS = 400
 STATUS_CLEAR_MS = 8_000
 CLOCK_MS = 1_000
 IDLE_HINT = ("hover = inspect · click = lock · scroll = zoom · Ctrl+R refresh · "
-             "Ctrl+K ask · Ctrl+Space talk · Esc release")
+             "Ctrl+N capture · Ctrl+K ask · Ctrl+Space talk · Esc release")
 BUSY_TEXT = "A refresh is already running in the background"
 SPIN_MS = 33
 SPIN_DEG_PER_S = 300
@@ -168,6 +170,8 @@ class MainWindow(QMainWindow):
         ask_fn: AskFn | None = None,
         chat_open: bool = False,
         voice: dict[str, Any] | None = None,
+        capture_fn: CaptureFn | None = None,
+        plain_capture_fn: PlainFn | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg or Config.from_env()
@@ -186,6 +190,7 @@ class MainWindow(QMainWindow):
         self._bridge.busy.connect(self._on_refresh_busy)
         self._ask_fn = ask_fn
         self._voice_kw = dict(voice or {})
+        self._capture_fns = (capture_fn, plain_capture_fn)
         self._status_sticky = False
 
         self.setWindowTitle(f"Jarvis · {self.cfg.repo.split('/')[-1]}")
@@ -299,6 +304,10 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_ticker())
         self.setCentralWidget(page)
 
+        # quick capture floats over everything (Ctrl+N)
+        self.capture = CaptureOverlay(self.cfg, *self._capture_fns, parent=page)
+        self.capture.captured.connect(self._on_captured)
+
     def _build_topbar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("topBar")
@@ -392,6 +401,26 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+B"), self,
                   activated=lambda: self.hud.set_expanded(not self.hud.expanded))
         QShortcut(QKeySequence("Ctrl+Space"), self, activated=self.toggle_voice)
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.open_capture)
+
+    # ------------------------------------------------------------ quick capture
+
+    def open_capture(self) -> None:
+        self._place_capture()
+        self.capture.open()
+
+    def _place_capture(self) -> None:
+        page = self.centralWidget()
+        w = min(CAPTURE_W, max(320, page.width() - 40))
+        self.capture.setFixedWidth(w)
+        self.capture.adjustSize()
+        self.capture.move((page.width() - w) // 2, 64)
+
+    def _on_captured(self, result: Any) -> None:
+        from jarvis.capture import summary
+
+        self.set_status(summary(result), "ok")
+        self._place_capture()
 
     # ------------------------------------------------------------ chat
 
@@ -413,7 +442,11 @@ class MainWindow(QMainWindow):
         self.chat.toggle_voice()
 
     def _on_escape(self) -> None:
-        """Esc stops voice first, then releases a locked node, then closes the chat."""
+        """Esc closes quick capture first, then stops voice, then releases a locked
+        node, then closes the chat."""
+        if not self.capture.isHidden():
+            self.capture.close_overlay()
+            return
         if self.chat.stop_voice():
             return
         if self.graph.lock_id:
@@ -724,6 +757,11 @@ class MainWindow(QMainWindow):
         super().showEvent(e)
         self._sync_spinner()
         self.stage.place()
+
+    def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(e)
+        if not self.capture.isHidden():
+            self._place_capture()
 
     def hideEvent(self, e) -> None:  # noqa: N802 - Qt API
         super().hideEvent(e)

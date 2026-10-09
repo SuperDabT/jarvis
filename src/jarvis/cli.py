@@ -172,6 +172,56 @@ def _run_research(cfg: Config, conn, dry_run: bool, verbose: bool,
     return 1 if res.errors and not res.cards else 0
 
 
+def _run_add(cfg: Config, conn, text: str, plain: bool = False,
+             interactive: bool | None = None, read=input, client=None) -> int:
+    """``jarvis add``: capture free text. 0 saved, 1 not saved (error or no answer),
+    3 a question was left unanswered (not a terminal)."""
+    from jarvis import capture as cap
+
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    if plain:
+        res = cap.capture_plain(conn, text)
+    else:
+        own = client is None
+        client = cap.make_client(cfg) if own else client
+        try:
+            res = cap.capture(conn, text, client)
+            while res.status == "clarify":
+                c = res.clarification
+                print(c.question)
+                for n, (label, _) in enumerate(c.options, 1):
+                    print(f"  {n}) {label}")
+                if not interactive:
+                    print("Not saved. Run it again with the date spelled out, or answer in "
+                          "a terminal.", file=sys.stderr)
+                    return 3
+                try:
+                    reply = read("> " if not c.options else "number or answer> ").strip()
+                except EOFError:
+                    reply = ""
+                if not reply:
+                    print("Not saved.", file=sys.stderr)
+                    return 1
+                if reply.isdigit() and 1 <= int(reply) <= len(c.options):
+                    reply = c.options[int(reply) - 1][1]
+                res = cap.capture(conn, text, client, answers=res.answered(reply))
+        finally:
+            if own:
+                client.close()
+    if not res.saved:
+        print(cap.summary(res), file=sys.stderr)
+        if not plain and "model" in (res.error or ""):
+            print('Use  jarvis add --plain "..."  to save it as typed.', file=sys.stderr)
+        return 1
+    print(cap.summary(res))
+    if res.item.body:
+        print(f"  {res.item.body}")
+    for note in res.interpretation.notes:
+        print(f"  note: {note}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="jarvis")
     sub = parser.add_subparsers(dest="cmd")
@@ -199,6 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--verbose", action="store_true",
                     help="list skipped issues, queries, similarities and verdicts")
     rp.add_argument("--issue", type=int, default=None, help="only this issue number")
+    adp = sub.add_parser("add", help="capture a task, idea or reminder in plain words")
+    adp.add_argument("text", nargs="+", help='e.g. "remind me to buy cat food tomorrow at 5pm"')
+    adp.add_argument("--plain", action="store_true",
+                     help="save the text as a task as typed, without the model")
     ap = sub.add_parser("ask", help="ask a question about the project (answered from synced data)")
     ap.add_argument("question", nargs="+")
     wp = sub.add_parser("watch", help="keep the database current (the fast loop daemon)")
@@ -222,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "summary":
             print(render_summary(conn, days=args.days, repo=cfg.repo), end="")
+        elif args.cmd == "add":
+            return _run_add(cfg, conn, " ".join(args.text), plain=args.plain)
         elif args.cmd == "research":
             try:
                 with refresh_lock(cfg.db_path):

@@ -1,6 +1,6 @@
 # Current state
 
-Updated after Phase 1, step 3 (see ROADMAP.md).
+Updated after Phase 1, steps 4 and 6 (see ROADMAP.md).
 
 ## Database
 
@@ -50,6 +50,29 @@ Updated after Phase 1, step 3 (see ROADMAP.md).
   (smaller id first); a reverse row written elsewhere still counts.
 - External links (an item about a GitHub issue) have no helper yet; the table supports them.
 
+## Capture (`jarvis/capture.py`, no Qt)
+
+- `capture(conn, text, client, answers=(), now, tz)` -> `CaptureResult` with status `saved`,
+  `clarify` (answer with `result.answered(reply)` and call again; the text is kept) or `error`
+  (nothing saved). `capture_plain` saves the text as typed, without the model.
+- The model (`cfg.model` through `OllamaClient.chat_json`, schema-constrained JSON, thinking
+  off) fills a form: kind, title, body, due, remind, project, priority, and the exact words
+  each came from, or a question. Python checks every field before `items.create_item`:
+  - a date, project or priority whose words are not in the text is dropped (noted);
+  - common date phrases are worked out by `resolve_phrase` from `now` in `tz`, overriding the
+    model's arithmetic; other phrasings use the model's date if it is not past or 5+ years out;
+  - "next Thursday", "at 5", past dates and unreadable dates become a clarification with
+    concrete options; the model may ask once itself; two answers that settle nothing -> error;
+  - a project needs `#slug` or words matching its slug or name (not its repo name);
+  - a title must mostly use words from the text; malformed replies save nothing.
+- A reminder with a day but no time is saved as due that day; one with no time at all is
+  saved without one.
+- Entry points: `jarvis add "..."` (asks in a terminal; exit 3 if it would need to ask but
+  can't, `--plain` to skip the model) and the window's Ctrl+N overlay
+  (`gui/capture_overlay.py`: worker thread, own connection, Try again / Save as typed, Esc
+  closes it before anything else).
+- About 2.5 s per capture with `gemma4:26b` loaded (about 14 s when it has to load first).
+
 ## The real database
 
 The real `~/.local/share/jarvis/jarvis.db` is at version 1 (upgraded on 2026-10-09 during
@@ -60,7 +83,8 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 596 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 687 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
-`tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service.
+`tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,
+`tests/test_capture.py` capture and `jarvis add`, `tests/test_gui_capture.py` the overlay.
