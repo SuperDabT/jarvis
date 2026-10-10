@@ -180,7 +180,8 @@ def test_the_window_fits_every_workspace_with_the_chat_open(make, size):
         assert right_edge(win.chat, win) < size[0]
         # scrolling workspaces never lay out wider than they show
         for sa in win.workspaces[key].findChildren(QScrollArea):
-            if sa.isVisible() and sa.widget() is not None:
+            sideways = sa.horizontalScrollBarPolicy() != Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if sa.isVisible() and sa.widget() is not None and not sideways:   # (the board)
                 assert sa.widget().width() <= sa.viewport().width() + 1, (key, extra)
         if extra == "editor":
             win.tasks_view.select(None)
@@ -208,7 +209,7 @@ def test_tasks_and_home_reflow_beside_the_chat(make):
     assert v.filters_below and v.scroll.isVisible()
     v.select(next(iter(v.rows)))
     QApplication.processEvents()
-    assert v.editor_alone and not v.scroll.isVisible()   # the editor takes the list's place
+    assert v.editor_alone and not v.scroll.isVisible()   # the editor takes the board's place
     v.select(None)
     QApplication.processEvents()
     assert v.scroll.isVisible()

@@ -350,3 +350,74 @@ def test_dashboard_empty(conn):
     assert h.glance == hd.Glance(0, 0, 0, 0)
     assert all(not slots for _, slots in h.schedule)
     assert h.recommendation.text.startswith("Nothing on your list is pressing")
+
+
+# ---------------------------------------------------------------- the board
+
+
+def test_board_columns_split_upcoming_at_a_week(conn):
+    board(conn)
+    mk(conn, "far thing", due="2026-10-20")
+    d = td.load_tasks(conn, NOW, LA)
+    cols = dict(d.columns())
+    assert list(cols) == list(td.COLUMNS)
+    assert titles(cols["week"]) == ["servos", "homework"]
+    assert titles(cols["later"]) == ["far thing", "dentist"]
+    assert titles(cols["someday"]) == titles(d.group("someday"))
+
+
+def test_board_done_column_is_the_last_week(conn):
+    old = mk(conn, "old")
+    it.complete_item(conn, old, now=datetime(2026, 9, 20, 12, tzinfo=LA))
+    new = mk(conn, "new")
+    it.complete_item(conn, new, now=NOW)
+    d = td.load_tasks(conn, NOW, LA)
+    assert titles(d.done_recent()) == ["new"]
+
+
+@pytest.mark.parametrize(("query", "hit"), [("lab", True), ("LAB late", True),
+                                            ("gym", False), ("before", True)])
+def test_board_search(conn, query, hit):
+    i = mk(conn, "late lab", due="2026-10-07", body="before the deadline")
+    row = td.row_view(i, "overdue", NOW, {})
+    assert td.matches(row, query) is hit
+
+
+def test_board_category(conn):
+    assert td.category(td.row_view(mk(conn, "Physics midterm"), "someday", NOW, {})) == "Exam"
+    assert td.category(td.row_view(mk(conn, "filter", project="lidar"), "someday", NOW, {})) \
+        == "Work"
+    assert td.category(td.row_view(mk(conn, "dog"), "someday", NOW, {})) == "Personal"
+
+
+def test_drop_target_keeps_the_time_and_checks_the_column(conn):
+    timed = mk(conn, "call", due="2026-10-07T09:30")
+    assert td.drop_target(timed, "today", TODAY) == ("due", "2026-10-09T09:30")
+    assert td.drop_target(timed, "week", TODAY, date(2026, 10, 12)) == ("due", "2026-10-12T09:30")
+    assert td.drop_target(timed, "later", TODAY, date(2026, 11, 2)) == ("due", "2026-11-02T09:30")
+    assert td.drop_target(timed, "someday", TODAY) == ("due", None)
+    rem = mk(conn, "cat food", kind="reminder", remind="2026-10-09T17:00")
+    assert td.drop_target(rem, "week", TODAY, date(2026, 10, 10)) == ("remind",
+                                                                       "2026-10-10T17:00")
+    for column, day, words in (("overdue", None, "can't be moved"),
+                               ("week", None, "pick a day"),
+                               ("week", date(2026, 10, 30), "next 7 days"),
+                               ("later", date(2026, 10, 12), "after the next 7 days")):
+        with pytest.raises(ValueError, match=words):
+            td.drop_target(timed, column, TODAY, day)
+    with pytest.raises(ValueError, match="needs a date"):
+        td.drop_target(rem, "someday", TODAY)
+
+
+@pytest.mark.parametrize(("typed", "title", "due"), [
+    ("lab report friday 5pm", "lab report", "2026-10-09T17:00"),   # NOW is a Friday, 3:30 PM
+    ("lab report monday 9am", "lab report", "2026-10-12T09:00"),
+    ("buy cat food tomorrow", "buy cat food", "2026-10-10"),
+    ("hand in the form by Thursday", "hand in the form", "2026-10-15"),
+    ("call mom", "call mom", None),
+    ("tomorrow", "tomorrow", None),            # nothing left of the title: kept as typed
+    ("meeting next thursday", "meeting next thursday", None),   # ambiguous: left in
+])
+def test_parse_title_date(typed, title, due):
+    got_title, got_due, _ = td.parse_title_date(typed, NOW)
+    assert (got_title, got_due) == (title, due)

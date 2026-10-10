@@ -1,23 +1,27 @@
-"""The Tasks workspace: open items in Overdue / Today / Upcoming / Someday, with
-filters, an editor, done / reopen, delete / restore. All writes go through
-jarvis.items on the window's connection; new items come from quick capture.
+"""The Tasks workspace: a board of the user's items, Linear-style, in Home's look.
 
-Rows are compact: a check circle, the title, one line of when / late /
-reminder / project, and the priority marks. Overdue rows show how late they are
-in red and nothing else turns red. Click a row to edit it in the side panel;
-Delete removes the selected row (Undo brings it back).
+Columns by when (Overdue, Today, This week, Later, Someday, and Done / Deleted
+on request), compact cards with chips, tabs for the kind, a project filter and
+a search. Drag a card to another column to reschedule it; a dialog confirms
+first, and the change can be undone. C (or "+ New task") opens the create
+window. Click or Enter opens the editor beside the board.
+
+Keyboard, with the board focused: arrows move between cards, Space ticks the
+card off (or reopens it), Enter edits it, Del deletes it (Undo brings it back),
+Shift+Left / Right moves it to the neighbouring column (confirmed). Ctrl+F
+searches; Esc clears the search or closes the editor.
+
+All writes go through jarvis.items on the window's connection.
 """
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, tzinfo
-from html import escape
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractButton,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -30,219 +34,44 @@ from PySide6.QtWidgets import (
 )
 
 from jarvis import items as it
+from jarvis.gui import home_cards as hc
 from jarvis.gui.chat_panel import FlowLayout
-from jarvis.gui.tasks_data import (
-    GROUP_LABELS,
-    KIND_FILTERS,
-    TaskRowView,
-    TasksData,
-    load_tasks,
-    parse_when_input,
+from jarvis.gui.home_style import PALETTE, tasks_stylesheet
+from jarvis.gui.tasks_board import (
+    BoardColumn,
+    CreateDialog,
+    MoveDialog,
+    TaskCard,
 )
-from jarvis.gui.theme import Tokens, mix
-from jarvis.gui.widgets import _clear, _label, repolish
+from jarvis.gui.tasks_data import (
+    COLUMNS,
+    KIND_FILTERS,
+    TasksData,
+    drop_target,
+    load_tasks,
+    matches,
+    parse_when_input,
+    when_label,
+)
+from jarvis.gui.theme import Tokens
+from jarvis.gui.widgets import _label
 
 EDITOR_W = 320
-LIST_MAX = 960        # the list stops growing here on wide screens (rows stay readable)
 # Tasks' own width (smaller with the chat open beside it): below FILTERS_BELOW the
-# filters move under the title; below EDITOR_ALONE_BELOW an open editor takes the
-# list's place rather than squeezing it.
+# search moves under the tabs; below EDITOR_ALONE_BELOW an open editor takes the
+# board's place rather than squeezing it.
 FILTERS_BELOW = 700
 EDITOR_ALONE_BELOW = 660
 UNDO_MS = 12_000
 PRIORITY_LABELS = ("none", "! low", "!! high", "!!! urgent")
-EMPTY_ALL = ("Nothing open.", ("Capture a task, idea or reminder with Ctrl+N; it lands here, "
-                              "sorted by when it's due."))
+EMPTY_ALL = ("Nothing open.", "Press C to add a task: a title, and a date at the end if it "
+             "has one (“lab report friday 5pm”).")
 EMPTY_FILTERED = ("Nothing matches these filters.",
-                  "Pick “all” or another project to see the rest.")
-
-
-# ---------------------------------------------------------------- pieces
-
-
-class CheckCircle(QAbstractButton):
-    """The round done box: empty when open, a mint disc with a tick when done."""
-
-    def __init__(self, tokens: Tokens, done: bool = False, late: bool = False,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.tokens, self.late = tokens, late
-        self.setCheckable(True)
-        self.setChecked(done)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(20, 20)
-        self.setToolTip("Reopen" if done else "Mark done")
-        self._hover = False
-
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
-        return QSize(20, 20)
-
-    def enterEvent(self, e) -> None:  # noqa: N802 - Qt API
-        self._hover = True
-        self.update()
-
-    def leaveEvent(self, e) -> None:  # noqa: N802 - Qt API
-        self._hover = False
-        self.update()
-
-    def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
-        t = self.tokens
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(2.5, 2.5, 15, 15)
-        if self.isChecked():
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(t.signal))
-            p.drawEllipse(r)
-            path = QPainterPath()
-            path.moveTo(6.3, 10.2)
-            path.lineTo(8.8, 12.7)
-            path.lineTo(13.8, 7.4)
-            p.setPen(QPen(QColor(t.bg), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
-                          Qt.PenJoinStyle.RoundJoin))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawPath(path)
-        else:
-            line = t.signal if self._hover else (mix(t.bg, t.red, 0.7) if self.late
-                                                 else t.btn_line)
-            p.setPen(QPen(QColor(line), 1.4))
-            p.setBrush(QColor(mix(t.bg, t.signal, 0.12)) if self._hover else Qt.BrushStyle.NoBrush)
-            p.drawEllipse(r)
-        p.end()
-
-
-def meta_html(row: TaskRowView, tokens: Tokens, show_kind: bool = True) -> str:
-    """The row's second line: kind · when · late · reminder · #project."""
-    bits = []
-    if show_kind and row.item.kind != "task":
-        bits.append(escape(row.item.kind))
-    if row.when:
-        bits.append(escape(row.when))
-    if row.late:
-        bits.append(f"<span style='color:{tokens.red}'>{escape(row.late)}</span>")
-    if row.remind:
-        bits.append(escape(row.remind))
-    if row.project:
-        bits.append(f"<span style='color:{tokens.signal_text}'>#{escape(row.project)}</span>")
-    if row.group == "done" and row.item.completed_at:
-        bits.append("done")
-    if row.group == "deleted":
-        bits.append("deleted")
-    return " · ".join(bits)
-
-
-class TaskRow(QFrame):
-    """One item. ``compact`` (Home): no delete button and no body line."""
-
-    selected = Signal(int)
-    toggled = Signal(int)
-    delete = Signal(int)
-    restore = Signal(int)
-
-    def __init__(self, row: TaskRowView, tokens: Tokens, compact: bool = False,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.row = row
-        self.setObjectName("taskRow")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setProperty("selected", "false")
-        self.setProperty("late", "true" if row.late else "false")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 6, 10, 6)
-        lay.setSpacing(10)
-        deleted = row.group == "deleted"
-        self.check = CheckCircle(tokens, row.item.done, bool(row.late))
-        self.check.clicked.connect(lambda: self.toggled.emit(row.id))
-        self.check.setVisible(not deleted)
-        lay.addWidget(self.check, 0, Qt.AlignmentFlag.AlignTop)
-        col = QVBoxLayout()
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(1)
-        self.title = _label(row.title, "taskTitle")
-        self.title.setProperty("done", "true" if (row.item.done or deleted) else "false")
-        self.title.setWordWrap(True)
-        col.addWidget(self.title)
-        meta = meta_html(row, tokens)
-        self.meta = _label(meta, "taskMeta", rich=True)
-        self.meta.setTextFormat(Qt.TextFormat.RichText)
-        self.meta.setVisible(bool(meta))
-        col.addWidget(self.meta)
-        if row.item.body and not compact:
-            body = row.item.body.splitlines()[0]
-            self.body = _label(body[:140] + ("…" if len(body) > 140 else ""), "taskBody")
-            col.addWidget(self.body)
-        lay.addLayout(col, 1)
-        self.prio = _label("!" * row.item.priority, "taskPrio")
-        self.prio.setToolTip(PRIORITY_LABELS[row.item.priority])
-        self.prio.setVisible(row.item.priority > 0)
-        lay.addWidget(self.prio, 0, Qt.AlignmentFlag.AlignTop)
-        self.action = None
-        if deleted:
-            self.action = QPushButton("restore")
-            self.action.clicked.connect(lambda: self.restore.emit(row.id))
-        elif not compact:
-            self.action = QPushButton("×")
-            self.action.setToolTip("Delete (Del)")
-            self.action.clicked.connect(lambda: self.delete.emit(row.id))
-            self.action.setObjectName("rowAction")
-        if self.action is not None:
-            self.action.setCursor(Qt.CursorShape.PointingHandCursor)
-            lay.addWidget(self.action, 0, Qt.AlignmentFlag.AlignTop)
-            if not deleted:  # the delete button shows on hover / selection only
-                keep = self.action.sizePolicy()
-                keep.setRetainSizeWhenHidden(True)
-                self.action.setSizePolicy(keep)
-                self.action.hide()
-        self._on = False
-
-    def _sync_action(self, hover: bool = False) -> None:
-        if self.action is not None and self.row.group != "deleted":
-            self.action.setVisible(hover or self._on)
-
-    def enterEvent(self, e) -> None:  # noqa: N802 - Qt API
-        self._sync_action(True)
-        super().enterEvent(e)
-
-    def leaveEvent(self, e) -> None:  # noqa: N802 - Qt API
-        self._sync_action(False)
-        super().leaveEvent(e)
-
-    def set_selected(self, on: bool) -> None:
-        self._on = on
-        self.setProperty("selected", "true" if on else "false")
-        repolish(self)
-        self._sync_action()
-
-    def mouseReleaseEvent(self, e) -> None:  # noqa: N802 - Qt API
-        if e.button() == Qt.MouseButton.LeftButton and self.row.group != "deleted":
-            self.selected.emit(self.row.id)
-        super().mouseReleaseEvent(e)
-
-
-class _Section(QFrame):
-    def __init__(self, key: str, label: str, rows: tuple[TaskRowView, ...]) -> None:
-        super().__init__()
-        self.key = key
-        self.setObjectName("taskSection")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 10, 6, 6)
-        lay.setSpacing(2)
-        head = QHBoxLayout()
-        head.setContentsMargins(8, 0, 8, 4)
-        head.setSpacing(8)
-        self.head = _label(label, "sectionHead")
-        self.head.setProperty("group", key)
-        head.addWidget(self.head)
-        self.count = _label(str(len(rows)), "sectionCount")
-        self.count.setProperty("group", key)
-        head.addWidget(self.count)
-        head.addStretch(1)
-        lay.addLayout(head)
-        self.rows_box = QVBoxLayout()
-        self.rows_box.setSpacing(2)
-        lay.addLayout(self.rows_box)
+                  "Pick “All” or another project to see the rest.")
+COLUMN_EMPTY = {"overdue": "Nothing late.", "today": "Nothing due today.",
+                "week": "Nothing this week.", "later": "Nothing later.",
+                "someday": "No undated items.", "done": "Nothing done this week.",
+                "deleted": "Nothing deleted."}
 
 
 # ---------------------------------------------------------------- editor
@@ -336,8 +165,6 @@ class ItemEditor(QFrame):
         self.now_fn: Callable[[], datetime] = datetime.now
 
     def edit(self, item: it.Item, projects: tuple[it.Project, ...], today) -> None:
-        from jarvis.gui.tasks_data import when_label
-
         self.item, self.projects = item, projects
         self.title.setText(item.title)
         self.kind.setCurrentText(item.kind)
@@ -396,6 +223,10 @@ def _editable(stamp: str | None) -> str:
 # ---------------------------------------------------------------- workspace
 
 
+def _typing(w) -> bool:
+    return isinstance(w, (QLineEdit, QPlainTextEdit, QComboBox))
+
+
 class TasksView(QWidget):
     """The Tasks workspace. ``changed`` after every write (the window reloads);
     ``status(text, level)`` for the ticker; ``capture_requested`` for Ctrl+N."""
@@ -409,42 +240,74 @@ class TasksView(QWidget):
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.conn, self.tokens, self.tz = conn, tokens, tz
+        self.pal = PALETTE
         self.now_fn = now_fn or datetime.now
         self.data: TasksData | None = None
         self.project_filter: str | None = None
         self.kind_filter = "all"
+        self.query = ""
         self.selected_id: int | None = None
-        self.rows: dict[int, TaskRow] = {}
-        self.sections: dict[str, _Section] = {}
+        self.rows: dict[int, TaskCard] = {}
+        self.sections: dict[str, BoardColumn] = {}
+        self.columns: dict[str, BoardColumn] = {}
         self.last_deleted: int | None = None
+        self._undo: Callable[[], None] | None = None
+        self.move_dialog: MoveDialog | None = None
+        self.create_dialog: CreateDialog | None = None
+        self.draft_store = None
+        self.setObjectName("tasksPage")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(tasks_stylesheet(self.pal))
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         self.content = QWidget()
+        self.content.setObjectName("tasksPage")      # the window renames this view itself
+        self.content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         root.addWidget(self.content, 1)
-        root.addStretch(0)
         outer = QVBoxLayout(self.content)
-        outer.setContentsMargins(16, 14, 16, 12)
-        outer.setSpacing(10)
+        outer.setContentsMargins(20, 16, 20, 14)
+        outer.setSpacing(12)
 
-        # header: title + summary, filters, capture
-        head = QHBoxLayout()
-        head.setSpacing(10)
+        # top bar: title + summary, search, new task
+        top = QHBoxLayout()
+        top.setSpacing(10)
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        titles.addWidget(_label("Tasks", "wsTitle"))
-        self.summary = _label("", "wsSub")
+        title = hc.label("Tasks", "", "big")
+        f = title.font()
+        f.setPixelSize(22)
+        f.setWeight(f.Weight.DemiBold)
+        title.setFont(f)
+        titles.addWidget(title)
+        self.summary = hc.label("", "hMuted", "label")
         titles.addWidget(self.summary)
-        head.addLayout(titles)
-        head.addStretch(1)
+        top.addLayout(titles)
+        top.addStretch(1)
+        self.search = QLineEdit()
+        self.search.setObjectName("tkSearch")
+        self.search.setPlaceholderText("Search  (Ctrl+F)")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._search_changed)
+        top.addWidget(self.search)
+        self.new_btn = QPushButton("+ New task   C")
+        self.new_btn.setObjectName("tkPrimary")
+        self.new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_btn.setToolTip("New task (C). Quick capture in plain words: Ctrl+N")
+        self.new_btn.clicked.connect(lambda: self.open_create())
+        top.addWidget(self.new_btn)
+        self.capture_btn = self.new_btn
+        self._top = top
+        outer.addLayout(top)
+
+        # filters: kind tabs, project, done / deleted
         self.filters = QWidget()
-        # wraps when narrow, so Tasks' minimum width never depends on where it sits
-        fl = FlowLayout(self.filters, 8)
+        fl = FlowLayout(self.filters, 6)          # wraps when narrow (beside the chat)
         self.kind_buttons: dict[str, QPushButton] = {}
         for k in KIND_FILTERS:
-            b = QPushButton(k if k == "all" else f"{k}s")
-            b.setObjectName("filterChip")
+            b = QPushButton("All" if k == "all" else f"{k.title()}s")
+            b.setObjectName("tkTab")
             b.setCheckable(True)
             b.setChecked(k == "all")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -452,51 +315,81 @@ class TasksView(QWidget):
             fl.addWidget(b)
             self.kind_buttons[k] = b
         self.project_box = QComboBox()
-        self.project_box.setMinimumWidth(130)
+        self.project_box.setObjectName("tkProject")
+        self.project_box.setMinimumWidth(140)
         self.project_box.setToolTip("Show one project's items")
         self.project_box.currentIndexChanged.connect(self._project_changed)
         fl.addWidget(self.project_box)
-        head.addWidget(self.filters)
-        self._head = head
-        self._filter_row = QHBoxLayout()
-        self._filter_row.setContentsMargins(0, 0, 0, 0)
+        self.done_toggle = QPushButton("Show done")
+        self.deleted_toggle = QPushButton("Show deleted")
+        for b in (self.done_toggle, self.deleted_toggle):
+            b.setObjectName("tkToggle")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.toggled.connect(lambda _on: self._render())
+            fl.addWidget(b)
         self.filters_below = False
-        self.capture_btn = QPushButton("+ capture")
-        self.capture_btn.setObjectName("primary")
-        self.capture_btn.setToolTip("Quick capture (Ctrl+N)")
-        self.capture_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.capture_btn.clicked.connect(self.capture_requested)
-        head.addWidget(self.capture_btn)
-        outer.addLayout(head)
-        outer.addLayout(self._filter_row)
+        self._search_row = QHBoxLayout()
+        self._search_row.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.filters)
+        outer.addLayout(self._search_row)
 
-        # undo strip after a delete
+        # undo strip after a delete or a move
         self.undo_bar = QFrame()
-        self.undo_bar.setObjectName("undoBar")
+        self.undo_bar.setObjectName("tkUndo")
+        self.undo_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         ub = QHBoxLayout(self.undo_bar)
-        ub.setContentsMargins(12, 6, 8, 6)
-        self.undo_text = _label("", "undoText")
+        ub.setContentsMargins(14, 7, 10, 7)
+        self.undo_text = hc.label("", "", "label")
         ub.addWidget(self.undo_text, 1)
-        self.undo_btn = QPushButton("undo")
-        self.undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.undo_btn.clicked.connect(self.undo_delete)
+        self.undo_btn = hc.button("Undo")
+        self.undo_btn.clicked.connect(self.undo)
         ub.addWidget(self.undo_btn)
         self.undo_bar.hide()
         outer.addWidget(self.undo_bar)
         self._undo_timer = QTimer(self, singleShot=True, interval=UNDO_MS)
         self._undo_timer.timeout.connect(self.undo_bar.hide)
 
-        # list | editor
+        # empty state (nothing open at all, or nothing for the filters)
+        self.empty = QFrame()
+        self.empty.setObjectName("hCard")
+        self.empty.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        el = QHBoxLayout(self.empty)
+        el.setContentsMargins(16, 12, 16, 12)
+        ecol = QVBoxLayout()
+        self.empty_title = hc.label("", "", "body")
+        ecol.addWidget(self.empty_title)
+        self.empty_text = hc.label("", "hMuted", "meta", wrap=True)
+        ecol.addWidget(self.empty_text)
+        el.addLayout(ecol, 1)
+        self.empty_btn = hc.button("+ New task   C")
+        self.empty_btn.clicked.connect(lambda: self.open_create())
+        el.addWidget(self.empty_btn)
+        self.empty.hide()
+        outer.addWidget(self.empty)
+
+        # the board | the editor
         body = QHBoxLayout()
-        body.setSpacing(12)
+        body.setSpacing(14)
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("tkBoard")
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.scroll.installEventFilter(self)
         holder = QWidget()
-        self.list = QVBoxLayout(holder)
-        self.list.setContentsMargins(0, 0, 6, 0)
-        self.list.setSpacing(14)
+        holder.setObjectName("tasksPage")
+        self.board = QHBoxLayout(holder)
+        self.board.setContentsMargins(0, 0, 0, 4)
+        self.board.setSpacing(12)
+        for key in (*COLUMNS, "done", "deleted"):
+            col = BoardColumn(key, self.pal)
+            col.dropped.connect(self.request_move)
+            col.add.connect(self._add_in)
+            self.board.addWidget(col, 1)
+            self.columns[key] = col
         self.scroll.setWidget(holder)
         body.addWidget(self.scroll, 1)
         self.editor = ItemEditor(tokens)
@@ -505,52 +398,27 @@ class TasksView(QWidget):
         self.editor.closed.connect(lambda: self.select(None))
         self.editor.toggle.connect(self.toggle)
         self.editor.delete.connect(self.delete)
-        # the editor scrolls on its own, so a short window never squeezes its fields
         self.editor_scroll = QScrollArea()
         self.editor_scroll.setWidgetResizable(True)
         self.editor_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.editor_scroll.setStyleSheet("QScrollArea { background: transparent; }")
         self.editor_scroll.setFixedWidth(EDITOR_W + 10)
         self.editor_scroll.setWidget(self.editor)
         self.editor_scroll.hide()
         body.addWidget(self.editor_scroll, 0)
-        body.addStretch(0)   # takes the room only when the editor stands alone
         outer.addLayout(body, 1)
-        self._fit_width()
-
-        self.empty = QFrame()
-        self.empty.setObjectName("emptyState")
-        el = QVBoxLayout(self.empty)
-        el.setContentsMargins(18, 16, 18, 16)
-        self.empty_title = _label("", "emptyTitleSm")
-        el.addWidget(self.empty_title)
-        self.empty_text = _label("", "emptyHint", wrap=True)
-        el.addWidget(self.empty_text)
-        self.empty_btn = QPushButton("+ capture  Ctrl+N")
-        self.empty_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.empty_btn.clicked.connect(self.capture_requested)
-        er = QHBoxLayout()
-        er.addWidget(self.empty_btn)
-        er.addStretch(1)
-        el.addLayout(er)
-
-        self.done_toggle = QPushButton()
-        self.deleted_toggle = QPushButton()
-        for b in (self.done_toggle, self.deleted_toggle):
-            b.setObjectName("filter")
-            b.setCheckable(True)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.toggled.connect(lambda _on: self._render())
+        self.editor_alone = False
 
         QShortcut(QKeySequence(Qt.Key.Key_Delete), self, activated=self._delete_selected,
+                  context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self.focus_search,
                   context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
     # ------------------------------------------------------------ data
 
     def _now(self) -> datetime:
-        from jarvis.items import local_now
-
-        return local_now(self.now_fn(), self.tz)
+        return it.local_now(self.now_fn(), self.tz)
 
     def reload(self, force: bool = False) -> None:
         try:
@@ -572,7 +440,7 @@ class TasksView(QWidget):
             return
         self.project_box.blockSignals(True)
         self.project_box.clear()
-        self.project_box.addItem("all projects", None)
+        self.project_box.addItem("All projects", None)
         for p in projects:
             self.project_box.addItem(f"#{p.slug}", p.slug)
         idx = self.project_box.findData(self.project_filter)
@@ -583,60 +451,49 @@ class TasksView(QWidget):
         d = self.data
         if d is None:
             return
-        scroll_y = self.scroll.verticalScrollBar().value()
-        self.empty.setParent(None)
-        self.done_toggle.setParent(None)
-        self.deleted_toggle.setParent(None)
-        _clear(self.list)
         self.rows, self.sections = {}, {}
-        self.summary.setText(d.summary())
+        cols = dict(d.columns())
+        cols["done"] = d.done_recent()
+        cols["deleted"] = d.deleted
+        shown = {"done": self.done_toggle.isChecked(), "deleted": self.deleted_toggle.isChecked()}
+        overdue = len(cols["overdue"])
+        self.summary.setText(f"{d.open_count} open" + (f" · {overdue} overdue" if overdue
+                                                        else ""))
+        for key, col in self.columns.items():
+            visible = shown.get(key, True)
+            col.setVisible(visible)
+            if not visible:
+                col.set_cards([])
+                continue
+            rows = [r for r in cols[key] if not self.query or matches(r, self.query)]
+            cards = []
+            for r in rows:
+                c = TaskCard(r, self.pal)
+                c.selected.connect(self._clicked)
+                c.toggled.connect(self.toggle)
+                c.delete.connect(self.delete)
+                c.restore.connect(self.restore)
+                cards.append(c)
+                self.rows[r.id] = c
+            col.set_cards(cards, "No matches." if self.query else COLUMN_EMPTY[key])
+            self.sections[key] = col
+        filtered = self.project_filter is not None or self.kind_filter != "all"
         if not d.open_count:
-            filtered = self.project_filter is not None or self.kind_filter != "all"
             title, text = EMPTY_FILTERED if filtered else EMPTY_ALL
             self.empty_title.setText(title)
             self.empty_text.setText(text)
-            self.list.addWidget(self.empty)
-        for key, rows in d.groups:
-            if rows:
-                self._add_section(key, GROUP_LABELS[key], rows)
-        footer = QHBoxLayout()
-        footer.setSpacing(4)
-        self.done_toggle.setText(f"{'▾' if self.done_toggle.isChecked() else '▸'} done · "
-                                 f"{len(d.done)}")
-        self.deleted_toggle.setText(f"{'▾' if self.deleted_toggle.isChecked() else '▸'} "
-                                    f"deleted · {len(d.deleted)}")
-        self.done_toggle.setVisible(bool(d.done))
-        self.deleted_toggle.setVisible(bool(d.deleted))
-        footer.addWidget(self.done_toggle)
-        footer.addWidget(self.deleted_toggle)
-        footer.addStretch(1)
-        self.list.addLayout(footer)
-        if self.done_toggle.isChecked() and d.done:
-            self._add_section("done", "done recently", d.done)
-        if self.deleted_toggle.isChecked() and d.deleted:
-            self._add_section("deleted", "deleted", d.deleted)
-        self.list.addStretch(1)
-        # keep the selection and the editor in step with the data
+        self.empty.setVisible(not d.open_count)
         if self.selected_id is not None and self.selected_id not in self.rows:
             self.select(None)
         elif self.selected_id is not None:
             self.rows[self.selected_id].set_selected(True)
-        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(scroll_y))
 
-    def _add_section(self, key: str, label: str, rows) -> None:
-        sec = _Section(key, label, rows)
-        for r in rows:
-            w = TaskRow(r, self.tokens)
-            w.selected.connect(self.select)
-            w.toggled.connect(self.toggle)
-            w.delete.connect(self.delete)
-            w.restore.connect(self.restore)
-            sec.rows_box.addWidget(w)
-            self.rows[r.id] = w
-        self.sections[key] = sec
-        self.list.addWidget(sec)
+    def cards_in(self, key: str) -> list[str]:
+        """The titles shown in a column (tests, and a quick look)."""
+        col = self.sections.get(key)
+        return [] if col is None else [c.row.title for c in col.cards]
 
-    # ------------------------------------------------------------ filters
+    # ------------------------------------------------------------ filters, search
 
     def set_kind(self, kind: str) -> None:
         self.kind_filter = kind
@@ -656,9 +513,47 @@ class TasksView(QWidget):
         self.project_filter = self.project_box.currentData()
         self.reload(force=True)
 
-    # ------------------------------------------------------------ actions
+    def _search_changed(self, text: str) -> None:
+        self.query = text.strip()
+        self._render()
+
+    def focus_search(self) -> None:
+        self.search.setFocus()
+        self.search.selectAll()
+
+    def escape(self) -> bool:
+        """Esc (from the window): clear the search, else close the editor. True when
+        it did something (the window then stops there)."""
+        if self.search.text():
+            self.search.clear()
+            self.scroll.setFocus()
+            return True
+        if not self.editor_scroll.isHidden():
+            self.select(None)
+            self.scroll.setFocus()
+            return True
+        return False
+
+    # ------------------------------------------------------------ selection, keys
+
+    def _clicked(self, item_id: int) -> None:
+        self.select(item_id)
+
+    def highlight(self, item_id: int | None) -> None:
+        """Move the selection (the keyboard); the editor follows if it is open."""
+        if self.editor_scroll.isHidden():
+            if self.selected_id in self.rows:
+                self.rows[self.selected_id].set_selected(False)
+            self.selected_id = item_id if item_id in self.rows else None
+            if self.selected_id is not None:
+                card = self.rows[self.selected_id]
+                card.set_selected(True)
+                self._reveal(card)
+        else:
+            self.select(item_id)
 
     def select(self, item_id: int | None) -> None:
+        """Select a card and open it in the editor (None closes the editor)."""
         if self.selected_id in self.rows:
             self.rows[self.selected_id].set_selected(False)
         self.selected_id = item_id
@@ -666,17 +561,91 @@ class TasksView(QWidget):
             self.selected_id = None
             self.editor_scroll.hide()
             self.editor.item = None
-            self._fit_width()
+            self._reflow()
             return
-        self.rows[item_id].set_selected(True)
-        self.editor.edit(self.rows[item_id].row.item, self.data.projects, self.data.today)
+        card = self.rows[item_id]
+        card.set_selected(True)
+        self._reveal(card)
+        self.editor.edit(card.row.item, self.data.projects, self.data.today)
         self.editor_scroll.show()
-        self._fit_width()
-
-    def _fit_width(self) -> None:
-        extra = EDITOR_W + 22 if not self.editor_scroll.isHidden() else 0
-        self.content.setMaximumWidth(LIST_MAX + 32 + extra)
         self._reflow()
+
+    def _reveal(self, card: TaskCard) -> None:
+        col = next((c for c in self.sections.values() if card in c.cards), None)
+        if col is not None:
+            self.scroll.ensureWidgetVisible(col, 0, 0)
+            col.scroll.ensureWidgetVisible(card, 0, 12)
+
+    def _grid(self) -> list[tuple[str, list[int]]]:
+        return [(k, [c.row.id for c in col.cards]) for k, col in self.sections.items()
+                if col.isVisible() and col.cards]
+
+    def _position(self) -> tuple[int, int] | None:
+        for ci, (_, ids) in enumerate(self._grid()):
+            if self.selected_id in ids:
+                return ci, ids.index(self.selected_id)
+        return None
+
+    def step(self, dx: int, dy: int) -> None:
+        """Arrows: move the selection to the next card (dy) or column (dx)."""
+        grid = self._grid()
+        if not grid:
+            return
+        pos = self._position()
+        if pos is None:
+            self.highlight(grid[0][1][0])
+            return
+        ci, ri = pos
+        if dx:
+            ci = max(0, min(len(grid) - 1, ci + dx))
+            ri = min(ri, len(grid[ci][1]) - 1)
+        else:
+            ri = max(0, min(len(grid[ci][1]) - 1, ri + dy))
+        self.highlight(grid[ci][1][ri])
+
+    def column_of(self, item_id: int) -> str | None:
+        return next((k for k, col in self.sections.items()
+                     if any(c.row.id == item_id for c in col.cards)), None)
+
+    def eventFilter(self, obj, e) -> bool:  # noqa: N802 - Qt API
+        if obj is self.scroll and e.type() == QEvent.Type.KeyPress:
+            return self._board_key(e)
+        return super().eventFilter(obj, e)
+
+    def _board_key(self, e) -> bool:
+        key, mods = e.key(), e.modifiers()
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        arrows = {Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_Right: (1, 0),
+                  Qt.Key.Key_Up: (0, -1), Qt.Key.Key_Down: (0, 1)}
+        if key in arrows:
+            dx, dy = arrows[key]
+            if shift and dx and self.selected_id is not None:
+                self.move_next(self.selected_id, dx)
+            else:
+                self.step(dx, dy)
+            return True
+        if key == Qt.Key.Key_Space and self.selected_id is not None:
+            done_id = self.selected_id
+            column = self.column_of(done_id)
+            index = next((i for i, c in enumerate(self.sections[column].cards)
+                          if c.row.id == done_id), 0) if column else 0
+            self.toggle(done_id)
+            if done_id not in self.rows and column in self.sections:   # it left its column
+                ids = [c.row.id for c in self.sections[column].cards]
+                if ids:
+                    self.highlight(ids[min(index, len(ids) - 1)])
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.selected_id is not None:
+            self.select(self.selected_id)
+            self.editor.title.setFocus()
+            return True
+        return False
+
+    def keyPressEvent(self, e) -> None:  # noqa: N802 - Qt API
+        if not self._board_key(e):
+            super().keyPressEvent(e)
+
+    # ------------------------------------------------------------ layout
 
     def _reflow(self) -> None:
         """Fit a narrow Tasks (a small window, or the chat open beside it)."""
@@ -684,21 +653,20 @@ class TasksView(QWidget):
         below = w < FILTERS_BELOW
         if below != self.filters_below:
             self.filters_below = below
-            self._head.removeWidget(self.filters)
-            self._filter_row.removeWidget(self.filters)
+            self._top.removeWidget(self.search)
+            self._search_row.removeWidget(self.search)
             if below:
-                self._filter_row.addWidget(self.filters)
-                self._filter_row.addStretch(1)
+                self._search_row.addWidget(self.search, 1)
             else:
-                while self._filter_row.count():
-                    self._filter_row.takeAt(0)
-                self._head.insertWidget(self._head.indexOf(self.capture_btn), self.filters)
+                self._top.insertWidget(self._top.indexOf(self.new_btn), self.search)
         self.editor_alone = w < EDITOR_ALONE_BELOW and not self.editor_scroll.isHidden()
         self.scroll.setVisible(not self.editor_alone)
 
     def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(e)
         self._reflow()
+
+    # ------------------------------------------------------------ writes
 
     def _write(self, fn: Callable[[], it.Item], message: Callable[[it.Item], str]) -> bool:
         try:
@@ -710,6 +678,20 @@ class TasksView(QWidget):
         self.changed.emit()
         self.reload()
         return True
+
+    def _offer_undo(self, text: str, fn: Callable[[], None]) -> None:
+        self._undo = fn
+        self.undo_text.setText(text)
+        self.undo_bar.show()
+        self._undo_timer.start()
+
+    def undo(self) -> None:
+        fn, self._undo = self._undo, None
+        self.undo_bar.hide()
+        if fn is not None:
+            fn()
+
+    undo_delete = undo        # kept: the old name
 
     def toggle(self, item_id: int) -> None:
         item = self._find(item_id)
@@ -729,15 +711,9 @@ class TasksView(QWidget):
                        lambda i: f"Deleted “{i.title}”"):
             item = it.get_item(self.conn, item_id, include_deleted=True)
             self.last_deleted = item_id
-            self.undo_text.setText(f"Deleted “{item.title}”")
-            self.undo_bar.show()
-            self._undo_timer.start()
+            self._offer_undo(f"Deleted “{item.title}”", lambda: self.restore(item_id))
             if self.selected_id == item_id:
                 self.select(None)
-
-    def undo_delete(self) -> None:
-        if self.last_deleted is not None:
-            self.restore(self.last_deleted)
 
     def restore(self, item_id: int) -> None:
         restored = self._write(lambda: it.restore_item(self.conn, item_id),
@@ -759,7 +735,8 @@ class TasksView(QWidget):
             self.select(item_id)
 
     def _delete_selected(self) -> None:
-        if self.selected_id is not None and not self.editor.isAncestorOf(self.focusWidget()):
+        if self.selected_id is not None and not self.editor.isAncestorOf(self.focusWidget()) \
+                and not _typing(self.focusWidget()):
             self.delete(self.selected_id)
 
     def _find(self, item_id: int) -> it.Item | None:
@@ -768,5 +745,94 @@ class TasksView(QWidget):
         except it.ItemError:
             return None
 
+    # ------------------------------------------------------------ moving
 
-__all__ = ["EDITOR_W", "CheckCircle", "ItemEditor", "TaskRow", "TasksView", "meta_html"]
+    def move_next(self, item_id: int, dx: int) -> None:
+        """Shift+Left / Right: ask to move the card to the neighbouring column."""
+        here = self.column_of(item_id)
+        if here is None or here not in COLUMNS:
+            return
+        k = COLUMNS.index(here) + dx
+        if 0 < k < len(COLUMNS):              # never into Overdue
+            self.request_move(item_id, COLUMNS[k])
+
+    def request_move(self, item_id: int, column: str) -> None:
+        """A card dropped on ``column``: confirm first (``move_dialog``)."""
+        item = self._find(item_id)
+        if item is None or item.deleted or self.column_of(item_id) == column:
+            return
+        if column == "overdue" or column == "someday" and item.remind_at and not item.due_at:
+            self.status.emit("Not moved: " + ("nothing is moved into Overdue"
+                                              if column == "overdue" else
+                             "a reminder needs a date and time; edit it instead"), "warn")
+            return
+        dlg = MoveDialog(item, column, self._now().date(), self._now(), self.pal, self)
+        dlg.setStyleSheet(tasks_stylesheet(self.pal))
+        dlg.accepted.connect(lambda: self.move(item_id, column, dlg.day))
+        self.move_dialog = dlg
+        dlg.open()
+
+    def move(self, item_id: int, column: str, day=None) -> bool:
+        """Move a card (after the user confirmed): its date, or Done."""
+        item = self._find(item_id)
+        if item is None:
+            return False
+        if column == "done":
+            ok = self._write(lambda: it.complete_item(self.conn, item_id),
+                             lambda i: f"Done: “{i.title}”")
+            if ok:
+                self._offer_undo(f"Done: “{item.title}”", lambda: self._write(
+                    lambda: it.reopen_item(self.conn, item_id),
+                    lambda i: f"Reopened “{i.title}”") and None)
+            return ok
+        try:
+            field, value = drop_target(item, column, self._now().date(), day)
+        except ValueError as e:
+            self.status.emit(f"Not moved: {e}", "warn")
+            return False
+        before = item.due_at if field == "due" else item.remind_at
+        where = when_label(value, self._now().date()) if value else "Someday (no date)"
+        ok = self._write(lambda: it.update_item(self.conn, item_id, **{field: value}),
+                         lambda i: f"Moved: “{i.title}” → {where}")
+        if ok:
+            self._offer_undo(f"Moved “{item.title}” to {where}", lambda: self._write(
+                lambda: it.update_item(self.conn, item_id, **{field: before}),
+                lambda i: f"Moved back: “{i.title}”") and None)
+        return ok
+
+    # ------------------------------------------------------------ creating
+
+    def _add_in(self, column: str) -> None:
+        today = self._now().date()
+        from datetime import timedelta
+        preset = {"today": today.isoformat(),
+                  "week": (today + timedelta(days=1)).isoformat()}.get(column)
+        self.open_create(preset, column)
+
+    def open_create(self, preset_due: str | None = None, column: str | None = None) -> None:
+        """The create window; the new card is selected after Ctrl+Enter."""
+        if self.data is None:
+            self.reload()
+        store = self.draft_store
+        if store is None:
+            from jarvis.gui.voice_turn import ui_settings
+            store = self.draft_store = ui_settings()
+        dlg = CreateDialog(self.conn, self._now, self.data.projects if self.data else (),
+                           preset_due=preset_due, draft_store=store, pal=self.pal,
+                           parent=self)
+        dlg.setStyleSheet(tasks_stylesheet(self.pal))
+        if column == "later":
+            dlg.open_chip("due")
+        dlg.created.connect(self._created)
+        self.create_dialog = dlg
+        dlg.open()
+
+    def _created(self, item_id: int) -> None:
+        item = self._find(item_id)
+        self.status.emit(f"Created “{item.title}”" if item else "Created", "ok")
+        self.changed.emit()
+        self.reload(force=True)
+        self.highlight(item_id)
+
+
+__all__ = ["EDITOR_W", "ItemEditor", "TasksView"]

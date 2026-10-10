@@ -577,9 +577,21 @@ class MainWindow(QMainWindow):
                   activated=lambda: self.hud.set_expanded(not self.hud.expanded))
         QShortcut(QKeySequence("Ctrl+Space"), self, activated=self.toggle_voice)
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self.open_capture)
+        QShortcut(QKeySequence("C"), self, activated=self._create_key)
         for ws in WORKSPACES:
             QShortcut(QKeySequence(ws.shortcut), self,
                       activated=lambda k=ws.key: self.show_workspace(k))
+
+    def _create_key(self) -> None:
+        """C: the create window (Tasks), unless a text field has the keyboard."""
+        from PySide6.QtWidgets import QAbstractSpinBox, QComboBox, QLineEdit, QPlainTextEdit, \
+            QTextEdit
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QPlainTextEdit, QTextEdit, QComboBox,
+                              QAbstractSpinBox)) or not self.capture.isHidden():
+            return
+        self.show_workspace("tasks")
+        self.tasks_view.open_create()
 
     # ------------------------------------------------------------ workspaces
 
@@ -842,6 +854,8 @@ class MainWindow(QMainWindow):
             self.capture.close_overlay()
             return
         if self.chat.stop_voice():
+            return
+        if self.workspace == "tasks" and self.tasks_view.escape():
             return
         if self.graph.lock_id:
             self.graph.lock(None)

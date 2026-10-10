@@ -150,11 +150,20 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   chips are elided (tooltip has the full title).
 - School and Knowledge are labelled placeholders ("not built yet", what they will hold),
   with only real actions (quick capture, open Projects).
-- Tasks (`gui/tasks_view.py`, data in `gui/tasks_data.py`): open items in Overdue / Today /
-  Upcoming / Someday (`items.grouped_items`: every open item in exactly one), filters by
-  type and project, a side editor (due / remind accept dates or phrases like "tomorrow 5pm",
-  worked out without a model), done / reopen, delete with Undo, and Done / Deleted sections to
-  reopen or restore. New items come from quick capture. GitHub issues never appear here.
+- Tasks (`gui/tasks_view.py`, pieces in `gui/tasks_board.py`, data in `gui/tasks_data.py`,
+  styles in `home_style.tasks_stylesheet`): a Linear-style board.
+  - Columns: Overdue, Today, This week (7 days), Later, Someday, plus Done (last week) and
+    Deleted on request. Cards carry chips: date, category, project, priority, reminder, notes.
+  - Drag a card to another column and a dialog confirms the move (a day picker for This
+    week, a date in words for Later); the change can be undone, and Overdue takes no drops.
+  - C anywhere (not while typing) opens the create window: a title (a trailing date phrase
+    fills Due, by code), notes, and chips for kind, priority, project, due and reminder.
+    Ctrl+Enter creates; Esc keeps a draft in the UI settings.
+  - Search (Ctrl+F) over titles and notes; kind tabs and the project filter.
+  - Keyboard: arrows move, Space ticks off, Enter edits, Del deletes (Undo), Shift+arrows
+    move a card a column (confirmed); Esc goes through the window.
+  - The side editor is unchanged. GitHub issues and Canvas entries never appear here.
+- The whole window uses Home's navy palette: `theme.py` tokens BG #0b1220, panel #101a2c.
 - Home (`gui/home_view.py`, widgets in `gui/home_cards.py`, navy palette in
   `gui/home_style.py`, data in `gui/home_data.py`): a dashboard on real data. A banner (the
   greeting with `JARVIS_NAME`, the date, a quote of the day, a CC0 photo per day from
@@ -288,7 +297,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 1050 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 1075 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

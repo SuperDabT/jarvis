@@ -87,3 +87,82 @@ def stylesheet(p: HomePalette = PALETTE) -> str:
 #homePage QScrollBar::add-line, #homePage QScrollBar::sub-line {{ height: 0; }}
 #homePage QScrollBar::add-page, #homePage QScrollBar::sub-page {{ background: transparent; }}
 """
+
+
+def tasks_stylesheet(p: HomePalette = PALETTE) -> str:
+    """Tasks' rules (the board, its cards, the editor, the move and create
+    dialogs), on top of Home's: the same palette, scoped to the Tasks page and
+    its dialogs."""
+    field = (f"background: {p.card_hi}; color: {p.text}; border: 1px solid {p.border_hi}; "
+             f"border-radius: 7px; padding: 6px 9px; selection-background-color: "
+             f"{p.wash(p.accent, 0.5)};")
+    return stylesheet(p).replace("#homePage", "#tasksPage") + f"""
+#tasksPage, #tkDialog {{ background: {p.bg}; }}
+#tkDialog {{ background: {p.card}; }}
+#tkDialog QLabel {{ color: {p.text}; background: transparent; }}
+#tkColumn {{ background: {p.card}; border: 1px solid {p.border}; border-radius: 12px; }}
+#tkColumn[drop="true"] {{ border: 1px solid {p.accent}; background: {p.wash(p.accent, 0.08)}; }}
+#tkColumnBody {{ background: transparent; }}
+#tkCard {{ background: {p.card_hi}; border: 1px solid {p.border}; border-radius: 9px; }}
+#tkCard:hover {{ border-color: {p.border_hi}; background: {mix(p.card_hi, '#ffffff', 0.03)}; }}
+#tkCard[selected="true"] {{ border: 1px solid {p.accent}; }}
+#tkTitle[done="true"] {{ color: {p.faint}; text-decoration: line-through; }}
+#tkChip {{ color: {p.muted}; background: transparent; border: 1px solid {p.border_hi};
+          border-radius: 5px; padding: 0px 5px; }}
+#tkAction {{ color: {p.faint}; background: transparent; border: none; padding: 0 2px; }}
+#tkAction:hover {{ color: {p.red}; }}
+#tkPlus {{ color: {p.muted}; background: transparent; border: 1px solid {p.border};
+          border-radius: 6px; padding: 0; }}
+#tkPlus:hover {{ color: {p.text}; border-color: {p.accent}; }}
+#tkTab {{ color: {p.muted}; background: transparent; border: 1px solid transparent;
+         border-radius: 7px; padding: 4px 11px; }}
+#tkTab:hover {{ color: {p.text}; }}
+#tkTab:checked {{ color: {p.text}; background: {p.card_hi}; border-color: {p.border_hi}; }}
+#tkToggle {{ color: {p.muted}; background: transparent; border: 1px solid {p.border};
+            border-radius: 7px; padding: 4px 11px; }}
+#tkToggle:checked {{ color: {p.text}; border-color: {p.accent}; background: {p.wash(p.accent, 0.12)}; }}
+#tkPrimary {{ color: #ffffff; background: {p.accent}; border: none; border-radius: 7px;
+             padding: 6px 14px; font-weight: 600; }}
+#tkPrimary:hover {{ background: {mix(p.accent, '#ffffff', 0.15)}; }}
+#tkPrimary:disabled {{ background: {p.border_hi}; color: {p.faint}; }}
+#tkInput, #tkSearch {{ {field} }}
+#tkSearch {{ padding-left: 10px; min-width: 200px; }}
+#tkInput:focus, #tkSearch:focus, #tkTitleInput:focus {{ border-color: {p.accent}; }}
+#tkTitleInput {{ background: transparent; color: {p.text}; border: none;
+                border-bottom: 1px solid {p.border_hi}; padding: 6px 2px; font-size: 18px;
+                font-weight: 600; }}
+#tkNotes {{ {field} }}
+#tkPropChip {{ color: {p.muted}; background: transparent; border: 1px dashed {p.border_hi};
+              border-radius: 7px; padding: 4px 10px; }}
+#tkPropChip[set="true"] {{ color: {p.text}; border: 1px solid {p.border_hi};
+                          background: {p.card_hi}; }}
+#tkPropChip:hover {{ border-color: {p.accent}; }}
+#tkFound {{ color: {p.accent}; background: {p.wash(p.accent, 0.12)}; border: none;
+           border-radius: 6px; padding: 3px 9px; }}
+#tkDay {{ color: {p.muted}; background: {p.card_hi}; border: 1px solid {p.border};
+         border-radius: 8px; }}
+#tkDay:checked {{ color: #ffffff; background: {p.accent}; border-color: {p.accent}; }}
+#tkMenu {{ background: {p.card_hi}; color: {p.text}; border: 1px solid {p.border_hi};
+          padding: 4px; }}
+#tkMenu::item {{ padding: 5px 16px; border-radius: 5px; }}
+#tkMenu::item:selected {{ background: {p.wash(p.accent, 0.25)}; }}
+#tkUndo {{ background: {p.card_hi}; border: 1px solid {p.border_hi}; border-radius: 9px; }}
+#tasksPage #panel {{ background: {p.card}; border: 1px solid {p.border}; border-radius: 12px; }}
+#tasksPage #panel QLabel {{ color: {p.text}; }}
+#tasksPage #fieldLabel {{ color: {p.muted}; }}
+#tasksPage #field, #tasksPage #fieldBody, #tasksPage #panel QComboBox {{ {field} }}
+#tasksPage #panel QComboBox QAbstractItemView {{ background: {p.card_hi}; color: {p.text};
+    selection-background-color: {p.wash(p.accent, 0.3)}; }}
+#tasksPage #fieldError {{ color: {p.red}; }}
+#tasksPage #primary {{ color: #ffffff; background: {p.accent}; border: none; border-radius: 7px;
+                      padding: 5px 12px; }}
+#tasksPage #panel QPushButton {{ color: {p.text}; background: transparent;
+    border: 1px solid {p.border_hi}; border-radius: 7px; padding: 5px 12px; }}
+#tasksPage #panel #primary {{ background: {p.accent}; border: none; color: #ffffff; }}
+#tasksPage QComboBox#tkProject {{ color: {p.muted}; background: transparent;
+    border: 1px solid {p.border}; border-radius: 7px; padding: 4px 10px; }}
+#tasksPage QComboBox#tkProject:hover {{ color: {p.text}; border-color: {p.border_hi}; }}
+#tasksPage QComboBox#tkProject::drop-down {{ border: none; width: 16px; }}
+#tasksPage QComboBox#tkProject QAbstractItemView {{ background: {p.card_hi}; color: {p.text};
+    selection-background-color: {p.wash(p.accent, 0.3)}; }}
+"""

@@ -73,33 +73,39 @@ def make(app, tmp_path):
 
 
 def shown(view, key):
-    sec = view.sections.get(key)
-    return [] if sec is None else [
-        sec.rows_box.itemAt(i).widget().row.title for i in range(sec.rows_box.count())]
+    return view.cards_in(key)
 
 
 def row(view, title):
     return next(r for r in view.rows.values() if r.row.title == title)
 
 
-# ---------------------------------------------------------------- tasks
+def chips(card) -> list[str]:
+    return [c.text() for c in card.chips]
 
 
-def test_opens_on_home_and_tasks_shows_the_groups(make):
+# ---------------------------------------------------------------- tasks: the board
+
+
+def test_opens_on_home_and_tasks_shows_the_board(make):
     win, _ = make()
     assert win.workspace == "home"
     win.show_workspace("tasks")
     v = win.tasks_view
+    assert v.objectName() == "tasksPage" or v.parent() is not None
     assert shown(v, "overdue") == ["late lab"]
     assert shown(v, "today") == ["study", "filter"]
-    assert shown(v, "upcoming") == ["servos"]
+    assert shown(v, "week") == ["servos"]
+    assert shown(v, "later") == []
     assert shown(v, "someday") == ["server"]
-    assert v.summary.text() == "1 overdue · 2 today · 1 upcoming · 1 someday"
+    assert v.summary.text() == "5 open · 1 overdue"
+    assert v.columns["today"].count.text() == "2"
     late = row(v, "late lab")
-    assert "2 days late" in late.meta.text() and late.property("late") == "true"
-    assert late.prio.text() == "!!"
-    assert "#lidar" in row(v, "filter").meta.text()
-    assert row(v, "study").body.text() == "before the gym"
+    assert chips(late)[:2] == ["Wed Oct 7", "Personal"] and "!!" in chips(late)
+    assert late.chips[0].toolTip() == "2 days late"
+    assert "#lidar" in chips(row(v, "filter")) and "Work" in chips(row(v, "filter"))
+    assert "≡" in chips(row(v, "study"))                                  # it has notes
+    assert not v.columns["done"].isVisible() and not v.columns["deleted"].isVisible()
 
 
 def test_complete_and_reopen(make):
@@ -111,7 +117,7 @@ def test_complete_and_reopen(make):
     assert win.status_label.text() == "Done: “study”"
     v.done_toggle.setChecked(True)
     assert shown(v, "done") == ["study"]
-    row(v, "study").check.click()      # the done row's check reopens it
+    row(v, "study").check.click()      # the done card's check reopens it
     assert shown(v, "today") == ["study", "filter"]
 
 
@@ -124,7 +130,6 @@ def test_delete_undo_and_restore(make):
     assert it.get_item(conn, sid, include_deleted=True).deleted
     v.undo_btn.click()
     assert shown(v, "today") == ["study", "filter"] and v.undo_bar.isHidden()
-    # restore from the deleted list
     row(v, "server").action.click()
     v.deleted_toggle.setChecked(True)
     assert shown(v, "deleted") == ["server"]
@@ -133,7 +138,7 @@ def test_delete_undo_and_restore(make):
     assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 5   # never duplicated
 
 
-def test_delete_key_removes_the_selected_row(make, app):
+def test_delete_key_removes_the_selected_card(make, app):
     win, _ = make()
     win.show_workspace("tasks")
     v = win.tasks_view
@@ -143,7 +148,180 @@ def test_delete_key_removes_the_selected_row(make, app):
     v.scroll.setFocus()
     QTest.keyClick(v.scroll, Qt.Key.Key_Delete)
     app.processEvents()
-    assert shown(v, "upcoming") == [] and v.selected_id is None
+    assert shown(v, "week") == [] and v.selected_id is None
+
+
+def test_keyboard_moves_ticks_and_opens(make, app):
+    win, conn = make()
+    win.show_workspace("tasks")
+    v = win.tasks_view
+    v.scroll.setFocus()
+    QTest.keyClick(v.scroll, Qt.Key.Key_Down)            # nothing selected: the first card
+    assert v.selected_id == row(v, "late lab").row.id
+    QTest.keyClick(v.scroll, Qt.Key.Key_Right)           # Today, same position
+    assert v.selected_id == row(v, "study").row.id
+    QTest.keyClick(v.scroll, Qt.Key.Key_Down)
+    assert v.selected_id == row(v, "filter").row.id
+    assert v.editor_scroll.isHidden()                    # moving doesn't open the editor
+    fid = v.selected_id
+    QTest.keyClick(v.scroll, Qt.Key.Key_Space)           # tick it off
+    assert it.get_item(conn, fid).done
+    assert v.selected_id == row(v, "study").row.id       # the selection stays in Today
+    QTest.keyClick(v.scroll, Qt.Key.Key_Return)          # open it
+    assert not v.editor_scroll.isHidden() and v.editor.title.text() == "study"
+
+
+def test_search_filters_cards_and_counts(make, app):
+    win, _ = make()
+    win.show_workspace("tasks")
+    v = win.tasks_view
+    v.search.setText("gym")                              # in study's notes
+    assert [shown(v, k) for k in ("overdue", "today", "week", "someday")] == [
+        [], ["study"], [], []]
+    assert v.columns["today"].count.text() == "1"
+    v.kind_buttons["idea"].click()
+    assert shown(v, "someday") == [] and shown(v, "today") == []
+    v.kind_buttons["all"].click()
+    QTest.keyClick(v.search, Qt.Key.Key_Escape)
+    assert v.search.text() == "" and shown(v, "today") == ["study", "filter"]
+
+
+def test_drag_to_reschedule_asks_first_and_can_be_undone(make, app):
+    win, conn = make()
+    v = win.tasks_view
+    sid = row(v, "servos").row.id
+    before = conn.total_changes
+    v.columns["today"].dropped.emit(sid, "today")         # what a drop does
+    d = v.move_dialog
+    assert d is not None and d.isVisible() and "to today" in d.question.text()
+    d.cancel_btn.click()
+    assert conn.total_changes == before                   # cancelled: nothing written
+    v.request_move(sid, "today")
+    v.move_dialog.ok_btn.click()
+    assert it.get_item(conn, sid).due_at == "2026-10-09"
+    assert shown(v, "today") == ["study", "servos", "filter"]   # untimed before 6 PM
+    assert "Moved “servos” to today" in v.undo_text.text()
+    v.undo_btn.click()
+    assert it.get_item(conn, sid).due_at == "2026-10-12" and shown(v, "week") == ["servos"]
+
+
+def test_moves_to_a_day_later_someday_and_done(make, app):
+    win, conn = make()
+    v = win.tasks_view
+    fid = row(v, "filter").row.id                         # due today 18:00
+    v.request_move(fid, "week")
+    d = v.move_dialog
+    d.day_buttons[2].click()                              # Mon Oct 12
+    d.ok_btn.click()
+    assert it.get_item(conn, fid).due_at == "2026-10-12T18:00"   # the time is kept
+    v.request_move(fid, "later")
+    d = v.move_dialog
+    assert not d.ok_btn.isEnabled()
+    d.date_input.setText("tomorrow")
+    assert "after the next 7 days" in d.error.text() and not d.ok_btn.isEnabled()
+    d.date_input.setText("2026-11-03")
+    d.ok_btn.click()
+    assert it.get_item(conn, fid).due_at == "2026-11-03T18:00"
+    sid = row(v, "study").row.id
+    v.request_move(sid, "someday")
+    v.move_dialog.ok_btn.click()
+    assert it.get_item(conn, sid).due_at is None and "study" in shown(v, "someday")
+    v.request_move(sid, "done")
+    v.move_dialog.ok_btn.click()
+    assert it.get_item(conn, sid).done
+    before = conn.total_changes
+    v.request_move(row(v, "server").row.id, "overdue")    # not a target
+    assert conn.total_changes == before and "Not moved" in win.status_label.text()
+    assert not v.columns["overdue"].acceptDrops()
+
+
+def test_shift_arrow_moves_to_the_next_column_after_confirming(make, app):
+    win, conn = make()
+    win.show_workspace("tasks")
+    v = win.tasks_view
+    v.highlight(row(v, "server").row.id)                  # Someday
+    v.scroll.setFocus()
+    QTest.keyClick(v.scroll, Qt.Key.Key_Left, Qt.KeyboardModifier.ShiftModifier)
+    d = v.move_dialog
+    assert d.column == "later" and d.isVisible()
+    d.reject()
+
+
+def test_create_window_reads_the_date_and_creates_one_item(make, app):
+    win, conn = make()
+    win.show_workspace("tasks")
+    v = win.tasks_view
+    v.new_btn.click()
+    d = v.create_dialog
+    assert d is not None and d.isVisible()
+    d.title.setText("lab report monday 9am")
+    assert d.found.isVisible() and "Mon Oct 12 9:00 AM" in d.found.text()
+    d.open_chip("priority")
+    d.menu.actions()[2].trigger()                         # High
+    before = conn.execute("SELECT count(*) FROM items").fetchone()[0]
+    QTest.keyClick(d.title, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
+    assert conn.execute("SELECT count(*) FROM items").fetchone()[0] == before + 1
+    item = it.get_item(conn, v.selected_id)
+    assert (item.title, item.due_at, item.priority) == ("lab report", "2026-10-12T09:00", 2)
+    assert "lab report" in shown(v, "week") and not d.isVisible()
+
+
+def test_create_window_esc_keeps_a_draft_and_writes_nothing(make, app):
+    win, conn = make()
+    v = win.tasks_view
+    before = conn.total_changes
+    v.open_create()
+    d = v.create_dialog
+    d.title.setText("half-typed idea")
+    d.reject()                                            # Esc / close
+    assert conn.total_changes == before
+    v.open_create()
+    assert v.create_dialog.title.text() == "half-typed idea"   # the draft came back
+    v.create_dialog.discard()
+    v.open_create()
+    assert v.create_dialog.title.text() == ""
+    v.create_dialog.reject()
+
+
+def test_create_window_keeps_the_date_words_when_asked(make, app):
+    win, conn = make()
+    v = win.tasks_view
+    v.open_create()
+    d = v.create_dialog
+    d.title.setText("read chapter tomorrow")
+    d.found.click()                                       # keep the words in the title
+    d.create()
+    item = it.get_item(conn, v.selected_id)
+    assert (item.title, item.due_at) == ("read chapter tomorrow", None)
+
+
+def test_column_plus_presets_the_date(make, app):
+    win, conn = make()
+    v = win.tasks_view
+    v.columns["today"].plus.click()
+    d = v.create_dialog
+    d.title.setText("buy milk")
+    d.create()
+    assert it.get_item(conn, v.selected_id).due_at == "2026-10-09"
+
+
+def test_c_opens_the_create_window_but_not_while_typing(make, app):
+    win, _ = make()
+    win.show_workspace("home")
+    win.activateWindow()
+    app.processEvents()
+    win.home_view.setFocus()
+    QTest.keyClick(win, Qt.Key.Key_C)
+    app.processEvents()
+    v = win.tasks_view
+    assert win.workspace == "tasks" and v.create_dialog is not None
+    assert v.create_dialog.isVisible()
+    v.create_dialog.reject()
+    v.create_dialog = None
+    v.search.setFocus()
+    QTest.keyClick(v.search, Qt.Key.Key_C)
+    app.processEvents()
+    assert v.search.text() == "c" and v.create_dialog is None
 
 
 def test_edit_in_the_side_panel(make):
@@ -168,7 +346,7 @@ def test_edit_in_the_side_panel(make):
     assert (item.title, item.due_at, item.remind_at, item.priority, item.kind,
             item.project_id, item.body) == ("Order spare servos", "2026-10-15",
                                             "2026-10-10T09:00", 3, "reminder", None, "two MG90S")
-    assert shown(v, "upcoming") == ["Order spare servos"] and v.selected_id == sid
+    assert shown(v, "week") == ["Order spare servos"] and v.selected_id == sid
     assert win.status_label.text() == "Saved “Order spare servos”"
 
 
@@ -200,20 +378,21 @@ def test_filters_by_kind_and_project(make):
     v.kind_buttons["all"].click()
     v.project_box.setCurrentIndex(v.project_box.findData("lidar"))
     assert v.project_filter == "lidar"
-    assert shown(v, "today") == ["filter"] and shown(v, "upcoming") == ["servos"]
+    assert shown(v, "today") == ["filter"] and shown(v, "week") == ["servos"]
     v.kind_buttons["reminder"].click()
     assert v.data.open_count == 0 and not v.empty.isHidden()
     assert v.empty_title.text() == "Nothing matches these filters."
 
 
-def test_empty_tasks_points_to_capture(make, app):
+def test_empty_tasks_points_to_new_task(make, app):
     win, _ = make(items=False)
     win.show_workspace("tasks")
     v = win.tasks_view
     assert v.data.open_count == 0 and v.empty_title.text() == "Nothing open."
     v.empty_btn.click()
     app.processEvents()
-    assert win.capture.isVisible()
+    assert v.create_dialog is not None and v.create_dialog.isVisible()
+    v.create_dialog.reject()
 
 
 def test_items_added_elsewhere_show_up_on_reload(make, tmp_path):

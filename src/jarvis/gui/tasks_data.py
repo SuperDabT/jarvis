@@ -11,10 +11,17 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
 
 from jarvis import items as it
+from jarvis import planning
 from jarvis.capture import resolve_phrase
 
 GROUP_LABELS = {"overdue": "overdue", "today": "today", "upcoming": "upcoming",
                 "someday": "someday"}
+# The board's columns, in order; "upcoming" is split into the next week and later.
+COLUMNS = ("overdue", "today", "week", "later", "someday")
+COLUMN_NAMES = {"overdue": "Overdue", "today": "Today", "week": "This week", "later": "Later",
+                "someday": "Someday", "done": "Done"}
+WEEK_DAYS = 7             # "This week": dated within this many days after today
+DONE_DAYS = 7             # the Done column: completed in the last week
 KIND_FILTERS = ("all", *it.KINDS)
 DONE_LIMIT = 15
 DELETED_LIMIT = 15
@@ -107,6 +114,25 @@ class TasksData:
     def group(self, key: str) -> tuple[TaskRowView, ...]:
         return dict(self.groups)[key]
 
+    def columns(self) -> tuple[tuple[str, tuple[TaskRowView, ...]], ...]:
+        """The board's columns (COLUMNS order): upcoming split at WEEK_DAYS."""
+        out = []
+        for key in COLUMNS:
+            if key in ("week", "later"):
+                rows = self.group("upcoming")
+                edge = self.today + timedelta(days=WEEK_DAYS)
+                rows = tuple(r for r in rows if (date.fromisoformat(r.item.when[:10]) <= edge)
+                             == (key == "week"))
+            else:
+                rows = self.group(key)
+            out.append((key, rows))
+        return tuple(out)
+
+    def done_recent(self) -> tuple[TaskRowView, ...]:
+        """Done in the last DONE_DAYS days (the Done column)."""
+        floor = (self.today - timedelta(days=DONE_DAYS)).isoformat()
+        return tuple(r for r in self.done if (r.item.completed_at or "")[:10] >= floor)
+
     @property
     def open_count(self) -> int:
         return sum(len(rows) for _, rows in self.groups)
@@ -166,3 +192,69 @@ def parse_when_input(text: str, now: datetime, *, need_time: bool) -> str | None
     if need_time and hhmm is None:
         raise it.ItemError("a reminder needs a time of day", field)
     return f"{day.isoformat()}T{hhmm}" if hhmm else day.isoformat()
+
+
+# ---------------------------------------------------------------- the board
+
+
+def matches(row: TaskRowView, query: str) -> bool:
+    """Search: every word of ``query`` in the title or the notes (any case)."""
+    hay = f"{row.item.title} {row.item.body or ''}".lower()
+    return all(w in hay for w in query.lower().split())
+
+
+def category(row: TaskRowView) -> str:
+    """Exam (an exam-like title), Work (in a project) or Personal; as on Home."""
+    if planning._EVENT_RE.search(row.item.title):
+        return "Exam"
+    return "Work" if row.item.project_id is not None else "Personal"
+
+
+def drop_target(item: it.Item, column: str, today: date,
+                day: date | None = None) -> tuple[str, str | None]:
+    """Where a card dropped on ``column`` goes: (field, new stored value). The
+    field is "due" (or "remind" for a reminder-only item); the value keeps the
+    item's time of day; None removes the date (Someday). ``day``: the chosen day
+    for This week / Later. ValueError for a column that can't take a drop."""
+    if column in ("overdue", "done"):
+        raise ValueError(f"a card can't be moved to {COLUMN_NAMES[column]} by date")
+    field = "remind" if item.remind_at and not item.due_at else "due"
+    current = item.due_at if field == "due" else item.remind_at
+    if column == "someday":
+        if field == "remind":
+            raise ValueError("a reminder needs a date and time; edit it instead")
+        return field, None
+    target = today if column == "today" else day
+    if target is None:
+        raise ValueError(f"pick a day for {COLUMN_NAMES[column]}")
+    if column == "week" and not today < target <= today + timedelta(days=WEEK_DAYS):
+        raise ValueError("This week is the next 7 days")
+    if column == "later" and target <= today + timedelta(days=WEEK_DAYS):
+        raise ValueError("Later is after the next 7 days")
+    clock = current[10:] if current and len(current) > 10 else ""
+    if field == "remind" and not clock:
+        clock = "T09:00"
+    return field, target.isoformat() + clock
+
+
+def parse_title_date(title: str, now: datetime) -> tuple[str, str | None, str]:
+    """A date phrase at the end of a title ("lab report friday 5pm"): (the title
+    without it, the stored due value, the phrase). Code only, no model; the
+    longest trailing phrase capture can read wins; ambiguous ones are left in."""
+    words = title.split()
+    for k in range(1, len(words)):           # the longest suffix first, title kept
+        phrase = " ".join(words[k:])
+        try:
+            stored = parse_when_input(phrase, now, need_time=False)
+        except it.ItemError as e:
+            if "could mean" in str(e):       # ambiguous ("next thursday"): no guess
+                break
+            continue
+        if stored:
+            rest = " ".join(words[:k]).rstrip(" ,-–:")
+            for tail in (" by", " on", " at", " due"):
+                if rest.lower().endswith(tail) and len(rest) > len(tail):
+                    rest = rest[: -len(tail)]
+            if rest.strip():
+                return rest.strip(), stored, phrase
+    return title.strip(), None, ""

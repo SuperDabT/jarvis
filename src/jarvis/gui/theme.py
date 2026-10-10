@@ -1,6 +1,6 @@
 """Colour tokens, fonts and the stylesheet: Jarvis's "project brain" look.
 
-Dark only. A neutral charcoal base (#161719) with near-white ink (#E8E8EA);
+Dark only. A navy base (#0B1220, shared with Home) with near-white ink (#E6ECF7);
 the rail and chat sit a shade darker, cards a shade lighter, separated by tone
 rather than borders (Linear's layout, Apple's grouped surfaces). One mint (#5DDBA6) marks
 everything live: graph nodes with recent activity, status pills, sparklines,
@@ -71,7 +71,7 @@ class Tokens:
     orb_core: str = "#f0fff7"
     orb_ring: str = "#dce8e2"
     watermark: float = 0.06
-    panel: str = "#1d1e21"  # cockpit panels
+    panel: str = "#101a2c"  # cockpit panels
 
     def tag(self, name: str) -> tuple[str, str, str]:
         return self.tags.get(name) or self.tags["open"]
@@ -81,9 +81,9 @@ class Tokens:
         return mix(self.bg, self.ink, k)
 
 
-# Neutral charcoal, a near-white ink and a mint.
-BG = "#161719"
-INK = "#e8e8ea"
+# Navy (as Home), a near-white ink and a mint.
+BG = "#0b1220"    # navy, the same as Home's page (gui/home_style.py)
+INK = "#e6ecf7"
 PEARL = INK  # the ink's old name, kept for older imports
 MINT = "#5ddba6"
 RED = "#e5787a"
@@ -93,12 +93,12 @@ def _dark() -> Tokens:
     t = lambda k: mix(BG, INK, k)  # noqa: E731 - a tint of the pair
     m = lambda k: mix(BG, MINT, k)  # noqa: E731 - towards the mint
     return Tokens(
-        name="dark", bg=BG, ink=INK, side="#111214", text=INK, muted=t(0.78),
+        name="dark", bg=BG, ink=INK, side="#09101c", text=INK, muted=t(0.78),
         faint=t(0.6), border=t(0.085), border_strong=t(0.17), btn_line=t(0.28),
-        fill=t(0.045), fill2=t(0.1), inset="#1f2023", hover=t(0.07), accent=INK,
+        fill=t(0.045), fill2=t(0.1), inset="#14203a", hover=t(0.07), accent=INK,
         accent_hover="#f2fbf6", on_accent=BG, signal=MINT, signal_text=MINT,
         signal_soft=m(0.14), unsure=t(0.72), unsure_bg=t(0.1), warn=MINT, red=RED,
-        green=MINT, amber=t(0.45), shadow="#08080a",
+        green=MINT, amber=t(0.45), shadow="#04070d",
         grid=(t(0.07), m(0.3), m(0.5), m(0.72), MINT),
         series=(INK, MINT, t(0.55), m(0.55)),
         tags={
@@ -111,7 +111,7 @@ def _dark() -> Tokens:
             "new": ("transparent", MINT, f"1px solid {m(0.7)}"),
             "fail": (mix(BG, RED, 0.16), RED, f"1px solid {mix(BG, RED, 0.5)}"),
         },
-        panel="#1d1e21",
+        panel="#101a2c",
     )
 
 
