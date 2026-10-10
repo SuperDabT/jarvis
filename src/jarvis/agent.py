@@ -83,14 +83,18 @@ End with one last line: "SOURCES: " then the refs you used (item:12, #31, ...) o
 
 PLAN_RULES = """
 This is a plan or schedule request. Jarvis has put the items in scope in the brief below \
-(the set is decided: don't ask which tasks). Answer by calling submit_plan once, with a \
-decision for EVERY item_id:
-- work_on: a day to work on it, on or before its deadline. Use the period for what is \
-coming: an exam or deadline just after it is a reason to keep time before it.
+(the set is decided: don't ask which tasks or deadlines). Answer by calling submit_plan once, \
+with a decision for EVERY item_id:
+- work_on: a day to work on it, within the item's allowed days in the brief. Fixed \
+commitments (exams, appointments) are facts: keep time before them (work_on the exam item \
+means preparing for it) and never plan over them.
+- If the important items can't all get time, say so: leave the less urgent ones with the \
+reason; Jarvis lists them as not fitted.
 - set_due: only when scheduling, to give an undated item a date.
 - leave / exclude: with the reason (already handled, not this period, the user's words).
 - availability: only windows the user stated, each with their exact words as quote. With \
-none, plan days only (no times): the plan is provisional, say so in the summary.
+none, plan days only (no times): the plan is provisional, say so in the summary. Never write \
+a time of day or a duration the user didn't give, anywhere.
 - suggestions: things worth reserving time for that aren't tasks (e.g. exam preparation), \
 as one line each; no detailed study plans or task breakdowns.
 - summary: 2-3 sentences on what matters most in the period and why.
@@ -99,7 +103,8 @@ errors, fix them and call it again with the whole plan.
 """
 ASK_RULE = """\
 - If one fact you can't look up (usually when the user is free) is essential to the \
-schedule, call ask_user with that one question instead of guessing; otherwise plan.
+schedule, call ask_user with that one question instead of guessing; otherwise plan. Never \
+ask for what the user already said in this conversation or what the brief shows.
 """
 
 _CLAIMED_RE = re.compile(
@@ -312,9 +317,12 @@ def run_agent(conn: sqlite3.Connection, cfg: Config, question: str,
                 stopped = "the step limit"
             if planning_turn and not calls and not nudged and step < max_model_calls - 1:
                 nudged = True
+                problem = (planning.question_problem(ctx.brief, ctx.user_text,
+                                                     _question_of(final))
+                           if _asks(final) else None)
                 msgs.append({"role": "assistant", "content": final})
-                msgs.append({"role": "user", "content": PLAN_NUDGE_ASK if can_ask
-                             else PLAN_NUDGE})
+                msgs.append({"role": "user", "content": f"Don't ask: {problem}. {PLAN_NUDGE}"
+                             if problem else PLAN_NUDGE_ASK if can_ask else PLAN_NUDGE})
                 final = None
                 continue
             break
@@ -342,8 +350,14 @@ def run_agent(conn: sqlite3.Connection, cfg: Config, question: str,
     duration = time.monotonic() - t0
     if (ctx.clarification is None and ctx.plan is None and can_ask and final
             and _asks(final) and (planning_turn or goal.outcome == "schedule")):
-        # asked in prose instead of through ask_user: it is still the clarification
-        ctx.clarification = {"question": _question_of(final), "missing": []}
+        # asked in prose instead of through ask_user: it is still the clarification,
+        # unless it asks for what the user already said or the records hold
+        q = _question_of(final)
+        problem = planning.question_problem(ctx.brief, ctx.user_text, q)
+        if problem:
+            ctx.refused = [f"ask_user: {problem}"]
+        else:
+            ctx.clarification = {"question": q, "missing": []}
     if ctx.clarification is not None:
         q = _INLINE_REF_RE.sub("", _SPECIAL_TOKEN_RE.sub("", ctx.clarification["question"]))
         ctx.clarification["question"] = q.strip()
@@ -407,6 +421,8 @@ def _plan_answer(ctx: tools.ToolContext, error: str | None, stopped: str | None,
             why = "the local model isn't reachable"
         elif error:
             why = f"the model failed: {error}"
+        elif ctx.refused and all(r.startswith("ask_user:") for r in ctx.refused):
+            why = "it asked for something already known instead of planning"
         elif ctx.refused:
             why = "the plan it made broke these rules: " + "; ".join(ctx.refused[:3])
         else:

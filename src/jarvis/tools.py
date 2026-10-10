@@ -199,6 +199,10 @@ def submit_plan(ctx: ToolContext, decisions: list, summary: str = "",
 
 
 def ask_user(ctx: ToolContext, question: str, missing: list | None = None) -> dict:
+    problem = planning.question_problem(ctx.brief, ctx.user_text or ctx.question, question)
+    if problem:
+        ctx.refused = [f"ask_user: {problem}"]
+        raise ValueError(problem + (" (submit the plan)" if ctx.brief is not None else ""))
     ctx.clarification = {"question": str(question)[:400],
                          "missing": [str(m)[:80] for m in missing or []][:5]}
     return {"asked": True}

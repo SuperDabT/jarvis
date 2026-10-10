@@ -138,7 +138,7 @@ def test_brief_holds_what_a_weekend_plan_must_account_for(conn, week):
                       "Write up the bracket dimensions": "undated", "Lab report": "due_soon",
                       "Reply to Dana": "overdue", "Buy a present for Mom": "due_soon"}
     assert "Renew passport" not in status                    # beyond the horizon
-    assert str(b.horizon) == "2026-10-18"
+    assert str(b.horizon) == "2026-10-23"                     # today + 14 days
 
 
 # ---------------------------------------------------------------- organize: a plan
@@ -588,7 +588,189 @@ def cfg_path_free():
 def test_the_summary_is_labelled_as_jarvis_suggestion_and_claims_are_flagged(conn, tmp_path,
                                                                             week):
     m = Script([submit(week, summary="I've also scheduled the dog for Saturday.")],
-               goal=plan_goal())
+               [submit(week, summary="The dog fits on Saturday.")], goal=plan_goal())
     a = run(conn, tmp_path, "Help me organize my weekend", m)
-    assert a.text.startswith("**Jarvis's read** (a suggestion): I've also scheduled")
-    assert agent.NOT_SAVED_NOTE in a.notes
+    # a plan saves nothing, so a claim that something was done is refused and fixed
+    assert "nothing is saved by a plan" in str(m.requests[1]["messages"][-1]["content"])
+    assert a.text.startswith("**Jarvis's read** (a suggestion): The dog fits on Saturday.")
+    assert agent.NOT_SAVED_NOTE not in a.notes
+
+
+# ---------------------------------------------------------------- known failures
+
+
+def test_the_brief_covers_the_planning_horizon_not_only_the_period(conn, tmp_path, week):
+    """1. A plan for today must still see a deadline 12 days out and a reminder
+    set for today on an item due next month."""
+    late = add(conn, "Scholarship application", due="2026-10-21")
+    nudge = add(conn, "Start the thesis outline", due="2026-11-30", remind="2026-10-09T18:00")
+    b = planning.build_brief(conn, NOW.date(), NOW.date(), NOW.date())
+    assert b.items[late.id].status == "due_soon"
+    assert b.items[nudge.id].status == "reminder"
+    assert week["far"].id not in b.items                   # beyond today + 14 days
+    m = Script([submit(week)], goal=plan_goal(start="2026-10-09", end="2026-10-09"))
+    run(conn, tmp_path, "What should I focus on today?", m)
+    assert f"item_id {late.id}: Scholarship application" in m.user_text()
+
+
+def test_exams_are_fixed_commitments_with_the_days_before_them(conn, week):
+    """2. The exam is listed as a commitment, with the days of the period before it,
+    and each item's allowed days are computed by code."""
+    b = planning.build_brief(conn, NOW.date() + timedelta(days=1),
+                             NOW.date() + timedelta(days=2), NOW.date())
+    text = "\n".join(b.lines())
+    assert ("- Mon 2026-10-12 09:00 Calculus exam (item_id 1); days of the period before it: "
+            "Sat, Sun") in text
+    assert b.items[week["exam"].id].event and not b.items[week["lab"].id].event
+    assert f"item_id {week['lab'].id}: Lab report" in text
+    assert "allowed days Sat 2026-10-10–Sun 2026-10-11" in text
+    dated_exam = add(conn, "Physics midterm", due="2026-10-14")      # no time, still an event
+    assert planning.build_brief(conn, NOW.date(), NOW.date(), NOW.date()).items[
+        dated_exam.id].event
+
+
+def test_work_is_never_planned_over_a_commitment_on_record(conn, tmp_path, week):
+    q = "Schedule my study time. I'm free Monday 8am to noon."
+    window = [{"date": MON, "start": "08:00", "end": "12:00", "quote": "Monday 8am to noon"}]
+    m = Script([submit(week, availability=window, dog=None, bracket=None, dana=None,
+                       exam={"action": "work_on", "date": MON, "time": "08:00",
+                             "reason": "review before it"},
+                       lab={"action": "work_on", "date": MON, "time": "09:30",
+                            "reason": "due Tuesday"})],
+               goal=plan_goal("schedule", MON, MON))
+    run(conn, tmp_path, q, m)
+    errors = " | ".join(m.results(1)[0]["errors"])
+    assert f"{MON} 09:30 is when “Calculus exam” is on record" in errors
+    assert "08:00" not in errors                 # preparing for the exam itself is fine
+
+
+def test_important_items_that_cannot_fit_are_surfaced_not_buried(conn, tmp_path, week):
+    """2. Only Sunday is free; the overdue reply is left: it is listed under
+    'Needs attention' with the records' fact, not hidden among the rest."""
+    q = "Plan my weekend. I'm only free Sunday after 3pm."
+    window = [{"date": SUN, "start": "15:00", "end": "23:59", "quote": "Sunday after 3pm"}]
+    m = Script([submit(week, availability=window,
+                       dog={"action": "exclude", "reason": "no room"},
+                       bracket={"action": "exclude", "reason": "no room"},
+                       lab={"action": "work_on", "date": SUN, "reason": "due Tuesday"},
+                       dana={"action": "leave", "reason": "no room this weekend"})],
+               goal=plan_goal())
+    a = run(conn, tmp_path, q, m)
+    head, _, rest = a.text.partition("**Sunday Oct 11**")
+    assert ("**Needs attention, not fitted in this plan**\n- Reply to Dana (overdue since "
+            "Wed Oct 7): no room this weekend") in head
+    assert "Reply to Dana" not in rest                    # listed once, at the top
+    assert "**Not in this plan**\n- Shower the dog: no room" in rest
+
+
+def test_no_room_before_a_deadline_is_computed_from_the_records(conn, week):
+    b = planning.build_brief(conn, NOW.date() + timedelta(days=4),
+                             NOW.date() + timedelta(days=5), NOW.date())   # Tue..Wed
+    assert b.allowed(b.items[week["lab"].id]) == (b.start, b.start)       # due Tuesday
+    early = add(conn, "Hand in the form", due="2026-10-11")
+    b = planning.build_brief(conn, NOW.date() + timedelta(days=4),
+                             NOW.date() + timedelta(days=5), NOW.date())
+    assert b.allowed(b.items[early.id]) is None
+    assert b.no_room(b.items[early.id]) == "due Sun Oct 11, before any day of this plan"
+
+
+@pytest.mark.parametrize(("where", "text", "expected"), [
+    ("summary", "Spend 2 hours on the lab report on Sunday.", "how long things take"),
+    ("summary", "Do the dog at 4pm, after lunch.", "mentions 16:00"),
+    ("reason", "due Wednesday, so Sunday works", "it is due Tuesday 2026-10-13"),
+    ("summary", "I've scheduled the dog for Saturday.", "nothing is saved by a plan"),
+])
+def test_invented_times_durations_and_wrong_days_in_prose_are_refused(conn, tmp_path, week,
+                                                                       where, text, expected):
+    """3. Free text can't carry availability, durations or deadline days the
+    records and the user don't support."""
+    kw = ({"summary": text} if where == "summary"
+          else {"lab": {"action": "work_on", "date": SUN, "reason": text}})
+    m = Script([submit(week, **kw)], [submit(week)], goal=plan_goal())
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    assert expected in " | ".join(m.results(1)[0]["errors"])
+    assert a.text.startswith("**Jarvis's read**")               # the fix is accepted
+
+
+def test_times_and_durations_the_user_gave_may_be_repeated(conn, tmp_path, week):
+    q = "Plan my weekend. I have 2 hours free Saturday from 10am."
+    window = [{"date": SAT, "start": "10:00", "end": "12:00", "quote": "Saturday from 10am"}]
+    m = Script([submit(week, summary="Use your 2 hours from 10am on Saturday.",
+                       availability=window,
+                       dog={"action": "work_on", "date": SAT, "reason": "fits"},
+                       bracket={"action": "work_on", "date": SAT, "reason": "fits"},
+                       lab={"action": "work_on", "date": SAT, "reason": "due Tuesday"},
+                       dana={"action": "work_on", "date": SAT, "reason": "overdue"})],
+               goal=plan_goal())
+    a = run(conn, tmp_path, q, m)
+    assert len(m.requests) == 1 and "Use your 2 hours from 10am on Saturday." in a.text
+
+
+def test_a_window_quoting_another_weekday_is_refused(conn, tmp_path, week):
+    q = "Schedule my weekend; I'm free Sunday after 3pm."
+    window = [{"date": SAT, "start": "15:00", "end": "23:59", "quote": "Sunday after 3pm"}]
+    m = Script([submit(week, availability=window)], goal=plan_goal("schedule"))
+    run(conn, tmp_path, q, m)
+    assert any("the quote names Sunday, but 2026-10-10 is a Saturday" in e
+               for e in m.results(1)[0]["errors"])
+
+
+def test_raw_item_ids_never_reach_the_answer(conn, tmp_path, week):
+    m = Script([submit(week, summary="Prioritize item_id 5 (overdue) first.",
+                       dana={"action": "work_on", "date": SAT,
+                             "reason": "overdue (item_id 5)"})], goal=plan_goal())
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    assert "item_id" not in a.text and "Prioritize (overdue) first." in a.text
+
+
+@pytest.mark.parametrize("question", [
+    "When are you free on Saturday?",
+    "What times are you available this weekend?",
+])
+def test_no_question_about_availability_the_user_already_gave(conn, tmp_path, week, question):
+    """4. The user said when they are free; asking again is refused and the model
+    plans with it instead."""
+    q = "Schedule my weekend tasks, I'm free Saturday afternoon."
+    m = Script([("ask_user", {"question": question})], [submit(week)],
+               goal=plan_goal("schedule"))
+    a = run(conn, tmp_path, q, m)
+    err = m.results(1)[0]["error"]
+    assert "already said when they are free (“Schedule my weekend tasks, I'm free" in err
+    assert a.action["kind"] != "clarify" and "**Jarvis's read**" in a.text
+
+
+def test_no_question_about_what_the_brief_already_holds(conn, tmp_path, week):
+    for question in ("Which tasks do you want to schedule?", "When is the lab report due?",
+                     "Are you free Saturday? And Sunday?"):
+        m = Script([("ask_user", {"question": question})], [submit(week)],
+                   goal=plan_goal("schedule"))
+        a = run(conn, tmp_path, "Schedule these tasks for my weekend", m)
+        assert "error" in m.results(1)[0], question
+        assert a.action["kind"] != "clarify", question
+
+
+def test_a_follow_up_answer_is_not_asked_for_again(conn, tmp_path, week):
+    """4. After 'Saturday 10 to 2' the model asks in prose when they're free: that
+    is not a clarification; it is told to plan with what was said."""
+    ask = Script([("ask_user", {"question": "When are you free this weekend?"})],
+                 goal=plan_goal("schedule"))
+    first = run(conn, tmp_path, "Schedule these tasks for my weekend", ask, session_id="s2")
+    m = Script("What time are you free on Sunday?", [submit(week)])
+    b = run(conn, tmp_path, "Saturday 10 to 2, Sunday I'm busy", m, session_id="s2",
+            history=[("user", "Schedule these tasks for my weekend"),
+                     ("assistant", first.text)])
+    assert "Don't ask: the user already said when they are free" in m.user_text(1)
+    assert b.action["kind"] != "clarify"
+
+
+def test_a_personal_item_worded_like_an_issue_is_not_backlog(conn, week):
+    """5. Matching is by id: a personal task that shares words with issue #31 is
+    still the user's own item; only a new item or an explicit #N is backlog."""
+    mine = add(conn, "Timestamp each detection run", due=None)
+    p, errors = actions.build_proposal(conn, [{"op": "set_due", "item_id": mine.id,
+                                               "due": SAT, "reason": "mine"}], NOW, LA)
+    assert not errors and p.changes[0].backlog_ref is None
+    new = {"op": "create", "title": "Timestamp each detection when its run closes",
+           "reason": "x"}
+    p, errors = actions.build_proposal(conn, [new], NOW, LA)
+    assert p is None and "engineering backlog (#31)" in errors[0]

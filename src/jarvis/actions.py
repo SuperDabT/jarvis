@@ -140,13 +140,18 @@ def _norm(text: str) -> set[str]:
     return set(tokens(text))
 
 
-def backlog_ref(conn: sqlite3.Connection, title: str, reason: str = "") -> str | None:
-    """"#N" when a change is about a GitHub issue: it names one, or its title is
-    (nearly) an open issue's title."""
+def backlog_ref(conn: sqlite3.Connection, title: str, reason: str = "", *,
+                new: bool = True) -> str | None:
+    """"#N" when a change is about a GitHub issue: it names one, or (a new item
+    only) its title is (nearly) an open issue's title. An existing item is the
+    user's own record, identified by its id: similar wording to an issue doesn't
+    make it backlog."""
     for m in _ISSUE_RE.finditer(f"{title} {reason}"):
         if conn.execute("SELECT 1 FROM issues WHERE number = ?", (int(m[1]),)).fetchone():
             return f"#{m[1]}"
     words = _norm(title)
+    if not new:
+        return None
     if len(words) < 2:
         return None
     for r in conn.execute("SELECT number, title FROM issues WHERE state = 'open'"):
@@ -217,7 +222,7 @@ def check_change(conn: sqlite3.Connection, raw: Any, now: datetime, tz: tzinfo |
         if remind is None:
             raise ProposalError("set_remind needs a date and time")
         due = None
-    ref = backlog_ref(conn, item.title)
+    ref = backlog_ref(conn, item.title, new=False)
     if ref and not allow_backlog:
         raise ProposalError(f"“{item.title}” is engineering backlog ({ref}); it can only be "
                             "planned when the user asks to include project work")

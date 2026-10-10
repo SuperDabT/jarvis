@@ -230,14 +230,22 @@ and project questions keep their single-pass paths; voice doesn't use the loop. 
 first fixes its goal (`agent.Goal`: schedule / plan / answer, the days, and what the user said
 for it; one `chat_json` call, or carried over from Jarvis's previous loop turn via
 `pending_goal` in that message's metadata, so a reply continues the same request). Plans and
-schedules are structured (`jarvis/planning.py`): code picks the items in scope (overdue, due in
-the period or the 7 days after, undated) and gives them as a brief; the model answers with
-`submit_plan` (a decision per item id, availability quoted from the user, suggestions that
-aren't tasks); `check_plan` refuses dropped items, work after a deadline, moved deadlines and
-any time not inside a window the user stated, and the model fixes it. The accepted plan ends
-the turn and is rendered by code; a schedule's set_due / timed work become a proposal. Plans
-never ask; schedules may ask once per goal. Without a valid plan the answer lists what is on
-record. `set_due` only dates undated items. Tests: `tests/test_agent.py`.
+schedules are structured (`jarvis/planning.py`): code picks the items in scope (overdue, dated
+up to the horizon, which is the later of 7 days after the period and 14 days from today, the
+same 14 days as the agenda; undated) and gives them as a brief. The brief lists fixed
+commitments (timed items, exam-like dated items) with the days of the period before them, and
+each item's allowed days. The model answers with `submit_plan` (a decision per item id,
+availability quoted from the user, suggestions that aren't tasks). `check_plan` refuses:
+dropped items; work after a deadline; moved deadlines; any time not inside a window the user
+stated, or within an hour of a commitment on record; a window whose quote names another
+weekday; and free text stating a time, a duration, a wrong deadline weekday or a save nobody
+made. The model fixes it. The accepted plan ends the turn and is rendered by code; important
+items left without time are listed first ("Needs attention, not fitted"). A schedule's set_due /
+timed work become a proposal. Plans never ask; schedules may ask once per goal, but never what
+the user already said or the brief holds (`planning.question_problem`). Without a valid plan
+the answer lists what is on record. `set_due` only dates undated items. The backlog guard
+matches an existing item to an issue only by an explicit #N (fuzzy title matching is kept only
+for new items). Tests: `tests/test_agent.py`.
 
 ## The real database
 
@@ -249,7 +257,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 954 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 972 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

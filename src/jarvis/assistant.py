@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from jarvis import chat
+from jarvis import chat, planning
 from jarvis import items as it
 from jarvis.chat import Answer, Context, Source
 from jarvis.config import Config
@@ -36,7 +36,7 @@ from jarvis.facts import tokens
 from jarvis.intent import Route
 
 UNDATED_LISTED = 8          # undated items named in a model context
-DATED_AHEAD_DAYS = 14       # dated items shown to the model beyond the timeframe
+DATED_AHEAD_DAYS = planning.HORIZON_DAYS   # dated items shown beyond the timeframe
 MEMORY_HITS = 6
 MEMORY_EXCERPT = 240
 _RECALL_NOISE = frozenset(tokens(
