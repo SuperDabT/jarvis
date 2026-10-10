@@ -511,6 +511,14 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 #emptyState {{ background: {t.panel}; border: 1px dashed {t.border_strong}; border-radius: 10px; }}
 #emptyTitleSm {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
 #homeHeadline {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
+#panel[emphasis="true"] {{ background: {t.tint(0.07)}; border-color: {t.tint(0.08)}; }}
+#homeGroup {{ color: {t.faint}; padding: 6px 2px 2px 2px; }}
+#homeGroup[level="late"] {{ color: {t.red}; }}
+#projName {{ color: {t.text}; }}
+#projNext {{ color: {t.muted}; }}
+#statNum {{ color: {t.text}; }}
+#statNum[tone="good"] {{ color: {t.signal}; }}
+#statNum[tone="bad"] {{ color: {t.red}; }}
 #deadlineWhen {{ color: {t.muted}; }}
 #deadlineTitle {{ color: {t.text}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
 #deadlineTag {{ color: {t.faint}; }}

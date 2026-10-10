@@ -6,7 +6,7 @@ jarvis.items on the window's connection.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -248,22 +248,31 @@ def test_home_populated(make):
     assert h.greeting.text() == "Good afternoon."
     assert "1 overdue" in h.attention.text() and "2 due today" in h.attention.text()
     assert [r.row.title for r in h.today_rows] == ["late lab", "study", "filter"]
-    assert h.today.head.text() == "today · 3"
+    assert h.today.head.text() == "Today · 3"
     dl = [r.findChildren(type(h.greeting))[1].text() for r in h.deadline_rows]
     assert dl == ["servos", "Core demo"]
-    assert h.headline.text() == "Core demo due Oct 18, 0 of 9 closed"
-    assert h.project.head.text() == "project · LiDAR Scanner"
-    assert h.data.next_steps and len(h.data.next_steps) <= 3
-    assert len(h.data.activity) <= 5 and h.data.activity
+    # the inbox: open, no date, no project
+    assert [r.row.title for r in h.inbox_rows] == ["server"]
+    assert h.inbox.head.text() == "Inbox · 1"
+    # projects: open work and the next item by date; the GitHub one has its milestone
+    lidar = next(r.summary for r in h.project_rows if r.summary.slug == "lidar")
+    assert (lidar.open, lidar.done, lidar.next_title) == (2, 0, "filter")
+    assert lidar.next_when == "today" and lidar.milestone == "Core demo"
+    assert lidar.milestone_due == "due Sun Oct 18"
+    # overview: real counts
+    o = h.data.overview
+    assert (o.done_week, o.open, o.overdue) == (0, 5, 1)
+    assert h.stats["overdue"].text() == "1" and h.stats["overdue"].property("tone") == "bad"
 
 
 def test_home_empty(make):
     win, _ = make(items=False, data=False)
     h = win.home_view
     assert h.attention.text() == "Nothing due today"
-    assert h.today_rows == [] and h.deadline_rows == [] and h.headline is None
+    assert h.today_rows == [] and h.deadline_rows == [] and h.inbox_rows == []
     texts = [w.text() for w in h.findChildren(type(h.greeting)) if w.objectName() == "homeEmpty"]
-    assert "Nothing due today or overdue." in texts and "No briefing yet." in texts
+    assert "Nothing due today or overdue." in texts and "Inbox is clear." in texts
+    assert [h.stats[k].text() for k in ("done", "open", "overdue")] == ["0", "0", "0"]
 
 
 def test_home_ticks_off_and_links(make, app):
@@ -284,6 +293,31 @@ def test_home_ticks_off_and_links(make, app):
     assert win.capture.isVisible()
 
 
+def test_home_opens_items_and_projects_and_writes_nothing(make):
+    win, conn = make()
+    h = win.home_view
+    before = conn.total_changes
+    win.reload()
+    assert conn.total_changes == before              # reading Home changes nothing
+    row = next(r for r in h.today_rows if r.row.title == "study")
+    row.selected.emit(row.row.id)
+    assert win.workspace == "tasks" and win.tasks_view.selected_id == row.row.id
+    win.show_workspace("home")
+    next(r for r in h.project_rows if r.summary.slug == "lidar").click()
+    assert win.workspace == "tasks" and win.tasks_view.project_filter == "lidar"
+
+
+def test_home_done_counts_only_the_last_week(make):
+    win, conn = make()
+    late = it.create_item(conn, "old", now=NOW - timedelta(days=10), tz=LA)
+    it.complete_item(conn, late, now=NOW - timedelta(days=9))
+    it.complete_item(conn, next(r.row.id for r in win.home_view.today_rows), now=NOW)
+    conn.commit()
+    win.reload()
+    o = win.home_view.data.overview
+    assert (o.done_week, o.overdue) == (1, 0)
+
+
 def test_home_reflows_at_the_minimum_size(make, app):
     win, _ = make()
     h = win.home_view
@@ -291,7 +325,8 @@ def test_home_reflows_at_the_minimum_size(make, app):
     win.resize(980, 600)
     app.processEvents()
     assert h.narrow is True
-    assert h.today.geometry().right() < h.project.geometry().left()  # still two columns
+    x = lambda w, pt: w.mapTo(h, pt).x()  # noqa: E731 - panels sit in column stacks
+    assert x(h.today, h.today.rect().topRight()) < x(h.project, h.project.rect().topLeft())
     win.resize(1500, 940)
     app.processEvents()
     assert h.narrow is False

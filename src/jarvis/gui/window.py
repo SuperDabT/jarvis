@@ -339,6 +339,8 @@ class MainWindow(QMainWindow):
                 w.capture_requested.connect(self.open_capture)
                 w.complete.connect(self.complete_item)
                 w.open_node.connect(self.select_node)
+                w.open_item.connect(self.open_item)
+                w.open_project.connect(self.open_project_items)
             else:
                 w = PlaceholderPage(ws.key, self.tokens)
                 w.open_projects.connect(lambda: self.show_workspace("projects"))
@@ -714,7 +716,7 @@ class MainWindow(QMainWindow):
         self.tasks_view.reload()
         try:
             home = build_home(self.conn, data, brain, self._now_fn(),
-                              project_name=self._project_name())
+                              project_name=self._project_name(), repo=self.cfg.repo)
         except sqlite3.Error as e:
             self.set_status(f"Could not read Home: {e}", "warn", sticky=True)
             return
@@ -729,6 +731,11 @@ class MainWindow(QMainWindow):
             tv.set_kind("all")
             tv.set_project(None)
         tv.select(item_id)
+
+    def open_project_items(self, slug: str) -> None:
+        """A project's items in Tasks (from Home)."""
+        self.show_workspace("tasks")
+        self.tasks_view.set_project(slug)
 
     def complete_item(self, item_id: int) -> None:
         """Tick an item off (from Home or the graph's inspector)."""
