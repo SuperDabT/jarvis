@@ -145,8 +145,8 @@ class Brief:
                            f"(item_id {b.id}); {lead}")
         out.append("Items in scope (decide every one by item_id):")
         for b in self.items.values():
-            when = (f"due {b.due}" if b.due else "no date") + (
-                f", reminder {b.remind}" if b.remind else "")
+            when = (f"due {_dated(b.due)}" if b.due else "no date") + (
+                f", reminder {_dated(b.remind)}" if b.remind else "")
             proj = f", project {b.project}" if b.project else ""
             span = self.allowed(b)
             room = (f"allowed days {span[0]:%a} {span[0]}–{span[1]:%a} {span[1]}" if span
@@ -158,6 +158,12 @@ class Brief:
         if self.more_undated:
             out.append(f"({self.more_undated} more undated items are not in scope)")
         return out
+
+
+def _dated(stored: str) -> str:
+    """A stored date with its weekday ("Tue 2026-10-13", "Mon 2026-10-12 09:00"), so
+    the model never works out a weekday itself."""
+    return f"{date.fromisoformat(stored[:10]):%a} {stored.replace('T', ' ')}"
 
 
 def _days(first: date, last: date) -> list[date]:
@@ -354,9 +360,12 @@ def _prose_problems(brief: Brief, texts: list[tuple[str, str]], user_text: str,
     return errors
 
 
-def check_plan(brief: Brief, raw: dict[str, Any], user_text: str) -> tuple[Plan | None, list[str]]:
+def check_plan(brief: Brief, raw: dict[str, Any], user_text: str,
+               kept: dict[str, Any] | None = None) -> tuple[Plan | None, list[str]]:
     """(the plan, errors): None when anything is wrong, with every problem listed
-    so the model can fix them all at once."""
+    so the model can fix them all at once. ``kept`` (if given) receives what was
+    valid: ``decisions`` (item_id -> the raw decision) and ``availability_ok``,
+    so a correction only needs to resend what was wrong."""
     errors: list[str] = []
     said = _norm(user_text)
     windows: list[Window] = []
@@ -387,7 +396,9 @@ def check_plan(brief: Brief, raw: dict[str, Any], user_text: str) -> tuple[Plan 
 
     decisions: list[Decision] = []
     seen: set[int] = set()
+    good: dict[int, dict[str, Any]] = {}
     for k, d in enumerate(raw.get("decisions") or [], 1):
+        label = f"decision {k}"
         try:
             if not isinstance(d, dict):
                 raise ValueError("must be an object")  # noqa: TRY004 - a message for the model
@@ -398,6 +409,7 @@ def check_plan(brief: Brief, raw: dict[str, Any], user_text: str) -> tuple[Plan 
             b = brief.items.get(item_id)
             if b is None:
                 raise ValueError(f"item_id {item_id} isn't in scope")
+            label = f"item_id {item_id}"
             if item_id in seen:
                 raise ValueError(f"item_id {item_id} is decided twice")
             seen.add(item_id)
@@ -435,8 +447,9 @@ def check_plan(brief: Brief, raw: dict[str, Any], user_text: str) -> tuple[Plan 
                                      "isn't one of them (if they gave a time for that day, "
                                      "add its window)")
             decisions.append(Decision(item_id, action, reason, day, time))
+            good[item_id] = d
         except ValueError as ex:
-            errors.append(f"decision {k}: {ex}")
+            errors.append(f"{label}: {ex}")
     missing = [b for i, b in brief.items.items() if i not in seen]
     if missing:
         errors.append("not decided: " + "; ".join(f"item_id {b.id} {b.title}"
@@ -452,10 +465,17 @@ def check_plan(brief: Brief, raw: dict[str, Any], user_text: str) -> tuple[Plan 
                                                                 if d.time}
     texts = [("the summary", summary), *((f"suggestion {k}", f"{x['text']} {x['reason']}")
                                          for k, x in enumerate(suggestions, 1)),
-             *((f"assumption {k}", a) for k, a in enumerate(assumptions, 1)),
-             *((f"the reason for “{brief.items[d.item_id].title}”", d.reason)
-               for d in decisions)]
-    errors += _prose_problems(brief, texts, user_text, known, {d.item_id: d for d in decisions})
+             *((f"assumption {k}", a) for k, a in enumerate(assumptions, 1))]
+    errors += _prose_problems(brief, texts, user_text, known, {})
+    for d in decisions:
+        bad = _prose_problems(brief, [(f"the reason for “{brief.items[d.item_id].title}”",
+                                       d.reason)], user_text, known, {d.item_id: d})
+        if bad:
+            errors += [f"item_id {d.item_id}: {e}" for e in bad]
+            good.pop(d.item_id, None)
+    if kept is not None:
+        kept["decisions"] = good
+        kept["availability_ok"] = not any(e.startswith("availability ") for e in errors)
     if errors:
         return None, errors
     return Plan(_ID_TEXT_RE.sub("", summary).strip(), decisions, windows, suggestions[:4],

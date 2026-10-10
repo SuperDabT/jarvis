@@ -99,7 +99,7 @@ a time of day or a duration the user didn't give, anywhere.
 as one line each; no detailed study plans or task breakdowns.
 - summary: 2-3 sentences on what matters most in the period and why.
 Read other tools only if the brief is missing something you need. If submit_plan returns \
-errors, fix them and call it again with the whole plan.
+errors, the valid decisions are kept: call it again with only the corrections.
 """
 ASK_RULE = """\
 - If one fact you can't look up (usually when the user is free) is essential to the \
@@ -301,6 +301,10 @@ def run_agent(conn: sqlite3.Connection, cfg: Config, question: str,
         if planning_turn and step == max_model_calls - 1:
             last = False          # a plan still needs submit_plan on the last step
             names = ["submit_plan"]
+        elif planning_turn and step == 1:
+            # the brief holds what a plan needs: lookups only on the first call, so
+            # they can't use up the calls a correction needs
+            names = [n for n in names if n not in tools.READ_TOOLS]
         phase("agent_step", step=step + 1, tools=not last)
         if last and step:
             msgs.append({"role": "user", "content": "Answer me now from what the tools "

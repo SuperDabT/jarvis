@@ -45,6 +45,7 @@ class ToolContext:
     scheduling: bool = False               # a schedule goal: an accepted plan is proposed
     user_text: str = ""                    # everything the user said for this goal
     plan: planning.Plan | None = None      # the accepted plan
+    draft: dict[str, Any] = field(default_factory=dict)  # valid parts of refused plans
     calls: list[str] = field(default_factory=list)          # tool names, in order
 
 
@@ -175,9 +176,28 @@ def submit_plan(ctx: ToolContext, decisions: list, summary: str = "",
                 assumptions: list | None = None) -> dict:
     if ctx.brief is None:
         raise ValueError("submit_plan is only for plans and schedules")
-    plan, errors = planning.check_plan(ctx.brief, {
-        "decisions": decisions, "summary": summary, "availability": availability or [],
-        "suggestions": suggestions or [], "assumptions": assumptions or []}, ctx.user_text)
+    # a correction only resends what was wrong: it is merged over what was valid
+    # before (a decision per item_id replaces the kept one), and the whole merged
+    # plan is checked again
+    draft = ctx.draft
+    merged: dict[Any, Any] = dict(draft.get("decisions") or {})
+    for k, d in enumerate(decisions if isinstance(decisions, list) else [decisions]):
+        try:
+            merged[int(d["item_id"])] = d
+        except (TypeError, ValueError, KeyError):
+            merged[f"bad {k}"] = d       # kept so check_plan reports it
+    raw = {"decisions": list(merged.values()),
+           "summary": summary or draft.get("summary", ""),
+           "availability": availability if availability else draft.get("availability") or [],
+           "suggestions": suggestions or draft.get("suggestions") or [],
+           "assumptions": assumptions or draft.get("assumptions") or []}
+    kept: dict[str, Any] = {}
+    plan, errors = planning.check_plan(ctx.brief, raw, ctx.user_text, kept)
+    ctx.draft = {"decisions": kept.get("decisions") or {},
+                 "availability": raw["availability"] if kept.get("availability_ok") else [],
+                 "summary": raw["summary"] if not any(
+                     e.startswith("the summary") for e in errors) else "",
+                 "suggestions": raw["suggestions"], "assumptions": raw["assumptions"]}
     proposal = None
     if plan is not None and ctx.scheduling and (changes := planning.changes_for(ctx.brief,
                                                                                  plan)):
@@ -191,8 +211,13 @@ def submit_plan(ctx: ToolContext, decisions: list, summary: str = "",
             plan = None
     if plan is None:
         ctx.refused = list(errors)
+        ok = sorted(ctx.draft["decisions"])
         return {"accepted": False, "errors": errors,
-                "note": "Fix these and call submit_plan again with the whole plan."}
+                "kept": [f"item_id {i}" for i in ok],
+                "note": ("The kept decisions stand; call submit_plan again with only the "
+                         "corrections (decisions for the items in the errors"
+                         + ("" if ctx.draft["availability"] else ", the availability")
+                         + ", and a summary if it was refused).")}
     ctx.plan, ctx.proposal, ctx.refused = plan, proposal, []
     return {"accepted": True, "saved": False,
             "proposed_changes": [c.describe() for c in proposal.changes] if proposal else []}

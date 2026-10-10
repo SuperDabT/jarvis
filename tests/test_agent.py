@@ -774,3 +774,93 @@ def test_a_personal_item_worded_like_an_issue_is_not_backlog(conn, week):
            "reason": "x"}
     p, errors = actions.build_proposal(conn, [new], NOW, LA)
     assert p is None and "engineering backlog (#31)" in errors[0]
+
+
+# ---------------------------------------------------------------- corrections
+
+
+def test_a_correction_resends_only_what_was_wrong(conn, tmp_path, week):
+    """One bad decision: the rest is kept, the model sends just that item, and the
+    result is the same plan a single valid submission gives."""
+    bad = submit(week, lab={"action": "work_on", "date": "2026-10-14", "reason": "later"})
+    fix = ("submit_plan", {"decisions": [{"item_id": week["lab"].id, "action": "work_on",
+                                          "date": SUN, "reason": "due Tuesday"}]})
+    m = Script([bad], [fix], goal=plan_goal())
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    first = m.results(1)[0]
+    assert first["accepted"] is False
+    assert first["errors"] == [f"item_id {week['lab'].id}: 2026-10-14 for “Lab report” is "
+                               f"outside the period {SAT} to {SUN}; plan inside it or leave "
+                               "the item"]
+    assert len(first["kept"]) == 5 and f"item_id {week['lab'].id}" not in first["kept"]
+    once = Script([submit(week)], goal=plan_goal())
+    assert a.text == run(conn, tmp_path, "Help me organize my weekend", once).text
+
+
+def test_a_missing_item_is_added_on_its_own(conn, tmp_path, week):
+    m = Script([submit(week, gift=None)],
+               [("submit_plan", {"decisions": [{"item_id": week["gift"].id, "action": "leave",
+                                                "reason": "due Thursday; after the weekend"}]})],
+               goal=plan_goal())
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    assert "not decided: item_id" in m.results(1)[0]["errors"][0]
+    assert a.text.startswith("**Jarvis's read**") and len(m.requests) == 2
+
+
+def test_a_bad_reason_drops_only_that_decision(conn, tmp_path, week):
+    m = Script([submit(week, lab={"action": "work_on", "date": SUN,
+                                  "reason": "due Wednesday"})],
+               [("submit_plan", {"decisions": [{"item_id": week["lab"].id, "action": "work_on",
+                                                "date": SUN, "reason": "due Tuesday"}]})],
+               goal=plan_goal())
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    first = m.results(1)[0]
+    assert first["errors"][0].startswith(f"item_id {week['lab'].id}: the reason for")
+    assert len(first["kept"]) == 5
+    assert "Lab report: work on it (suggested day, not saved). due Tuesday" in a.text
+
+
+def test_refused_availability_must_be_resent_and_kept_windows_carry_over(conn, tmp_path,
+                                                                          week):
+    q = "Schedule my weekend; I'm free Saturday 10am to 2pm."
+    good = [{"date": SAT, "start": "10:00", "end": "14:00", "quote": "Saturday 10am to 2pm"}]
+    bad = [{"date": SAT, "start": "10:00", "end": "14:00", "quote": "all weekend"}]
+    sat_only = {"bracket": {"action": "work_on", "date": SAT, "reason": "w"},
+                "lab": {"action": "work_on", "date": SAT, "reason": "w"}}
+    m = Script([submit(week, availability=bad, **sat_only)],
+               [("submit_plan", {"decisions": [], "availability": good})],
+               goal=plan_goal("schedule"))
+    a = run(conn, tmp_path, q, m)
+    assert "the availability" in m.results(1)[0]["note"]
+    assert "Availability you gave**: Sat 10:00 AM–2:00 PM" in a.text
+    m2 = Script([submit(week, availability=good, dog={"action": "work_on", "date": SAT,
+                                                      "time": "16:00", "reason": "x"},
+                        **sat_only)],
+                [("submit_plan", {"decisions": [{"item_id": week["dog"].id,
+                                                 "action": "work_on", "date": SAT,
+                                                 "time": "11:00", "reason": "x"}]})],
+                goal=plan_goal("schedule"))
+    b = run(conn, tmp_path, q, m2)
+    assert "the availability" not in m2.results(1)[0]["note"]          # windows were valid
+    p = actions.Proposal.from_dict(b.action["proposal"])
+    assert [(c.op, c.remind) for c in p.changes] == [("set_remind", f"{SAT}T11:00")]
+
+
+def test_the_brief_names_each_dates_weekday(conn, week):
+    """qwen wrote "due Wednesday" for a Tuesday item: the brief now says Tue."""
+    text = "\n".join(planning.build_brief(conn, NOW.date() + timedelta(days=1),
+                                          NOW.date() + timedelta(days=2), NOW.date()).lines())
+    assert "due Tue 2026-10-13" in text and "due Mon 2026-10-12 09:00" in text
+
+
+def test_lookups_cannot_use_up_the_calls_a_correction_needs(conn, tmp_path, week):
+    """After the first call a plan turn is offered only submit_plan (and ask_user
+    for schedules), so a refused plan always has room to be corrected."""
+    m = Script([("list_items", {})],
+               [submit(week, lab={"action": "work_on", "date": SUN, "reason": "due Wednesday"})],
+               [("submit_plan", {"decisions": [{"item_id": week["lab"].id, "action": "work_on",
+                                                "date": SUN, "reason": "due Tuesday"}]})],
+               goal=plan_goal())
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    assert "list_items" in m.offered(0) and m.offered(1) == ["submit_plan"]
+    assert a.text.startswith("**Jarvis's read**")

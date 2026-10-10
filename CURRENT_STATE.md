@@ -239,7 +239,7 @@ availability quoted from the user, suggestions that aren't tasks). `check_plan` 
 dropped items; work after a deadline; moved deadlines; any time not inside a window the user
 stated, or within an hour of a commitment on record; a window whose quote names another
 weekday; and free text stating a time, a duration, a wrong deadline weekday or a save nobody
-made. The model fixes it. The accepted plan ends the turn and is rendered by code; important
+made. The model fixes it: valid decisions (and valid windows) are kept, so a correction resends only what was wrong, and the merged plan is checked again. After the first call a plan turn is offered only submit_plan (lookups can't use up the calls a correction needs); the brief gives every date with its weekday. The accepted plan ends the turn and is rendered by code; important
 items left without time are listed first ("Needs attention, not fitted"). A schedule's set_due /
 timed work become a proposal. Plans never ask; schedules may ask once per goal, but never what
 the user already said or the brief holds (`planning.question_problem`). Without a valid plan
@@ -257,7 +257,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 972 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 978 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,
