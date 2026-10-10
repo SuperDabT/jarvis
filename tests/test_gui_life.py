@@ -330,3 +330,22 @@ def test_home_reflows_at_the_minimum_size(make, app):
     win.resize(1500, 940)
     app.processEvents()
     assert h.narrow is False
+
+
+def test_chat_capture_answer_prefills_capture_and_saves_nothing(make, app):
+    from jarvis.assistant import capture_answer
+    from jarvis.gui.chat_panel import BotMessage
+
+    win, conn = make()
+    before = len(it.list_items(conn, status="all"))
+    reply = capture_answer("shower the dog tomorrow")
+    win.chat.ask_fn = lambda *a, **kw: reply
+    win.set_chat_open(True)
+    win.chat.ask("Remind me to shower the dog tomorrow")
+    win.chat.wait()
+    bot = win.chat.findChildren(BotMessage)[-1]
+    assert bot.action_btn is not None and "from your data" in bot.meta.text()
+    bot.action_btn.click()
+    app.processEvents()
+    assert win.capture.isVisible() and win.capture.input.text() == "shower the dog tomorrow"
+    assert len(it.list_items(conn, status="all")) == before    # saving is the user's Enter

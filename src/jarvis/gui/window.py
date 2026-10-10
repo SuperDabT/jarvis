@@ -175,7 +175,7 @@ def ref_to_node(ref: str) -> str | None:
     kind, _, rest = ref.partition(":")
     if kind == "commit" and rest:
         return f"commit:{rest[:7]}"
-    if kind in ("card", "check") and rest:
+    if kind in ("card", "check", "item") and rest:
         return f"{kind}:{rest}"
     return None
 
@@ -353,6 +353,7 @@ class MainWindow(QMainWindow):
         # the chat belongs to the shell: it opens beside any workspace
         self.chat = ChatPanel(self.cfg, self.tokens, self._ask_fn, **self._voice_kw)
         self.chat.close_requested.connect(lambda: self.set_chat_open(False))
+        self.chat.capture_requested.connect(self.open_capture)
         self.chat.answered.connect(self._on_answer)
         self.chat.focus_selected.connect(self._show_focus)
         middle.addWidget(self.chat)
@@ -608,9 +609,13 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ quick capture
 
-    def open_capture(self) -> None:
+    def open_capture(self, text: str = "") -> None:
+        """Quick capture; ``text`` prefills it (from a chat answer). Saving is
+        still the user's Enter in the form."""
         self._place_capture()
         self.capture.open()
+        if text:
+            self.capture.input.setText(text)
 
     def _place_capture(self) -> None:
         page = self.centralWidget()

@@ -192,6 +192,23 @@ Performance (498 nodes, 581 edges: GitHub data plus 333 items over 8 projects, t
 build_graph 8 ms, layout 0.6 ms, every node's neighbours 0.1 ms (indexed once per graph),
 window reload 88 ms, paint 14 ms, hover hit test 0.2 ms.
 
+## Ask Jarvis: routing and evidence (`jarvis/intent.py`, `jarvis/assistant.py`, no Qt)
+
+Every chat and voice question is routed first (`escalate.answer_with_escalation`, and the
+plain voice pass): `intent.route` recognises clear requests by sentence structure (agenda,
+capture, planning, project, recall, general), asks the model's schema-constrained classifier
+only for unclear ones, and falls back to "mixed" (the user's items plus the project data).
+Lookups are answered by code with `tier="direct"` and no model: the agenda for a timeframe
+(the user's items dated in it, overdue ones when it starts today, GitHub milestones due in it;
+undated items and the project backlog are counted, never listed as due), capture requests
+(handed to the capture form, which the user confirms; nothing is saved by the chat), and
+recall questions with nothing found. Model answers get only their route's data
+(`assistant.build_routed_context`: YOUR ITEMS, MEMORY, project data) and the routed prompt
+(facts vs suggestions, no deciding for the user). Memory is the existing chat history and
+items, searched by the question's words; the user's own words are labelled apart from
+Jarvis's earlier answers. Selected graph items (focus) keep the project route; `chat.ask`
+without a route is unchanged. Regression cases: `tests/test_intelligence.py`.
+
 ## The real database
 
 The real `~/.local/share/jarvis/jarvis.db` is at version 1 (upgraded on 2026-10-09 during
@@ -202,7 +219,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 880 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 909 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

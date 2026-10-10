@@ -480,7 +480,11 @@ class BotMessage(QWidget):
 
     ``phase`` takes the escalation events (``jarvis.escalate``): a discarded
     first answer fades out and the indicator becomes "Thinking deeper — <why>"
-    with the orb in its "deep" state."""
+    with the orb in its "deep" state. An answer with an ``action`` (a capture
+    request) gets a button for it; the action itself happens elsewhere, where the
+    user confirms it."""
+
+    action_requested = Signal(dict)
 
     def __init__(self, tokens: Tokens, parent: QWidget | None = None):
         super().__init__(parent)
@@ -527,6 +531,7 @@ class BotMessage(QWidget):
         self.chips_box.hide()
         lay.addWidget(self.chips_box)
         self.chip_buttons: list[QPushButton] = []
+        self.action_btn: QPushButton | None = None
         self._timer = QTimer(self, interval=1000)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
@@ -640,13 +645,24 @@ class BotMessage(QWidget):
         else:
             self._set_sources(getattr(answer, "sources", None) or [])
         self.meta.setText(" · ".join(self.meta_bits(answer)))
+        action = getattr(answer, "action", None)
+        if isinstance(action, dict) and action.get("kind") == "capture" and self.action_btn is None:
+            self.action_btn = QPushButton("Review in Capture →")
+            self.action_btn.setObjectName("chip")
+            self.action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.action_btn.setToolTip("Opens the capture form with this text; "
+                                       "press Enter there to save it")
+            self.action_btn.clicked.connect(lambda: self.action_requested.emit(dict(action)))
+            self.layout().addWidget(self.action_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
     def meta_bits(self, answer: Any) -> list[str]:
         """Model, tier, reasoning time and duration for the reply's meta line."""
         bits = []
+        tier = getattr(answer, "tier", None)
+        if tier == "direct":    # answered by code from the stored records, no model
+            bits.append("from your data")
         if getattr(answer, "model", None):
             bits.append(str(answer.model))
-        tier = getattr(answer, "tier", None)
         if tier == "fallback" or self.fallback:
             bits.append("fallback")
         elif (tier == "deep" and getattr(answer, "escalated", False)) or self.deep:
@@ -893,6 +909,7 @@ class ChatPanel(QFrame):
     answered = Signal(object)
     close_requested = Signal()
     focus_selected = Signal(str)   # the context chip was clicked: show that node
+    capture_requested = Signal(str)  # an answer offered to capture this text
     voice_state_changed = Signal(str)
 
     def __init__(self, cfg: Config, tokens: Tokens, ask_fn: AskFn | None = None,
@@ -1179,6 +1196,10 @@ class ChatPanel(QFrame):
         self.settings.setValue(THINK_KEY, on)
         self.settings.sync()
 
+    def _on_action(self, action: dict) -> None:
+        if action.get("kind") == "capture":
+            self.capture_requested.emit(str(action.get("text") or ""))
+
     def focus_input(self) -> None:
         self.composer.edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
@@ -1234,6 +1255,7 @@ class ChatPanel(QFrame):
         self._sync_controls()
         self._add(UserMessage(question))
         bot = BotMessage(self.tokens)
+        bot.action_requested.connect(self._on_action)
         self._current = bot
         self._add(bot)
         self._stick = True
@@ -1561,6 +1583,7 @@ class ChatPanel(QFrame):
         self.empty.hide()
         self._add(UserMessage(text, voice=True, tokens=self.tokens))
         bot = BotMessage(self.tokens)
+        bot.action_requested.connect(self._on_action)
         self._current = bot
         self._add(bot)
         self._stick = True

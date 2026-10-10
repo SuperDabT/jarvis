@@ -74,7 +74,28 @@ _QUESTION_NOISE = frozenset(tokens(
     "things going progress lately yet already been"
 ))
 
-SYSTEM_PROMPT = """\
+# Project-specific answer rules, shared by SYSTEM_PROMPT and the routed prompt
+# (jarvis.assistant) for questions that use the project data.
+PROJECT_RULES_A = """\
+- For a milestone question, start with its due date, days left and closed count exactly \
+as the milestone line gives them.
+- Refer to issues as #N with a few words of the title, and to commits by their \
+7-character sha. Never write the square-bracket references in the answer itself; they \
+belong only on the SOURCES line.
+- For "recently" or "in the last N days" questions, use the "N days ago" labels in the \
+CONTEXT to pick items, and the precomputed counts. Summarize the work by theme in plain \
+words, one item per theme with its dates and one or two example shas, for example \
+"Started the track.c tracker (Sep 30 to Oct 5, e.g. e9256c6)". Do not list every commit.
+- For "which issues are about X": list the issues tagged "keyword hit" whose title \
+or body is about X (the tag is a hint for you; do not copy it). Any other issue you think is related gets "may be related" and the \
+reason from its title.
+"""
+PROJECT_RULES_B = """\
+- Electrical results come from hardware.yaml values (mostly datasheet or seller figures, \
+not measurements); say so when you answer about them.
+"""
+
+SYSTEM_PROMPT = ("""\
 You are Jarvis, a local assistant. The owner of an embedded project asks you questions \
 about their own project. You answer from the CONTEXT block in their message: their synced \
 GitHub data (issues, milestones, commits), facts computed by a program, and electrical \
@@ -97,28 +118,16 @@ counts and dates exactly as the CONTEXT gives them. Every count you need is alre
 the CONTEXT (the "counts:" part of each milestone line, the section totals): quote counts \
 from the CONTEXT; never compute them. Do not write "plus N more", "N others" or "the \
 remaining N" unless that exact count is in the CONTEXT; name the items instead.
-- For a milestone question, start with its due date, days left and closed count exactly \
-as the milestone line gives them.
-- Refer to issues as #N with a few words of the title, and to commits by their \
-7-character sha. Never write the square-bracket references in the answer itself; they \
-belong only on the SOURCES line.
-- For "recently" or "in the last N days" questions, use the "N days ago" labels in the \
-CONTEXT to pick items, and the precomputed counts. Summarize the work by theme in plain \
-words, one item per theme with its dates and one or two example shas, for example \
-"Started the track.c tracker (Sep 30 to Oct 5, e.g. e9256c6)". Do not list every commit.
-- For "which issues are about X": list the issues tagged "keyword hit" whose title \
-or body is about X (the tag is a hint for you; do not copy it). Any other issue you think is related gets "may be related" and the \
-reason from its title.
-- For questions about what to do, work on, focus on, plan or prioritize: answer from \
+"""
+    + PROJECT_RULES_A + """- For questions about what to do, work on, focus on, plan or prioritize: answer from \
 SUGGESTED NEXT STEPS, in its order, starting with step 1; summarize steps rather than \
 copying them, keep their hedges ("may already be done"), and say it is Jarvis's \
 suggestion from the data, not a schedule. Do not invent tasks, dates or time estimates.
-- Electrical results come from hardware.yaml values (mostly datasheet or seller figures, \
-not measurements); say so when you answer about them.
-- End with one last line: "SOURCES: " then the references you used, without brackets, \
+"""
+    + PROJECT_RULES_B + """- End with one last line: "SOURCES: " then the references you used, without brackets, \
 separated by commas, for example: SOURCES: #31, commit:02fb2d2, milestone:Core demo, \
 check:rail_budget:5V, fact:activity
-"""
+""")
 
 # Appended to SYSTEM_PROMPT for brevity="voice": the answer is read aloud.
 VOICE_RULES = """
@@ -133,6 +142,8 @@ steps, with at most 2 issue numbers in the whole answer.
 - Keep hedges for uncertain items ("may already be done").
 - Still end with the SOURCES line as described above; it is not spoken.
 """
+
+GENERAL_NOTE = "General knowledge from the local model, not from your data."
 
 UNREACHABLE = ("The local model isn't reachable (Ollama at {url}). "
                "Try again once it's running.")
@@ -208,10 +219,16 @@ class Answer:
     claim_errors: list[str] = field(default_factory=list)
     # Escalation (see jarvis.escalate): which tier produced this answer, whether a
     # fast answer was judged weak and replaced, why, and how long the model reasoned.
-    tier: str = "fast"                     # "fast" | "deep" | "fallback"
+    tier: str = "fast"                     # "fast" | "deep" | "fallback" | "direct" (code)
     escalated: bool = False
     escalation_reasons: list[str] = field(default_factory=list)
     thinking_s: float | None = None
+    # Routing (jarvis.intent): what the question was taken to ask, and how that was
+    # decided ("rules" / "model" / "fallback"); an action for the UI to offer, e.g.
+    # {"kind": "capture", "text": ...} (the user confirms it there).
+    intent: str = ""
+    route_by: str = ""
+    action: dict[str, Any] | None = None
 
     @property
     def display_text(self) -> str:
@@ -1212,8 +1229,9 @@ Brevity = Literal["text", "voice"]
 
 
 def build_messages(ctx: Context, question: str, history: Sequence[tuple[str, str]],
-                   brevity: Brevity = "text") -> list[dict[str, str]]:
-    system = SYSTEM_PROMPT + VOICE_RULES if brevity == "voice" else SYSTEM_PROMPT
+                   brevity: Brevity = "text", system: str | None = None) -> list[dict[str, str]]:
+    system = system or SYSTEM_PROMPT
+    system = system + VOICE_RULES if brevity == "voice" else system
     if ctx.stable_chars:
         # Stable data in the system message, before the history: the prompt prefix
         # stays byte-identical across questions and turns (Ollama reuses its cache).
@@ -1237,7 +1255,7 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
         stable_prefix: bool = False, think: bool | None = None, focus: Sequence[str] = (),
         on_thinking: Callable[[str], None] | None = None,
         max_thinking_s: float | None = None,
-        ctx_out: list[Context] | None = None) -> Answer:
+        ctx_out: list[Context] | None = None, route: Any = None) -> Answer:
     """Answer one question from the synced data. Never raises for model failures.
 
     ``history`` is the earlier (role, content) messages of this conversation (only
@@ -1256,6 +1274,8 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
     chunks and ``answer.thinking_s`` how long it took; ``max_thinking_s`` caps the
     reasoning (the answer then has ``error`` set to the budget message). ``ctx_out`` (a list) receives
     the Context used, for callers that check the answer further (jarvis.escalate).
+    ``route`` (an intent.Route): only the data that route needs, with its prompt
+    (jarvis.assistant); None keeps the project context and prompt.
     """
     t0 = time.monotonic()
     question = question.strip()
@@ -1267,13 +1287,23 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
     try:
         if session_id:
             save_message(conn, session_id, "user", question)
-        ctx = build_context(conn, cfg, question, now, history=history,
-                            embedder=client if use_embeddings else None,
-                            budget_tokens=budget_tokens, stable_prefix=stable_prefix,
-                            focus=focus)
+        system = None
+        if route is not None:
+            from jarvis import assistant
+
+            ctx = assistant.build_routed_context(
+                conn, cfg, question, now, route, history=history,
+                embedder=client if use_embeddings else None, budget_tokens=budget_tokens,
+                stable_prefix=stable_prefix, focus=focus)
+            system = assistant.system_prompt(route)
+        else:
+            ctx = build_context(conn, cfg, question, now, history=history,
+                                embedder=client if use_embeddings else None,
+                                budget_tokens=budget_tokens, stable_prefix=stable_prefix,
+                                focus=focus)
         if ctx_out is not None:
             ctx_out.append(ctx)
-        messages = build_messages(ctx, question, history, brevity)
+        messages = build_messages(ctx, question, history, brevity, system)
         stream_kw: dict[str, Any] = {}
         if think is not None:
             stream_kw["think"] = think
@@ -1308,6 +1338,11 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
                           duration=time.monotonic() - t0, first_token_s=first, error=error,
                           context_tokens=ctx.tokens, thinking_s=thinking_s)
         ans = validate_answer(raw, ctx, question, history)
+        if route is not None:
+            ans.intent, ans.route_by = route.intent, route.by
+            if route.intent == "general":   # not from the user's data: say so, don't check it
+                ans.unverified_numbers, ans.notes = [], [GENERAL_NOTE]
+                ans.sources, ans.cited_sources, ans.cited_more_count = [], [], 0
         if error is not None:
             ans.notes.append(f"Note: the answer was cut off ({error}).")
             ans.error = error

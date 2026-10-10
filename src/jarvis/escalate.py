@@ -54,10 +54,10 @@ import sqlite3
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from jarvis import chat
+from jarvis import assistant, chat, intent
 from jarvis.chat import Answer, Brevity, Context
 from jarvis.config import Config
 from jarvis.facts import NextStep, compute_next_steps
@@ -173,7 +173,8 @@ def weak_answer(question: str, answer: Answer, next_step_refs: set[str] | frozen
         # a milestone alone says nothing about which step: only issues, commits,
         # cards, checks and the next-steps fact itself count
         specific = {r for r in next_step_refs if not r.startswith("milestone:")}
-        if not used & specific:
+        # the user's own items are options too (routed planning questions list them)
+        if not used & specific and not any(r.startswith("item:") for r in used):
             reasons.append("planning_without_next_steps")
     return bool(reasons), reasons
 
@@ -224,7 +225,8 @@ def answer_with_escalation(
         now: datetime | None = None, fast_budget: int = chat.CONTEXT_TOKEN_BUDGET,
         deep_budget: int = chat.CONTEXT_TOKEN_BUDGET, stable_prefix: bool = False,
         use_embeddings: bool = False, think_budget_s: float | None = None,
-        deep_think: bool = True, focus: Sequence[str] = ()) -> Answer:
+        deep_think: bool = True, focus: Sequence[str] = (), route: Any = None,
+        route_client: Any = None) -> Answer:
     """Answer ``question`` on the fast tier, escalating to the reasoning model when
     needed (see the module docstring). Never raises for model failures.
 
@@ -240,11 +242,35 @@ def answer_with_escalation(
     model answers again without reasoning. ``deep_think=False``: the deep pass
     runs without reasoning (no "thinking" / "answering" / "thinking_cut" events,
     ``thinking_s`` None); the voice auto mode uses this.
+
+    First the question is routed (``intent.route``; ``route`` overrides it;
+    unclear questions are classified by ``route_client``, default the fast
+    client, else the deep one).
+    Lookups code can answer (an agenda, a capture request, a recall with nothing
+    found) return at once with ``tier="direct"``; the rest go to the model with
+    only the data their route needs (``assistant.build_routed_context``).
+    A selected graph item (``focus``) keeps the project route.
     """
     t0 = time.monotonic()
     question = question.strip()
     history = chat.trim_history(history)
-    qclass = classify_question(question)
+    local = now if now is not None and now.tzinfo else (now or datetime.now(UTC)).astimezone()
+    if route is None:
+        if route_client is None:
+            route_client = fast_client if fast_client is not None else deep_client
+        route = (intent.Route("project", by="focus") if focus
+                 else intent.route(question, local, conn, route_client))
+    qclass: QuestionClass = ("planning" if route.intent == "planning"
+                             else "out_of_scope" if route.intent == "general" else "project")
+    direct = _direct_answer(conn, question, local, route)
+    if direct is not None:
+        if session_id:
+            chat.save_message(conn, session_id, "user", question)
+        direct.intent, direct.route_by = route.intent, route.by
+        if on_token:
+            on_token(direct.text)
+        return _finish(conn, session_id, direct, t0, None,
+                       lambda name, **info: on_phase(name, info) if on_phase else None)
     own_deep = deep_client is None
     if deep_client is None:
         deep_client = make_deep_client(cfg)
@@ -280,7 +306,7 @@ def answer_with_escalation(
                        stable_prefix=stable_prefix, think=think,
                        on_thinking=on_thinking if think else None,
                        max_thinking_s=think_budget_s if think else None, ctx_out=ctxs,
-                       focus=focus)
+                       focus=focus, route=route)
         ans.tier = tier
         if think and ans.thinking_s is None and think_t:
             ans.thinking_s = time.monotonic() - think_t[0]
@@ -311,6 +337,7 @@ def answer_with_escalation(
                 # a decline cites nothing, whatever its SOURCES line lists
                 fast.cited_sources, fast.cited_more_count = [], 0
             if not weak:
+                fast.intent, fast.route_by = route.intent, route.by
                 return _finish(conn, session_id, fast, t0, fast_start, phase)
             phase("escalating", reasons=list(reasons), spoken=False)
             phase("discard_fast")
@@ -340,12 +367,24 @@ def answer_with_escalation(
                 ctx = deep_ctx or fast_ctx
                 steps = ctx.next_steps if ctx else compute_next_steps(conn, now)
                 prefix = deep.text if deep.error and deep.text else None
+                if not route.project_data:
+                    steps = []
+                week = (assistant.build_agenda(conn, local.date(),
+                                               local.date() + timedelta(days=7),
+                                               "in the next 7 days", local)
+                        if route.personal else None)
+                if week is not None and (week.due or week.overdue):
+                    # the user's own dated items come first, as options
+                    mine = assistant.agenda_answer(week).text
+                    head = prefix or "I couldn't get a reliable answer to that."
+                    prefix = f"{head}\n{mine}"
                 final = fallback_answer(steps, ctx, brevity, prefix=prefix)
                 final.model = deep.model
                 final.error = deep.error
                 final.thinking_s = deep.thinking_s
                 final.first_token_s = None
                 final_start = None
+        final.intent, final.route_by = route.intent, route.by
         final.escalated = True
         final.escalation_reasons = list(reasons)
         if final is not deep and final.thinking_s is None:
@@ -354,6 +393,19 @@ def answer_with_escalation(
     finally:
         if own_deep:
             deep_client.close()
+
+
+def _direct_answer(conn: sqlite3.Connection, question: str, now: datetime,
+                   route: Any) -> Answer | None:
+    """The answer code gives without a model, or None (the model answers)."""
+    if route.intent == "agenda":
+        return assistant.agenda_answer(assistant.build_agenda(
+            conn, route.start, route.end, route.span, now, project=route.project))
+    if route.intent == "capture":
+        return assistant.capture_answer(route.capture_text)
+    if route.intent == "recall" and not assistant.search_memory(conn, question, now):
+        return assistant.recall_gap_answer(question)
+    return None
 
 
 def _finish(conn: sqlite3.Connection, session_id: str | None, ans: Answer, t0: float,

@@ -27,7 +27,7 @@ import time
 import wave
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import httpx
@@ -858,6 +858,19 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
             on_token(t)
         speak(splitter.feed(t))
 
+    from jarvis import escalate, intent
+
+    local = now if now is not None and now.tzinfo else (now or datetime.now(UTC)).astimezone()
+    route = intent.route(question, local, conn)
+    direct = escalate._direct_answer(conn, question, local, route)
+    if direct is not None:          # a lookup code answers (agenda, capture, nothing recalled)
+        direct.intent, direct.route_by = route.intent, route.by
+        if session_id:
+            chat.save_message(conn, session_id, "user", question.strip())
+            chat.save_message(conn, session_id, "assistant", direct.text, {"tier": "direct"})
+        token(direct.text)
+        speak(splitter.flush())
+        return direct
     own = client is None
     if client is None:
         client = voice_client(cfg)
@@ -865,7 +878,7 @@ def voice_answer(conn: sqlite3.Connection, cfg: Config, question: str,
         ans = chat.ask(conn, cfg, question, history, client, on_token=token, now=now,
                        session_id=session_id, brevity="voice",
                        budget_tokens=budget_tokens or VOICE_CONTEXT_TOKEN_BUDGET,
-                       stable_prefix=stable_prefix)
+                       stable_prefix=stable_prefix, route=route)
     finally:
         if own:
             client.close()
