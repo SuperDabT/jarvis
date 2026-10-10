@@ -21,8 +21,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QGuiApplication,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -42,7 +48,7 @@ from jarvis import db
 from jarvis.config import Config
 from jarvis.gui import motion, theme
 from jarvis.gui.brain import BrainGraph
-from jarvis.gui.brain_data import FILTER_KINDS, BrainData, ago, load_brain, _parse
+from jarvis.gui.brain_data import FILTER_KINDS, BrainData, _parse, ago, load_brain
 from jarvis.gui.capture_overlay import WIDTH as CAPTURE_W
 from jarvis.gui.capture_overlay import CaptureFn, CaptureOverlay, PlainFn
 from jarvis.gui.chat_panel import PANEL_WIDTH, AskFn, ChatPanel
@@ -58,10 +64,24 @@ from jarvis.gui.cockpit import (
     pill,
     set_pill,
 )
-from jarvis.gui.data import WindowData, describe_error, load_window_data, local_stamp, refresh_message
+from jarvis.gui.data import (
+    WindowData,
+    describe_error,
+    load_window_data,
+    local_stamp,
+    refresh_message,
+)
+from jarvis.gui.finding_view import load_finding
 from jarvis.gui.home_data import build_home
 from jarvis.gui.home_view import HomeView
-from jarvis.gui.shell import RAIL_COMPACT, RAIL_WIDE, WIDE_FROM, WORKSPACES, NavRail, PlaceholderPage
+from jarvis.gui.shell import (
+    RAIL_COMPACT,
+    RAIL_WIDE,
+    WIDE_FROM,
+    WORKSPACES,
+    NavRail,
+    PlaceholderPage,
+)
 from jarvis.gui.tasks_view import TasksView
 from jarvis.gui.widgets import ICON_SIZE, PulseDot, _label, refresh_icon, repolish
 from jarvis.lock import RefreshBusy, refresh_lock
@@ -219,6 +239,7 @@ class MainWindow(QMainWindow):
         self._voice_kw = dict(voice or {})
         self._capture_fns = (capture_fn, plain_capture_fn)
         self._now_fn = clock or (lambda: datetime.now().astimezone())
+        self.open_url: Callable[[QUrl], Any] = QDesktopServices.openUrl   # tests swap it
         self._status_sticky = False
 
         self.setWindowTitle(f"Jarvis · {self.cfg.repo.split('/')[-1]}")
@@ -377,10 +398,13 @@ class MainWindow(QMainWindow):
         self.inspector.open_node.connect(self.select_node)
         self.inspector.open_item.connect(self.open_item)
         self.inspector.complete_item.connect(self.complete_item)
-        rl.addWidget(self.inspector)
+        self.inspector.explain.connect(self.explain_finding)
+        self.inspector.open_source.connect(lambda url: self.open_url(QUrl(url)))
+        self.inspector.copy_prompt.connect(self._copy_finding_prompt)
+        rl.addWidget(self.inspector, 3)
         self.stream = StreamPanel()
         self.stream.open_node.connect(self.select_node)
-        rl.addWidget(self.stream, 1)
+        rl.addWidget(self.stream, 2)
         body.addWidget(self.right)
 
         lay.addLayout(body, 1)
@@ -672,7 +696,29 @@ class MainWindow(QMainWindow):
                 card = cards_mod.get_card(self.conn, node.card_id)
             except sqlite3.Error:
                 card = None
-        self.inspector.show_node(node, g, card, locked)
+        finding = None
+        check_id = (node.id[6:] if node is not None and node.kind == "check"
+                    else card.check_id if card is not None else None)
+        if check_id:
+            try:
+                finding = load_finding(self.conn, self.cfg, check_id)
+            except (sqlite3.Error, OSError, ValueError):
+                finding = None   # the inspector still shows the node
+        self.inspector.show_node(node, g, card, locked, finding=finding)
+
+    # ------------------------------------------------------------ finding actions
+
+    def explain_finding(self, question: str) -> None:
+        """Explain: the chat answers it from the synced data (as a typed question)."""
+        self.set_chat_open(True, focus=False)
+        if self.chat.turn_busy:
+            self.set_status("Jarvis is still answering; ask again when it's done.", "warn")
+            return
+        self.chat.ask(question)
+
+    def _copy_finding_prompt(self, prompt: str) -> None:
+        QGuiApplication.clipboard().setText(prompt)
+        self.set_status("Copied a fix prompt for Claude. Nothing was changed.", "ok")
 
     # ------------------------------------------------------------ data
 

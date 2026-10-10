@@ -83,6 +83,15 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   pulse / power, graph + briefing, inspector + stream). Its widgets are still attributes of
   the window (`win.graph`, `win.hud`, `win.inspector`, ...). Picking a graph reference from
   anywhere switches to Projects.
+- The inspector shows a summary first (what it is, what needs attention, the 3 most relevant
+  links, problems first) and folds the rest under "details". An electrical check, or a card
+  about one, gets `gui/finding_view.py`: the verified result (Python's text), the next step
+  (fixed rules, marked "suggested, not verified"), the source file, field and line in
+  hardware.yaml (only when found), what the check means, and the model's wording only when it
+  rewrote it (marked "AI · not verified"). Actions: explain (asks the chat), open source (the
+  local file, or the repo copy's line on GitHub), copy fix prompt. Jarvis edits no files, so
+  there is no "apply fix": the view says where to change the value and that Refresh reruns
+  the checks.
 - The chat is at shell level: Ctrl+K / Ctrl+J / Ctrl+Space work in every workspace; in
   Projects it still takes the inspector column. Esc order: capture, voice, graph lock, chat.
 - With the chat open every workspace fits in what is left (524 px at the 980 px minimum, so
@@ -149,7 +158,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 791 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 810 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

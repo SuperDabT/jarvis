@@ -5,10 +5,11 @@ Mono for labels and numbers, Inter for anything to read. Lower-case labels.
 """
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 from html import escape
 
-from PySide6.QtCore import QUrl, Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QFrame,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -26,12 +28,30 @@ from PySide6.QtWidgets import (
 from jarvis.cards import FEEDBACK_REASONS, Card
 from jarvis.gui import motion, theme
 from jarvis.gui.brain import MilestoneMini, PulseBars, RailMini
-from jarvis.gui.brain_data import EDGE_LABELS, Graph, Node, Pulse, StreamItem, Vital, ago
+from jarvis.gui.brain_data import (
+    EDGE_LABELS,
+    Graph,
+    Node,
+    Pulse,
+    StreamItem,
+    Vital,
+    ago,
+)
+from jarvis.gui.chat_panel import FlowLayout
 from jarvis.gui.data import BriefingView, Kpi, RailPower, Timeline, fmt_num
+from jarvis.gui.finding_view import FindingView
 from jarvis.gui.theme import Tokens
 from jarvis.gui.widgets import SentenceRow, _clear, _label, repolish, set_font
 
 COPY_LABEL = "copy prompt"
+# The inspector's summary: this much text and this many relationships, problems
+# first; the rest (up to DETAIL_LINKS) is under "details".
+SUMMARY_CHARS = 220
+SUMMARY_LINKS = 3
+DETAIL_LINKS = 12
+ATTENTION_RANK = {"fail": 0, "overdue": 0, "warn": 1, "unknown": 2, "active": 3}
+ATTENTION_WORDS = {"fail": "fail", "overdue": "overdue", "warn": "warn", "unknown": "unsure",
+                   "active": "suggestion"}
 FEEDBACK_LABELS = {"vague": "Too vague", "wrong": "Wrong", "repeat": "Already knew",
                    "other": "Other"}
 KIND_NAMES = {"core": "project", "hub": "hub", "milestone": "milestone", "issue": "issue",
@@ -292,6 +312,9 @@ class Inspector(Panel):
     open_node = Signal(str)            # a neighbour was clicked
     open_item = Signal(int)            # "edit in Tasks" on an item
     complete_item = Signal(int)        # "done" on an item
+    explain = Signal(str)              # a question for the chat about a finding
+    open_source = Signal(str)          # a finding's source (file:// or GitHub URL)
+    copy_prompt = Signal(str)          # a finding's prompt for Claude
 
     FLASH_MS = 1400
     HINT = ("hover a node to inspect it · click to lock the selection · "
@@ -300,20 +323,42 @@ class Inspector(Panel):
     def __init__(self, tokens: Tokens, parent: QWidget | None = None):
         super().__init__("inspector", parent=parent)
         self.tokens = tokens
+        # The body scrolls: a finding's explanation, source and next step can be
+        # taller than the column, and squeezed wrapped text would be cut off.
+        lay = self.layout()
+        lay.removeItem(self.body)
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("inspScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setSizeAdjustPolicy(QScrollArea.SizeAdjustPolicy.AdjustToContents)
+        holder = QWidget()
+        holder.setObjectName("inspBody")
+        self.body = QVBoxLayout(holder)
+        self.body.setContentsMargins(0, 0, 4, 0)
+        self.body.setSpacing(6)
+        self.scroll.setWidget(holder)
+        lay.addWidget(self.scroll, 1)
         self.node: Node | None = None
         self.card: Card | None = None
         self.locked_id: str | None = None
         self._flash = QTimer(self, singleShot=True, interval=self.FLASH_MS)
         self._flash.timeout.connect(self._unflash)
         self.copy_btn: QPushButton | None = None
+        self.finding: FindingView | None = None
         self.show_node(None)
 
     def show_node(self, node: Node | None, graph: Graph | None = None,
                   card: Card | None = None, locked: bool = False,
-                  now: datetime | None = None) -> None:
-        self.node, self.card = node, card
+                  now: datetime | None = None, finding: FindingView | None = None) -> None:
+        """Summary first: what it is, what needs attention, a few relationships;
+        everything else under "details". A finding (a check, or a card about one)
+        gets its explanation, source and next step, with the actions."""
+        self.node, self.card, self.finding = node, card, finding
         _clear(self.body)
         self.copy_btn = None
+        self.details_btn = None
         self.hint.setText("locked · esc to release" if node and locked else "")
         if node is None:
             self.body.addWidget(mono(_label(self.HINT, "vNote"), 11))
@@ -328,10 +373,35 @@ class Inspector(Panel):
         title = _label(node.title, "inspTitle", wrap=True)
         title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.body.addWidget(title)
-        if node.detail:
-            d = _label(node.detail, "inspText", wrap=True)
-            d.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            self.body.addWidget(d)
+        details: list[QWidget] = []
+        detail = (node.detail or "").strip()
+        if finding is not None:
+            self._finding_section(finding, fix_prompt=card is None)  # a card has its own
+            if detail and detail != finding.why:
+                details.append(self._text(detail))
+        elif detail:
+            short = detail if len(detail) <= SUMMARY_CHARS else \
+                detail[:SUMMARY_CHARS].rsplit(" ", 1)[0].rstrip(" ,.;") + "…"
+            self.body.addWidget(self._text(short))
+            if short != detail:
+                details.append(self._text(detail))
+        links = graph.neighbours(node.id) if graph is not None else []
+        links = sorted(links, key=lambda eo: (ATTENTION_RANK.get(eo[1].status or "", 9),))
+        attention = Counter(o.status for _, o in links if o.status in ATTENTION_RANK)
+        if attention and node.kind in ("hub", "part", "core"):
+            words = " · ".join(f"{n} {ATTENTION_WORDS.get(st, st)}"
+                               for st, n in sorted(attention.items(),
+                                                   key=lambda kv: ATTENTION_RANK[kv[0]]))
+            self.attention = mono(_label(f"needs attention · {words}", "inspAttention"), 10, 500)
+            self.body.addWidget(self.attention)
+        if links:
+            self.body.addWidget(mono(_label(f"links · {len(links)}", "panelHead"), 10, 500))
+            for edge, other in links[:SUMMARY_LINKS]:
+                self.body.addWidget(self._link(edge, other))
+            for edge, other in links[SUMMARY_LINKS:DETAIL_LINKS]:
+                details.append(self._link(edge, other))
+            if len(links) > DETAIL_LINKS:
+                details.append(mono(_label(f"+{len(links) - DETAIL_LINKS} more", "vNote"), 10))
         meta = []
         from jarvis.gui.brain_data import _parse
 
@@ -344,28 +414,114 @@ class Inspector(Panel):
             m = mono(_label(" · ".join(meta), "vKey", rich=True), 10)
             m.setOpenExternalLinks(True)
             self.body.addWidget(m)
-        if graph is not None:
-            links = graph.neighbours(node.id)
-            if links:
-                self.body.addWidget(mono(_label(f"links · {len(links)}", "panelHead"), 10, 500))
-                for edge, other in links[:8]:
-                    name = other.label if other.kind in ("issue", "milestone", "commit", "hub",
-                                                         "core", "part") else other.title
-                    if len(name) > 38:
-                        name = name[:37].rstrip() + "…"
-                    b = QPushButton(f"{EDGE_LABELS.get(edge.kind, edge.kind)} → {name}")
-                    b.setObjectName("filter")
-                    b.setToolTip(other.title)
-                    b.setCursor(Qt.CursorShape.PointingHandCursor)
-                    b.clicked.connect(lambda _=False, i=other.id: self.open_node.emit(i))
-                    b.setStyleSheet("text-align: left;")
-                    self.body.addWidget(b)
-                if len(links) > 8:
-                    self.body.addWidget(mono(_label(f"+{len(links) - 8} more", "vNote"), 10))
         if card is not None:
-            self._card_actions(card)
+            self._card_actions(card, details)
         if node.kind == "item" and node.item_id is not None:
             self._item_actions(node.item_id)
+        if details:
+            self._details(details)
+        self.body.addStretch(1)
+
+    def _text(self, text: str) -> QLabel:
+        d = _label(text, "inspText", wrap=True)
+        d.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        return d
+
+    def _link(self, edge, other: Node) -> QPushButton:
+        name = other.label if other.kind in ("issue", "milestone", "commit", "hub",
+                                             "core", "part") else other.title
+        if len(name) > 38:
+            name = name[:37].rstrip() + "…"
+        mark = f" · {ATTENTION_WORDS[other.status]}" if other.status in ATTENTION_RANK else ""
+        b = QPushButton(f"{EDGE_LABELS.get(edge.kind, edge.kind)} → {name}" + mark)
+        b.setObjectName("filter")
+        b.setToolTip(other.title)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.clicked.connect(lambda _=False, i=other.id: self.open_node.emit(i))
+        b.setStyleSheet("text-align: left;")
+        # never wider than the column (the tooltip has the full name)
+        b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        return b
+
+    def _details(self, widgets: list[QWidget]) -> None:
+        """The rest, folded away: more relationships, full text, the raw prompt."""
+        self.details_btn = QPushButton("details ▸")
+        self.details_btn.setObjectName("linkBtn")
+        self.details_btn.setCheckable(True)
+        self.details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.details = QWidget()
+        lay = QVBoxLayout(self.details)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        for w in widgets:
+            lay.addWidget(w)
+        self.details.hide()
+
+        def toggle(on: bool) -> None:
+            self.details.setVisible(on)
+            self.details_btn.setText("details ▾" if on else "details ▸")
+
+        self.details_btn.toggled.connect(toggle)
+        self.body.addWidget(self.details_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        self.body.addWidget(self.details)
+
+    def _section(self, head: str, text: str, name: str = "inspText") -> QLabel:
+        self.body.addWidget(mono(_label(head, "panelHead"), 10, 500))
+        lb = _label(text, name, wrap=True)
+        lb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lb.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # paths
+        self.body.addWidget(lb)
+        return lb
+
+    def _finding_section(self, f: FindingView, fix_prompt: bool = True) -> None:
+        """The verified result, the next step and the actions first; then where it
+        comes from, what the check means, and the AI's wording (marked)."""
+        self.verified = self._section(f"verified · {f.status_words} · from hardware.yaml", f.why)
+        self.next_text = self._section("next step · suggested, not verified", f.next_step)
+        src = f.source
+        actions = QWidget()
+        row = FlowLayout(actions, 6)      # wraps in a narrow column
+        self.explain_btn = QPushButton("explain")
+        self.explain_btn.setObjectName("primary")
+        self.explain_btn.setToolTip("Ask Jarvis in the chat (answers from the synced data)")
+        self.explain_btn.clicked.connect(lambda: self.explain.emit(f.explain_question))
+        self.source_btn = QPushButton("open source")
+        if src is not None and src.url:
+            self.source_btn.setToolTip(src.url)
+            self.source_btn.clicked.connect(lambda: self.open_source.emit(src.url))
+        else:
+            self.source_btn.setEnabled(False)
+            self.source_btn.setToolTip("No hardware.yaml found to open")
+        self.fix_btn = None
+        buttons = [self.explain_btn, self.source_btn]
+        if fix_prompt:
+            self.fix_btn = QPushButton("copy fix prompt")
+            self.fix_btn.setToolTip("Put a prompt for Claude on the clipboard: the finding with "
+                                    "its numbers, asking how to fix it. Nothing is changed here.")
+            self.fix_btn.clicked.connect(lambda: self.copy_prompt.emit(f.prompt))
+            buttons.append(self.fix_btn)
+        for b in buttons:
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            row.addWidget(b)
+        self.body.addSpacing(2)
+        self.body.addWidget(actions)
+        if src is not None:
+            where = src.label
+            if src.field:
+                where += f"\nfield {src.field}"
+                if src.line:
+                    where += f" · line {src.line}" + ("" if src.present else
+                                                      " (not written yet: add it there)")
+                else:
+                    where += " · not found in the file"
+            self.source_text = self._section("source", where, "inspSource")
+            self.edit_note = mono(_label(src.edit_note, "vNote", wrap=True), 10)
+            self.body.addWidget(self.edit_note)
+        if f.explain:
+            self.explained = self._section("what it checks", f.explain + " " + f.matters)
+        if f.ai_why:
+            self.ai_text = self._section(f"AI summary · {f.ai_model or 'model'} · not verified",
+                                         f.ai_why, "inspAi")
 
     def _item_actions(self, item_id: int) -> None:
         row = QHBoxLayout()
@@ -384,7 +540,7 @@ class Inspector(Panel):
         self.body.addSpacing(4)
         self.body.addLayout(row)
 
-    def _card_actions(self, card: Card) -> None:
+    def _card_actions(self, card: Card, details: list[QWidget]) -> None:
         row = QHBoxLayout()
         row.setSpacing(6)
         self.copy_btn = QPushButton(COPY_LABEL)
@@ -422,7 +578,7 @@ class Inspector(Panel):
         f.setPixelSize(11)
         self.prompt.setFont(f)
         self.prompt.setFixedHeight(150)
-        self.body.addWidget(self.prompt)
+        details.append(self.prompt)
 
     def _copy(self) -> None:
         if self.card is None or self.copy_btn is None:

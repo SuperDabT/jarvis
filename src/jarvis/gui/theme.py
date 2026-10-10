@@ -298,6 +298,9 @@ QToolTip {{
 #inspTitle {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
 #inspText {{ color: {t.muted}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
 #inspKind {{ color: {t.signal}; }}
+#inspAi {{ color: {t.faint}; font-family: {sans}; font-size: 12px; font-style: italic; }}
+#inspSource {{ color: {t.text}; font-family: {mono}; font-size: 11px; }}
+#inspAttention {{ color: {t.unsure}; }}
 #promptBox {{
     background: {t.inset}; color: {t.muted}; border: 1px solid {t.border};
     border-radius: 8px; padding: 8px 10px; font-size: 11px;
