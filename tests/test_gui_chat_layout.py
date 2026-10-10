@@ -25,10 +25,11 @@ from test_gui_window import _offscreen_ok  # noqa: E402
 if not _offscreen_ok():
     pytest.skip("PySide6 cannot start on the offscreen platform", allow_module_level=True)
 
-from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QScrollArea  # noqa: E402
+from test_graph_items import big  # noqa: E402
 from test_gui_data import seed  # noqa: E402
 from test_gui_think import _settings  # noqa: E402
 from test_gui_voice import pump  # noqa: E402
@@ -330,3 +331,66 @@ def test_wheel_over_a_reply_scrolls_the_conversation(make):
     QApplication.sendEvent(body.viewport(), ev)
     QApplication.processEvents()
     assert bar.value() < before
+
+
+# ---------------------------------------------------------------- composer
+
+
+class _Tally(QObject):
+    def __init__(self):
+        super().__init__()
+        self.shows = 0
+
+    def eventFilter(self, obj, e):  # noqa: N802 - Qt API
+        if e.type() == QEvent.Type.Show:
+            self.shows += 1
+        return False
+
+
+def test_typing_past_line_ends_settles_with_a_large_graph(app, tmp_path):
+    """The composer's scrollbar used to show and hide in a loop at the end of each
+    line ("as needed": showing it re-wraps the text), compounding with every key
+    until the window froze; Projects with a ~180-node graph and the chat open."""
+    cfg = _cfg(tmp_path)
+    conn = db.connect(cfg.db_path)
+    seed(conn, n_cards=2)
+    big(conn, n_items=20)
+    conn.commit()
+    win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects",
+                     chat_open=True, voice={"settings": _settings(tmp_path), "mic_ok": False})
+    win.resize(1500, 940)
+    win.show()
+    QApplication.processEvents()
+    try:
+        assert len(win.graph.graph.nodes) > 150
+        reloads = []
+        win.reload = lambda *a, **kw: reloads.append(1)
+        edit = win.chat.composer.edit
+        tally = _Tally()
+        edit.verticalScrollBar().installEventFilter(tally)
+        win.activateWindow()
+        win.chat.focus_input()
+        text = "Can the servos share the five volt rail with the LiDAR and the STM32? " * 3
+        times = []
+        for ch in text:
+            t0 = time.perf_counter()
+            QTest.keyClick(edit, ch)
+            QApplication.processEvents()
+            times.append(time.perf_counter() - t0)
+        assert edit.toPlainText() == text
+        assert edit.document().size().height() <= 6   # still below the 6-line cap
+        assert tally.shows == 0                       # ... so no scrollbar, never toggled
+        assert max(times) < 0.25, max(times)          # was seconds per key near a wrap
+        assert reloads == []
+        # past the cap it scrolls, with the scrollbar steadily on
+        for _ in range(4):
+            QTest.keyClicks(edit, text)
+        QApplication.processEvents()
+        assert edit.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        assert tally.shows <= 1
+        edit.clear()
+        QApplication.processEvents()
+        assert edit.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    finally:
+        win.close()
+        conn.close()

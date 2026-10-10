@@ -710,7 +710,7 @@ class Composer(QFrame):
         self.edit.setObjectName("composerEdit")
         self.edit.setPlaceholderText("Ask about the project…")
         self.edit.setTabChangesFocus(True)
-        self.edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.edit.document().setDocumentMargin(2)
         self.edit.installEventFilter(self)
         self.edit.textChanged.connect(self._grow)
@@ -747,6 +747,14 @@ class Composer(QFrame):
         lines = round(self.edit.document().size().height()) or 1
         n = max(self.MIN_LINES, min(self.MAX_LINES, lines))
         self.edit.setFixedHeight(int(n * self.edit.fontMetrics().lineSpacing() + 10))
+        # The box grows instead of scrolling, so the scrollbar is off until the cap and
+        # always on past it. "As needed" made it show and hide in a loop at the end
+        # of a line (showing it narrows the text, which re-wraps and changes the fit),
+        # a loop that compounded with every key until the window froze.
+        policy = (Qt.ScrollBarPolicy.ScrollBarAlwaysOn if lines > self.MAX_LINES
+                  else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        if self.edit.verticalScrollBarPolicy() != policy:
+            self.edit.setVerticalScrollBarPolicy(policy)
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
