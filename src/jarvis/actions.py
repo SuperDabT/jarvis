@@ -14,6 +14,9 @@ stored rows are read back and compared with what was intended before the
 commit. Anything wrong rolls back everything; nothing is ever half applied. The
 result lists what the database holds afterwards (read again after the commit).
 
+An existing deadline is never moved: ``set_due`` only dates undated items;
+planning work on a dated item (or an overdue one) is a reminder.
+
 Engineering backlog is context, not a commitment: a change whose item is a
 GitHub issue (named "#N", or titled like an open issue) is refused unless the
 user's own request asked to include project work (``allow_backlog``); allowed
@@ -200,6 +203,11 @@ def check_change(conn: sqlite3.Connection, raw: Any, now: datetime, tz: tzinfo |
     if item.done:
         raise ProposalError(f"“{item.title}” is already done")
     if op == "set_due":
+        if item.due_at:
+            # a deadline is a commitment: the assistant plans work on it with a
+            # reminder, it never moves the deadline itself
+            raise ProposalError(f"“{item.title}” already has a deadline ({item.due_at}); "
+                                "use set_remind to plan work on it, don't move the deadline")
         due = _when(raw.get("due"), "due", now, tz, need_time=False)
         if due is None:
             raise ProposalError("set_due needs a due date")

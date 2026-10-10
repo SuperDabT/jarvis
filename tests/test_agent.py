@@ -47,9 +47,17 @@ class Script:
     def close(self):
         pass
 
-    def tool_results(self, k: int = -1) -> list[dict]:
-        return [json.loads(m["content"]) for m in self.requests[k]["messages"]
-                if m["role"] == "tool"]
+    def tool_results(self, k: int = -1, own: bool = True) -> list[dict]:
+        """Tool results in request ``k``; ``own``: only the model's calls, not the
+        records Jarvis fetched first (the first ``required`` ones)."""
+        msgs = self.requests[k]["messages"]
+        out = [json.loads(m["content"]) for m in msgs if m["role"] == "tool"]
+        return out[self.required:] if own else out
+
+    @property
+    def required(self) -> int:
+        first = self.requests[0]["messages"]
+        return sum(1 for m in first if m["role"] == "tool")
 
 
 @pytest.fixture
@@ -94,7 +102,9 @@ def test_1_organize_weekend_gathers_several_sources_and_writes_nothing(conn, tmp
     before = snapshot(conn)
     a = run(conn, tmp_path, q, m)
     assert a.tier == "agent" and a.intent == "planning"
-    assert a.steps == ["get_agenda", "list_items", "project_status"]
+    # Jarvis fetched the agenda, the items and (project work was asked for) the project
+    assert a.steps == ["jarvis:get_agenda", "jarvis:list_items", "jarvis:project_status",
+                       "get_agenda", "list_items", "project_status"]
     first = m.tool_results(1)                          # what the model read back
     assert [x["title"] for x in first[0]["due"]] == ["Calculus exam"]   # Mon 9:00
     assert first[0]["due"][0]["time"] == "9:00 AM" and first[0]["overdue"] == []
@@ -103,7 +113,7 @@ def test_1_organize_weekend_gathers_several_sources_and_writes_nothing(conn, tmp
     assert "BACKLOG" in m.tool_results(2)[-1]["note"]
     assert {s.ref for s in a.cited_sources} == {f"item:{week['exam'].id}",
                                                 f"item:{week['dog'].id}", "#31"}
-    assert a.action is None                            # a plan in words: no changes proposed
+    assert a.action["kind"] == "none"                  # a plan in words: no changes proposed
     assert snapshot(conn) == before
 
 
@@ -213,7 +223,7 @@ def test_5_unfamiliar_goal_reaches_the_agent_and_it_picks_tools(conn, tmp_path, 
     m.chat_json = lambda system, user, schema: {"intent": "mixed"}
     a = run(conn, tmp_path, q, m)
     assert a.route_by == "model" and a.tier == "agent"
-    assert a.steps == ["search_memory", "get_agenda"]
+    assert a.steps == ["jarvis:get_agenda", "jarvis:list_items", "search_memory", "get_agenda"]
     assert {s.ref for s in a.cited_sources} == {f"item:{week['exam'].id}",
                                                 f"item:{week['lab'].id}"}
 
@@ -248,7 +258,7 @@ def test_7_backlog_cannot_become_a_commitment_unless_asked(conn, tmp_path, week)
     a = run(conn, tmp_path, "Schedule my weekend tasks", m)
     refused = m.tool_results(1)[-1]
     assert refused["proposed"] == [] and "engineering backlog (#31)" in refused["refused"][0]
-    assert a.action is None and not it.list_items(conn, status="all")[4:]
+    assert a.action["kind"] == "none" and not it.list_items(conn, status="all")[4:]
     # a title that is (nearly) an open issue's counts too
     p, errors = actions.build_proposal(conn, [{**fix, "title": "Timestamp each detection "
                                                "when its run closes"}], NOW, LA)
@@ -302,7 +312,8 @@ def test_tool_call_limit_and_a_model_that_never_stops(conn, tmp_path, week):
     many = [("list_items", {})] * 6
     m = Script(many, many, many, many, many)          # still calling tools on the last step
     a = run(conn, tmp_path, "help me organize everything", m)
-    assert len(a.steps) == agent.MAX_TOOL_CALLS        # never more than the limit ran
+    own = [s for s in a.steps if not s.startswith("jarvis:")]
+    assert len(own) == agent.MAX_TOOL_CALLS            # never more than the limit ran
     assert a.text.startswith("I stopped before finishing")
     assert snapshot(conn)                              # nothing broke
 
@@ -427,8 +438,8 @@ def test_model_quirks_are_cleaned_and_a_missing_proposal_is_flagged(conn, tmp_pa
     m2 = Script([("propose_changes", {"changes": [{**bad, "due": "Saturday"}]})],
                 "<|\"|>Proposed: the dog on Saturday. Click Apply.\nSOURCES: none")
     b = run(conn, tmp_path, "schedule the dog this weekend", m2)
-    assert b.action is None and b.text.startswith("Proposed")
-    assert "no changes were proposed (change 1: due 'Saturday'" in b.notes[-1]
+    assert b.action["kind"] == "none" and b.text.startswith("Proposed")
+    assert any("no changes were proposed (change 1: due 'Saturday'" in n for n in b.notes)
 
 
 def test_the_final_step_tells_the_model_to_answer(conn, tmp_path, week):
@@ -449,3 +460,184 @@ def test_only_answers_presenting_changes_get_the_nothing_to_apply_note(conn, tmp
                                                                      text, flagged):
     a = run(conn, tmp_path, "help me plan my weekend", Script(text + "\nSOURCES: none"))
     assert any("nothing to apply" in n for n in a.notes) is flagged
+
+
+# ---------------------------------------------------------------- reliability regressions
+# Each case replays a failure seen in the live benchmark (scratchpad/agent/*.log).
+
+
+class GoalScript(Script):
+    """A Script that also classifies the turn's goal (chat_json), counting calls."""
+
+    def __init__(self, *steps, outcome="schedule", start="2026-10-10", end="2026-10-11",
+                 **kw):
+        super().__init__(*steps, **kw)
+        self.goal = {"outcome": outcome, "start": start, "end": end}
+        self.classified = 0
+
+    def chat_json(self, system, user, schema):
+        self.classified += 1
+        return dict(self.goal)
+
+
+def _dog_change(week, when="2026-10-10T11:00"):
+    return {"op": "set_remind", "item_id": week["dog"].id, "remind": when,
+            "reason": "inside the Saturday window you gave"}
+
+
+def test_r1_prose_instead_of_a_requested_schedule_gets_one_reminder(conn, tmp_path, week):
+    """gemma: wrote a plan and offered to propose instead of proposing."""
+    m = GoalScript("Here's a plan: the dog on Saturday. Would you like me to propose it?",
+                   [("propose_changes", {"changes": [_dog_change(week)]})],
+                   "Proposed: the dog on Saturday at 11. Apply saves it.\nSOURCES: none")
+    a = run(conn, tmp_path, "Schedule the dog for Saturday between 10 and 2", m)
+    assert a.goal == "schedule" and a.action["kind"] == "proposal"
+    assert agent.SCHEDULE_NUDGE in [x["content"] for x in m.requests[1]["messages"]]
+
+
+def test_r2_a_schedule_that_never_comes_is_stated(conn, tmp_path, week):
+    m = GoalScript("Saturday: dog. Sunday: bracket.",
+                   "Saturday: dog. Sunday: bracket. Good luck.")
+    a = run(conn, tmp_path, "Schedule my tasks for the weekend, I'm free all day", m)
+    assert a.action["kind"] == "none"
+    assert any("no schedule was proposed" in n for n in a.notes)
+
+
+def test_r3_a_question_asked_in_prose_is_the_clarification(conn, tmp_path, week):
+    """qwen: asked about availability in prose instead of calling ask_user."""
+    m = GoalScript("I found two undated tasks. When are you free this weekend?",
+                   "I still need to know: when are you free on Saturday and Sunday?")
+    a = run(conn, tmp_path, "Schedule these tasks for my weekend", m, session_id="s1")
+    assert a.action["kind"] == "clarify"
+    assert a.text == "I still need to know: when are you free on Saturday and Sunday?"
+    assert a.action["goal"]["outcome"] == "schedule"
+    assert a.action["goal"]["request"] == "Schedule these tasks for my weekend"
+
+
+def test_r4_deadlines_after_the_period_are_always_fetched_and_never_dropped(conn, tmp_path,
+                                                                            week):
+    """qwen: looked at Saturday-Sunday only and missed Monday's exam."""
+    m = GoalScript([("get_agenda", {"start": "2026-10-10", "end": "2026-10-11"})],
+                   "Nothing is dated this weekend; do the dog and the bracket.\nSOURCES: none",
+                   outcome="plan")
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    first = m.requests[0]["messages"]
+    fetched = next(json.loads(x["content"]) for x in first
+                   if x["role"] == "tool" and x["tool_name"] == "get_agenda")
+    assert [d["title"] for d in fetched["due"]] == ["Calculus exam", "Lab report"]
+    assert "Calculus exam (due Mon Oct 12)" in a.notes[-1]
+    assert "Lab report (due Tue Oct 13)" in a.notes[-1]
+
+
+def test_r4_a_complete_answer_gets_no_deadline_note(conn, tmp_path, week):
+    m = GoalScript("Study for the calculus exam (Mon 9:00); the lab report is due Tue.\n"
+                   "SOURCES: none", outcome="plan")
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    assert not any("not mentioned" in n for n in a.notes)
+
+
+def test_r5_these_tasks_are_already_in_view_so_no_which_tasks_question(conn, tmp_path, week):
+    """gemma asked "which tasks?": the open items are fetched before the model starts."""
+    m = GoalScript([("ask_user", {"question": "When are you free on Saturday and Sunday?"})])
+    run(conn, tmp_path, "Schedule these tasks for my weekend", m)
+    first = m.requests[0]["messages"]
+    items = next(json.loads(x["content"]) for x in first
+                 if x["role"] == "tool" and x["tool_name"] == "list_items")
+    assert {"Shower the dog", "Write up the bracket dimensions"} <= {
+        i["title"] for i in items["items"]}
+    assert "don't ask which ones" in first[0]["content"]
+
+
+def test_r6_the_answer_to_jarvis_question_continues_the_stored_goal(conn, tmp_path, week):
+    """The follow-up keeps the original request and outcome, without re-classifying."""
+    ask = GoalScript([("ask_user", {"question": "When are you free on Saturday and Sunday?",
+                                    "missing": ["free time"]})])
+    a = run(conn, tmp_path, "Schedule these tasks for my weekend", ask, session_id="s1")
+    assert a.action["kind"] == "clarify" and ask.classified == 1
+    m = GoalScript([("propose_changes", {"changes": [_dog_change(week)]})],
+                   "Proposed: the dog Saturday 11:00.\nSOURCES: none")
+    b = run(conn, tmp_path, "Saturday 10 to 2, Sunday after 3", m, session_id="s1",
+            history=[("user", "Schedule these tasks for my weekend"), ("assistant", a.text)])
+    assert m.classified == 0 and b.route_by == "followup" and b.goal == "schedule"
+    said = next(x["content"] for x in m.requests[0]["messages"]
+                if x["role"] == "user" and x["content"].startswith("My request was"))
+    assert "Schedule these tasks for my weekend" in said
+    assert "You replied: When are you free" in said and "Now I say: Saturday 10 to 2" in said
+    assert b.action["kind"] == "proposal"
+
+
+def test_r6_a_clear_new_question_is_not_taken_as_the_answer(conn, tmp_path, week):
+    ask = GoalScript([("ask_user", {"question": "When are you free?"})])
+    run(conn, tmp_path, "Schedule these tasks for my weekend", ask, session_id="s1")
+    m = GoalScript()
+    b = run(conn, tmp_path, "What do I need to do today?", m, session_id="s1")
+    assert b.tier == "direct" and m.requests == []
+
+
+def test_r7_project_status_is_fetched_only_when_project_work_was_asked_for(conn, tmp_path,
+                                                                           week):
+    m = GoalScript("Saturday: the dog.\nSOURCES: none", outcome="plan")
+    a = run(conn, tmp_path, "Help me organize my weekend", m)
+    assert "jarvis:project_status" not in a.steps
+    m2 = GoalScript("Saturday: the dog; #31 if you want project work.\nSOURCES: none",
+                    outcome="plan")
+    b = run(conn, tmp_path, "Help me organize my weekend and the LiDAR project", m2)
+    assert "jarvis:project_status" in b.steps
+
+
+def test_r8_goal_classification_failures_fall_back_to_a_plan(conn, tmp_path, week):
+    g = agent.classify_goal(Script(), "Help me organize my weekend", [], NOW)
+    assert (g.outcome, g.start.isoformat(), g.end.isoformat()) == (
+        "plan", "2026-10-10", "2026-10-11")
+    bad = GoalScript(start="1999-01-01", end="1999-01-02")
+    g = agent.classify_goal(bad, "Schedule my weekend", [], NOW)
+    assert g.outcome == "schedule" and g.start.isoformat() == "2026-10-10"
+    assert agent.Goal.from_dict({"outcome": "rm -rf", "start": "x", "end": "y"}) is None
+
+
+def test_r9_recommendations_must_carry_reasons(conn):
+    assert "give each step's reason" in agent.AGENT_PROMPT
+    assert "don't invent durations, dependencies or urgency" in agent.AGENT_PROMPT
+
+
+def test_r10_a_reply_after_a_proposal_revises_it_instead_of_leaving_the_task(conn, tmp_path,
+                                                                             week):
+    """qwen proposed at once; the next message ("I'm free ...") went to "general"."""
+    first = GoalScript([("propose_changes", {"changes": [_dog_change(week, "2026-10-10T09:00")]})],
+                       "Proposed: the dog Saturday 9:00.\nSOURCES: none")
+    a = run(conn, tmp_path, "Schedule these tasks for my weekend", first, session_id="s1")
+    assert a.action["kind"] == "proposal" and a.action["goal"]["outcome"] == "schedule"
+    m = GoalScript([("propose_changes", {"changes": [_dog_change(week, "2026-10-10T11:00")]})],
+                   "Revised: the dog Saturday 11:00.\nSOURCES: none")
+    m.chat_json = lambda *a: {"intent": "general"}       # the classifier would say so
+    b = run(conn, tmp_path, "I'm free Saturday 10am to 2pm and Sunday after 3pm.", m,
+            session_id="s1", history=[("user", "Schedule these tasks for my weekend"),
+                                      ("assistant", a.text)])
+    assert b.route_by == "followup" and b.tier == "agent" and b.goal == "schedule"
+    assert actions.Proposal.from_dict(b.action["proposal"]).changes[0].remind == \
+        "2026-10-10T11:00"
+
+
+def test_r11_a_deadline_named_by_the_start_of_its_title_counts_as_mentioned(conn, week):
+    goal = agent.Goal("plan", NOW.date(), NOW.date())
+    text = "The calculus exam is Monday and the lab report Tuesday."
+    assert agent.missed_deadlines(conn, goal, NOW, text, None) == []
+    assert agent.missed_deadlines(conn, goal, NOW, "The calculus exam is Monday.", None) == [
+        "Lab report (due Tue Oct 13)"]
+
+
+def test_r12_an_existing_deadline_is_never_moved_only_planned_with_a_reminder(conn, week):
+    """gemma proposed moving the lab report's deadline from Tue to Sun "to prepare"."""
+    move = {"op": "set_due", "item_id": week["lab"].id, "due": "2026-10-11", "reason": "prep"}
+    p, errors = actions.build_proposal(conn, [move], NOW, LA)
+    assert p is None and "already has a deadline (2026-10-13)" in errors[0]
+    plan = {"op": "set_remind", "item_id": week["lab"].id, "remind": "2026-10-11T15:00",
+            "reason": "work on it Sunday"}
+    p, errors = actions.build_proposal(conn, [plan], NOW, LA)
+    assert not errors and p.changes[0].remind == "2026-10-11T15:00"
+
+
+def test_r12_clarifying_questions_lose_raw_references(conn, tmp_path, week):
+    m = GoalScript([("ask_user", {"question": f"How long is Shower the dog (item:{week['dog'].id})?"})])
+    a = run(conn, tmp_path, "Schedule these tasks for my weekend", m)
+    assert a.text == "How long is Shower the dog?"

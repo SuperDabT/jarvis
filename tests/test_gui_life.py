@@ -355,8 +355,8 @@ def _proposal_reply(conn, item_id, due):
     from jarvis import actions
     from jarvis.chat import Answer
 
-    p, errors = actions.build_proposal(conn, [{"op": "set_due", "item_id": item_id,
-                                               "due": due, "reason": "free then"}], NOW, LA)
+    p, errors = actions.build_proposal(conn, [{"op": "set_remind", "item_id": item_id,
+                                               "remind": due, "reason": "free then"}], NOW, LA)
     assert not errors
     return Answer(text="Proposed: study on Saturday.", sources=[], unverified_numbers=[],
                   notes=[], model="m", duration=0.1, tier="agent",
@@ -369,21 +369,22 @@ def test_chat_proposal_card_applies_or_dismisses(make, app, apply):
 
     win, conn = make()
     study = next(i for i in it.open_items(conn) if i.title == "study")
-    reply = _proposal_reply(conn, study.id, "2026-10-10")   # built here: conn is this thread's
+    reply = _proposal_reply(conn, study.id, "2026-10-10T10:00")   # built here: this thread's conn
     win.chat.ask_fn = lambda *a, **kw: reply
     win.set_chat_open(True)
     win.chat.ask("schedule my studying")
     win.chat.wait()
     card = win.chat.findChildren(BotMessage)[-1].proposal
     assert card is not None and "not saved" in card.findChildren(type(win.home_view.greeting))[0].text()
-    assert it.get_item(conn, study.id).due_at == "2026-10-09"      # nothing before the click
+    assert it.get_item(conn, study.id).remind_at is None           # nothing before the click
     (card.apply_btn if apply else card.dismiss_btn).click()
     app.processEvents()
     if apply:
-        assert it.get_item(conn, study.id).due_at == "2026-10-10"
+        assert it.get_item(conn, study.id).remind_at == "2026-10-10T10:00"
+        assert it.get_item(conn, study.id).due_at == "2026-10-09"   # the deadline stays
         assert "Saved and checked 1 change." in card.result.text()
-        assert "✓ study: 2026-10-10" in card.result.text()
+        assert "✓ study: due Fri Oct 9 · reminder Sat Oct 10, 10:00 AM" in card.result.text()
     else:
-        assert it.get_item(conn, study.id).due_at == "2026-10-09"
+        assert it.get_item(conn, study.id).remind_at is None
         assert "Nothing was changed" in card.result.text()
     assert not card.apply_btn.isEnabled()

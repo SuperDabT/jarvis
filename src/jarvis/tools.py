@@ -183,7 +183,9 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
 
 _CHANGE = {"type": "object", "properties": {
     "op": {"type": "string", "enum": list(actions.OPS),
-           "description": "create a new item, or set the due date / reminder of an existing one"},
+           "description": "create a new item; set_due gives an UNDATED item a date; set_remind "
+                          "plans when to work on any item (use it for items that already have "
+                          "a deadline: deadlines are never moved)"},
     "item_id": {"type": "integer", "description": "set_due / set_remind: the item's item_id"},
     "title": {"type": "string", "description": "create: the new item's title"},
     "kind": {"type": "string", "enum": list(it.KINDS)},
@@ -231,8 +233,9 @@ TOOLS: dict[str, tuple[dict, Callable[..., dict]]] = {
                          "description": "every assumption the dates rest on"}},
         ["changes"]), propose_changes),
     "ask_user": (_fn(
-        "ask_user", "Ask the user one short question when missing information (free time, "
-        "a constraint, which item they mean) would change the result. Ends your turn.",
+        "ask_user", "Ask the user one specific question when a fact you can't look up "
+        "(usually when they are free) would change the result. Never ask what the other "
+        "tools can tell you. Ends your turn.",
         {"question": {"type": "string"},
          "missing": {"type": "array", "items": {"type": "string"}}}, ["question"]),
         ask_user),
@@ -243,10 +246,11 @@ def schemas() -> list[dict]:
     return [spec for spec, _ in TOOLS.values()]
 
 
-def run_tool(ctx: ToolContext, name: str, arguments: Any) -> str:
+def run_tool(ctx: ToolContext, name: str, arguments: Any, required: bool = False) -> str:
     """Run one tool call; always returns JSON text for the model (errors included,
-    so it can correct itself). Never raises for a bad call."""
-    ctx.calls.append(name)
+    so it can correct itself). Never raises for a bad call. ``required``: fetched
+    by Jarvis before the model started (listed in ``calls`` as "jarvis:<name>")."""
+    ctx.calls.append(f"jarvis:{name}" if required else name)
     entry = TOOLS.get(name)
     if entry is None:
         result: dict = {"error": f"unknown tool {name!r}; use one of {', '.join(TOOLS)}"}

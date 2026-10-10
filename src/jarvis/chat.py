@@ -230,6 +230,7 @@ class Answer:
     route_by: str = ""
     action: dict[str, Any] | None = None
     steps: list[str] = field(default_factory=list)   # tools the assistant called, in order
+    goal: str = ""                         # the assistant's goal: schedule / plan / answer
 
     @property
     def display_text(self) -> str:

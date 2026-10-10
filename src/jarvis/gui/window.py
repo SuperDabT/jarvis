@@ -624,7 +624,10 @@ class MainWindow(QMainWindow):
             return False, f"Nothing was changed: {e}", False
         lines = [result.message]
         for row in result.stored:
-            when = row["due_at"] or row["remind_at"]
+            bits = [f"due {actions.human_when(row['due_at'])}" if row["due_at"] else "",
+                    f"reminder {actions.human_when(row['remind_at'])}" if row["remind_at"]
+                    else ""]
+            when = " · ".join(b for b in bits if b)
             lines.append(f"✓ {row['title']}" + (f": {when}" if when else ""))
         if result.ok and apply:
             self.reload()

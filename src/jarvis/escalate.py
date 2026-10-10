@@ -49,6 +49,7 @@ text is ``answer.display_text`` (as with ``chat.ask``).
 """
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import time
@@ -255,11 +256,18 @@ def answer_with_escalation(
     question = question.strip()
     history = chat.trim_history(history)
     local = now if now is not None and now.tzinfo else (now or datetime.now(UTC)).astimezone()
+    pending = _pending_goal(conn, session_id) if session_id and not focus else None
     if route is None:
         if route_client is None:
             route_client = fast_client if fast_client is not None else deep_client
-        route = (intent.Route("project", by="focus") if focus
-                 else intent.route(question, local, conn, route_client, history))
+        if focus:
+            route = intent.Route("project", by="focus")
+        elif pending is not None and intent.route_by_rules(question, local.date(), conn) is None:
+            route = intent.Route("planning", by="followup")   # the answer to Jarvis's question
+        else:
+            route = intent.route(question, local, conn, route_client, history)
+    if route.by != "followup":
+        pending = None
     qclass: QuestionClass = ("planning" if route.intent == "planning"
                              else "out_of_scope" if route.intent == "general" else "project")
     direct = _direct_answer(conn, question, local, route)
@@ -287,7 +295,7 @@ def answer_with_escalation(
                     chat.save_message(conn, session_id, "user", question)
                 phase("agent", model=getattr(loop_client, "model", None))
                 found = agent.run_agent(conn, cfg, question, history, loop_client, local,
-                                        route=route, on_phase=on_phase)
+                                        route=route, on_phase=on_phase, goal=pending)
                 if on_token:
                     on_token(found.text)
                 return _finish(conn, session_id, found, t0, None, phase)
@@ -412,6 +420,20 @@ def answer_with_escalation(
             deep_client.close()
 
 
+def _pending_goal(conn: sqlite3.Connection, session_id: str) -> Any:
+    """The goal of Jarvis's last message in this conversation when that was an
+    assistant-loop turn (a question, a plan or a proposal; ``agent.Goal``), else None."""
+    row = conn.execute("SELECT sources_json FROM chat_messages WHERE session_id = ? AND "
+                       "role = 'assistant' ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+    if row is None or not row["sources_json"]:
+        return None
+    try:
+        meta = json.loads(row["sources_json"])
+    except ValueError:
+        return None
+    return agent.Goal.from_dict(meta.get("pending_goal")) if isinstance(meta, dict) else None
+
+
 def _direct_answer(conn: sqlite3.Connection, question: str, now: datetime,
                    route: Any) -> Answer | None:
     """The answer code gives without a model, or None (the model answers)."""
@@ -434,6 +456,8 @@ def _finish(conn: sqlite3.Connection, session_id: str | None, ans: Answer, t0: f
         extra: dict[str, Any] = {}
         if ans.action and ans.action.get("kind") == "proposal":
             extra = {"proposal": ans.action["proposal"], "proposal_status": "pending"}
+        if ans.action and ans.action.get("goal"):
+            extra["pending_goal"] = ans.action["goal"]      # the next reply continues it
         mid = chat.save_message(conn, session_id, "assistant", ans.text, {**extra,
             "sources": [asdict(s) for s in ans.sources],
             "cited_sources": [asdict(s) for s in ans.cited_sources],
@@ -442,7 +466,7 @@ def _finish(conn: sqlite3.Connection, session_id: str | None, ans: Answer, t0: f
             "escalated": ans.escalated, "escalation_reasons": ans.escalation_reasons,
             "thinking_s": round(ans.thinking_s, 2) if ans.thinking_s is not None else None,
             "intent": ans.intent, "steps": ans.steps})
-        if extra:
+        if extra.get("proposal"):
             ans.action["message_id"] = mid   # Apply decides on the stored copy
     phase("done", tier=ans.tier, escalated=ans.escalated)
     return ans

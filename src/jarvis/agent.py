@@ -13,6 +13,18 @@ organizing, scheduling, unclear asks); lookups keep their direct paths
    tools, so the model must answer), ``MAX_TOOL_CALLS`` tool calls and
    ``TIME_BUDGET_S``. Hitting a limit is said in the answer, never hidden.
 
+Before the loop the turn's goal is fixed (``Goal``): what the user wants back
+("schedule": dates for tasks, "plan": advice, "answer") and the days it is
+about, from a schema-constrained model call (``classify_goal``), or carried
+over from the clarifying question Jarvis asked last (stored in that message's
+metadata as ``pending_goal``). For schedules and plans the records every such
+answer needs are fetched by code first (``required_context``: the agenda for
+the period and the 7 days after it, the open items), so a deadline can't be
+missed because the model looked at the wrong days. A "schedule" turn has to end
+with a proposal or one question: prose gets one reminder; a question asked in
+prose becomes the clarification; otherwise the answer says no schedule was
+proposed. Plans and schedules that leave out a known deadline get a note.
+
 The answer is checked like any chat answer (``chat.validate_answer``) against
 what the tools returned: its references must be records a tool produced. A
 plan is words; dates and new items only exist as a ``actions.Proposal``
@@ -25,12 +37,14 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from jarvis import chat, intent, tools
 from jarvis.chat import Answer, Context
 from jarvis.config import Config
+from jarvis.facts import tokens
 from jarvis.ollama import OllamaError
 
 MAX_MODEL_CALLS = 5
@@ -54,15 +68,22 @@ is about that work, and never put them on a day unless the user asked to include
 unless the user said them or an item records them. Never invent free time or durations.
 
 How to help:
-- For anything about a stretch of time (today, a weekend, a week), check get_agenda for those dates: it has the deadlines and overdue items.
+- The conversation already holds the agenda for the period (and the week after it) and the \
+open items, fetched by Jarvis. Use them; call tools only for what is still missing.
+- "These tasks" or "my tasks" without names means the open undated tasks plus those due in the \
+period; say that you took them as the set (an assumption), don't ask which ones.
 - Planning is reasoning: compare options, point out deadlines, conflicts and trade-offs, and \
 say what you would suggest and why. A plan in words saves nothing.
 - Scheduling means giving items dates or reminders. Only when the user asks for that, call \
 propose_changes. It saves nothing either: the user approves it with Apply. Leave an item \
 undated (list it under unscheduled, with the reason) rather than forcing it into a slot.
-- If missing information (free time, a constraint, which item is meant) would change the \
-result, call ask_user with one short question instead of guessing. If it would not, give a \
-draft and state your assumptions.
+- If a fact you can't look up would change the dates (usually when the user is free), call \
+ask_user with one specific question about it instead of guessing. Never ask about things the \
+tools can tell you. If nothing essential is missing, propose and state your assumptions.
+- When the user answers your question, continue the original request with their answer.
+- If you suggest an order of work, give each step's reason from the records or from what the \
+user said (a deadline, something overdue, a stated constraint). Call it a suggestion; don't \
+call items priorities, and don't invent durations, dependencies or urgency.
 - Never say a change was made, saved, scheduled or added. Say "proposed" and that Apply \
 saves it.
 - Never decide for the user; the choice is theirs.
@@ -93,6 +114,144 @@ STOPPED = ("I stopped before finishing: {why}. Here is what I could check so far
            "with a narrower request if this isn't enough.")
 
 
+OUTCOME_WORDS = {
+    "schedule": "a schedule: dates or reminders for tasks, as a proposal I approve "
+                "(or one question if something essential is missing)",
+    "plan": "a plan or advice in words; dates only if I ask for them",
+    "answer": "an answer to my question",
+}
+SCHEDULE_NUDGE = ("I asked for a schedule. Do one of these now: call propose_changes with "
+                  "dates for the tasks (state your assumptions), or, if one fact you can't "
+                  "look up would change the dates, call ask_user with that one question. "
+                  "Don't answer with a plan in prose.")
+REQUIRED_AHEAD_DAYS = 7     # deadlines after the period still shape a plan for it
+
+
+@dataclass(frozen=True)
+class Goal:
+    """What the user wants back from this turn and the days it is about."""
+    outcome: str             # "schedule" | "plan" | "answer"
+    start: date
+    end: date
+    request: str = ""        # the original request (a follow-up keeps it)
+    asked: str = ""          # Jarvis's last reply in this goal (often a question)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"outcome": self.outcome, "start": self.start.isoformat(),
+                "end": self.end.isoformat(), "request": self.request, "asked": self.asked}
+
+    @classmethod
+    def from_dict(cls, d: Any) -> Goal | None:
+        try:
+            g = cls(str(d["outcome"]), date.fromisoformat(d["start"]),
+                    date.fromisoformat(d["end"]), str(d.get("request") or ""),
+                    str(d.get("asked") or ""))
+        except (KeyError, TypeError, ValueError):
+            return None
+        return g if g.outcome in OUTCOME_WORDS and g.start <= g.end else None
+
+
+GOAL_SYSTEM = """\
+Read the user's latest message (with the conversation before it) and say what they want \
+back from their personal assistant, and which days it is about. Reply with JSON.
+outcome:
+- schedule: dates, times or reminders assigned to their tasks (scheduling, fitting tasks \
+into days, or answering a question about their availability for that)
+- plan: organizing, advice, choosing what to work on, without setting dates
+- answer: a question to answer
+start, end: the days it is about, YYYY-MM-DD (a weekend: Saturday to Sunday). If no days \
+are named, start today and end 6 days later.
+"""
+GOAL_SCHEMA = {"type": "object", "properties": {
+    "outcome": {"type": "string", "enum": list(OUTCOME_WORDS)},
+    "start": {"type": "string"}, "end": {"type": "string"}},
+    "required": ["outcome", "start", "end"]}
+
+
+def classify_goal(client: Any, question: str, history: Sequence[tuple[str, str]],
+                  now: datetime) -> Goal:
+    """The turn's goal from the model (``chat_json``); "plan" over the named days
+    (or the coming week) when it can't say."""
+    today = now.date()
+    start, end, _ = intent.timeframe(question, today) or (
+        today, today + timedelta(days=6), "")
+    fallback = Goal("plan", start, end, question)
+    if not hasattr(client, "chat_json"):
+        return fallback
+    convo = "\n".join(f"{r}: {c}" for r, c in list(history)[-4:])
+    user = (f"Today: {now:%A} {today.isoformat()}. Dates: {tools.week_dates(now)}.\n"
+            + (f"Conversation so far:\n{convo}\n" if convo else "")
+            + f"Latest message: {question}")
+    try:
+        got = client.chat_json(GOAL_SYSTEM, user, GOAL_SCHEMA)
+        g = Goal(str(got["outcome"]), date.fromisoformat(str(got["start"])[:10]),
+                 date.fromisoformat(str(got["end"])[:10]), question)
+    except Exception:  # noqa: BLE001 - any failure means the fallback goal
+        return fallback
+    if g.outcome not in OUTCOME_WORDS or g.end < g.start or g.start < today - timedelta(
+            days=1) or (g.end - g.start).days > 31:
+        return replace(fallback, outcome=g.outcome if g.outcome in OUTCOME_WORDS else "plan")
+    return g
+
+
+def required_context(ctx: tools.ToolContext, goal: Goal, msgs: list[dict[str, Any]]) -> None:
+    """Fetch what every plan or schedule needs before the model starts: the agenda
+    for the period and the week after it (deadlines, overdue items) and the open
+    items; project status too when the user asked for project work. Added to the
+    conversation as tool results, so the model reads them like its own calls."""
+    start = max(goal.start, ctx.now.date())
+    ahead = min(goal.end + timedelta(days=REQUIRED_AHEAD_DAYS), start + timedelta(days=31))
+    calls = [("get_agenda", {"start": start.isoformat(), "end": ahead.isoformat()}),
+             ("list_items", {"limit": tools.LIST_LIMIT})]
+    if ctx.allow_backlog:
+        calls.append(("project_status", {}))
+    msgs.append({"role": "assistant", "content": "",
+                 "tool_calls": [{"function": {"name": n, "arguments": a}} for n, a in calls]})
+    for name, args in calls:
+        msgs.append({"role": "tool", "tool_name": name,
+                     "content": tools.run_tool(ctx, name, args, required=True)})
+
+
+def missed_deadlines(conn: sqlite3.Connection, goal: Goal, now: datetime, text: str,
+                     proposal: Any) -> list[str]:
+    """Known deadlines (due in the period or the week after it, or overdue) that
+    the answer and its proposal don't mention, as "Title (due Mon Oct 12)"."""
+    from jarvis import assistant
+
+    start = max(goal.start, now.date())
+    ag = assistant.build_agenda(conn, start, goal.end + timedelta(days=REQUIRED_AHEAD_DAYS),
+                                "", now)
+    said = set(tokens(text))
+    if proposal is not None:
+        for c in proposal.changes:
+            said |= set(tokens(c.title))
+        for u in proposal.unscheduled:
+            said |= set(tokens(u.get("title") or ""))
+    out = []
+    for e in [*ag.overdue, *ag.due]:
+        words = set(tokens(e.title))
+        head = set(tokens(re.split(r"[:(\-–—]", e.title)[0]))   # "Lab report: op-amp ..."
+        if words and len(words & said) / len(words) < 0.6 and not (head and head <= said):
+            when = "overdue" if e.late_days else f"due {e.day:%a %b} {e.day.day}"
+            out.append(f"{e.title} ({when})")
+    return out
+
+
+def _asks(text: str | None) -> bool:
+    """Does a reply end by asking the user something?"""
+    body, _ = chat.split_sources(text or "")
+    return body.rstrip().rstrip("*_ ").endswith("?")
+
+
+def _question_of(text: str) -> str:
+    """The question a prose reply ends with (its last sentence or two)."""
+    body, _ = chat.split_sources(_SPECIAL_TOKEN_RE.sub("", text or ""))
+    body = _INLINE_REF_RE.sub("", body).strip()
+    parts = re.split(r"(?<=[.!?])\s+", body)
+    tail = " ".join(parts[-2:]) if len(parts) > 1 and len(parts[-1]) < 60 else parts[-1]
+    return tail.strip().lstrip("*-• ").strip()
+
+
 def wants_backlog(conn: sqlite3.Connection, question: str) -> bool:
     """Did the user's own request ask to include project work? (a project's name,
     an issue number, or the words project / issue / milestone)"""
@@ -112,12 +271,17 @@ def run_agent(conn: sqlite3.Connection, cfg: Config, question: str,
               history: Sequence[tuple[str, str]], client: Any, now: datetime, *,
               route: Any = None, on_phase: Callable[[str, dict], None] | None = None,
               max_model_calls: int = MAX_MODEL_CALLS, max_tool_calls: int = MAX_TOOL_CALLS,
-              time_budget_s: float = TIME_BUDGET_S) -> Answer:
-    """One assistant turn with tools. Never raises for model or tool failures."""
+              time_budget_s: float = TIME_BUDGET_S, goal: Goal | None = None) -> Answer:
+    """One assistant turn with tools. Never raises for model or tool failures.
+    ``goal``: carried over from Jarvis's clarifying question (None: classified here)."""
     t0 = time.monotonic()
     question = question.strip()
-    ctx = tools.ToolContext(conn, cfg, now, question,
-                            allow_backlog=wants_backlog(conn, question))
+    followup = goal is not None
+    if goal is None:
+        goal = classify_goal(client, question, history, now)
+    request = goal.request if followup else question
+    ctx = tools.ToolContext(conn, cfg, now, request,
+                            allow_backlog=wants_backlog(conn, f"{request} {question}"))
     model = getattr(client, "model", None)
 
     def phase(event: str, **info: Any) -> None:
@@ -126,9 +290,14 @@ def run_agent(conn: sqlite3.Connection, cfg: Config, question: str,
 
     msgs: list[dict[str, Any]] = [{"role": "system", "content": AGENT_PROMPT}]
     msgs += [{"role": r, "content": c} for r, c in chat.trim_history(history)]
+    said = (f"My request was: {goal.request}\nYou replied: {goal.asked}\nNow I say: {question}"
+            if followup else question)
     msgs.append({"role": "user", "content": (
-        f"{question}\n\n(Now: {now:%A} {now.date().isoformat()} {now:%H:%M}. "
-        f"Dates: {tools.week_dates(now)}.)")})
+        f"{said}\n\n(Now: {now:%A} {now.date().isoformat()} {now:%H:%M}. "
+        f"Dates: {tools.week_dates(now)}. What I want back: {OUTCOME_WORDS[goal.outcome]})")})
+    if goal.outcome != "answer":
+        required_context(ctx, goal, msgs)
+    nudged = False
     final: str | None = None
     stopped: str | None = None
     tool_calls = 0
@@ -150,6 +319,14 @@ def run_agent(conn: sqlite3.Connection, cfg: Config, question: str,
             final = resp.get("content") or ""
             if last and calls:
                 stopped = "the step limit"
+            if (goal.outcome == "schedule" and ctx.proposal is None and not calls
+                    and not nudged and not last):
+                # a schedule was asked for: one reminder to propose or ask, not prose
+                nudged = True
+                msgs.append({"role": "assistant", "content": final})
+                msgs.append({"role": "user", "content": SCHEDULE_NUDGE})
+                final = None
+                continue
             break
         msgs.append({"role": "assistant", "content": resp.get("content") or "",
                      "tool_calls": [{"function": {"name": c["name"],
@@ -170,11 +347,20 @@ def run_agent(conn: sqlite3.Connection, cfg: Config, question: str,
         if time.monotonic() - t0 > time_budget_s and step < max_model_calls - 1:
             stopped = "the time limit"   # the next step must answer without tools
     duration = time.monotonic() - t0
+    if (ctx.clarification is None and ctx.proposal is None and goal.outcome == "schedule"
+            and final and _asks(final)):
+        # asked in prose instead of through ask_user: it is still the clarification
+        ctx.clarification = {"question": _question_of(final), "missing": []}
+    if ctx.clarification is not None:
+        q = _INLINE_REF_RE.sub("", _SPECIAL_TOKEN_RE.sub("", ctx.clarification["question"]))
+        ctx.clarification["question"] = q.strip()
 
     if ctx.clarification is not None:
         ans = Answer(text=ctx.clarification["question"], sources=[], unverified_numbers=[],
                      notes=[], model=model, duration=duration, tier="agent",
-                     action={"kind": "clarify", **ctx.clarification})
+                     action={"kind": "clarify", **ctx.clarification,
+                             "goal": replace(goal, request=request,
+                                             asked=ctx.clarification["question"]).to_dict()})
     elif final is None:
         why = f"the model failed ({error})" if error else "the step limit"
         text = (chat.UNREACHABLE.format(url=cfg.ollama_url) if error and "cannot reach" in error
@@ -198,9 +384,23 @@ def run_agent(conn: sqlite3.Connection, cfg: Config, question: str,
     if ctx.proposal is None and _OFFERS_APPLY_RE.search(ans.text):
         why = f" ({'; '.join(ctx.refused[:3])})" if ctx.refused else ""
         ans.notes.append(f"Note: no changes were proposed{why}, so there is nothing to apply.")
+    if (goal.outcome == "schedule" and ctx.proposal is None and ctx.clarification is None
+            and final is not None and not any("nothing to apply" in n for n in ans.notes)):
+        why = f" ({'; '.join(ctx.refused[:2])})" if ctx.refused else ""
+        ans.notes.append(f"Note: no schedule was proposed{why}; nothing can be applied yet.")
+    left_out = (missed_deadlines(conn, goal, now, ans.text, ctx.proposal)
+                if goal.outcome != "answer" and ctx.clarification is None and final is not None
+                else [])
+    if left_out:
+        ans.notes.append("Also on record and not mentioned: " + "; ".join(left_out) + ".")
     ans.intent = route.intent if route is not None else "planning"
     ans.route_by = route.by if route is not None else ""
     ans.steps = list(ctx.calls)
+    ans.goal = goal.outcome
+    if ans.action is None or ans.action.get("kind") != "clarify":
+        # the next reply continues this goal (revising the plan or the proposal)
+        ans.action = {**(ans.action or {"kind": "none"}),
+                      "goal": replace(goal, request=request, asked=ans.text[:400]).to_dict()}
     return ans
 
 
