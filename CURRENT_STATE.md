@@ -85,6 +85,16 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   anywhere switches to Projects.
 - The chat is at shell level: Ctrl+K / Ctrl+J / Ctrl+Space work in every workspace; in
   Projects it still takes the inspector column. Esc order: capture, voice, graph lock, chat.
+- With the chat open every workspace fits in what is left (524 px at the 980 px minimum, so
+  the window's own minimum never exceeds 980): in Projects the left column steps aside when
+  the graph would get under 420 px; Tasks moves its filters under the title below 700 px and
+  an open editor takes the list's place below 660 px; Home goes to one column below 640 px.
+- Chat messages are `chat_panel.MessageText` (a read-only QTextBrowser), not QLabels: they
+  wrap long words, paths and inline code inside the panel (copying gives the text as written)
+  and never widen the conversation. A streamed token is appended to the document, so only
+  the last paragraph is laid out again: ~0.6 ms a token at any reply length (re-setting a
+  label's whole text cost 26 ms a token at 5,500 characters and starved typing). Long source
+  chips are elided (tooltip has the full title).
 - School and Knowledge are labelled placeholders ("not built yet", what they will hold),
   with only real actions (quick capture, open Projects).
 - Tasks (`gui/tasks_view.py`, data in `gui/tasks_data.py`): open items in Overdue / Today /
@@ -96,7 +106,7 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   today (overdue first, tick off in place), upcoming deadlines (items and open milestones,
   14 days), the project's briefing headline and vitals, the computed next steps (top 3, from
   `WindowData.next_steps`, never the model) and recent activity. Three columns, two below
-  1000 px. Each section fails on its own.
+  1000 px, one below 640 px. Each section fails on its own.
 - The window's `reload()` (file watcher, 30 s poll, after capture and after every write)
   refreshes Tasks and Home; each rebuilds only when its data changed. A `clock=` argument
   fixes "now" for tests and screenshots.
@@ -139,7 +149,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 779 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 791 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

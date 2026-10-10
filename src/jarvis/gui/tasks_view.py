@@ -43,6 +43,11 @@ from jarvis.gui.widgets import _clear, _label, repolish
 
 EDITOR_W = 320
 LIST_MAX = 960        # the list stops growing here on wide screens (rows stay readable)
+# Tasks' own width (smaller with the chat open beside it): below FILTERS_BELOW the
+# filters move under the title; below EDITOR_ALONE_BELOW an open editor takes the
+# list's place rather than squeezing it.
+FILTERS_BELOW = 700
+EDITOR_ALONE_BELOW = 660
 UNDO_MS = 12_000
 PRIORITY_LABELS = ("none", "! low", "!! high", "!!! urgent")
 EMPTY_ALL = ("Nothing open.", ("Capture a task, idea or reminder with Ctrl+N; it lands here, "
@@ -432,6 +437,10 @@ class TasksView(QWidget):
         titles.addWidget(self.summary)
         head.addLayout(titles)
         head.addStretch(1)
+        self.filters = QWidget()
+        fl = QHBoxLayout(self.filters)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(10)
         self.kind_buttons: dict[str, QPushButton] = {}
         for k in KIND_FILTERS:
             b = QPushButton(k if k == "all" else f"{k}s")
@@ -440,13 +449,18 @@ class TasksView(QWidget):
             b.setChecked(k == "all")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.clicked.connect(lambda _=False, k=k: self.set_kind(k))
-            head.addWidget(b)
+            fl.addWidget(b)
             self.kind_buttons[k] = b
         self.project_box = QComboBox()
         self.project_box.setMinimumWidth(130)
         self.project_box.setToolTip("Show one project's items")
         self.project_box.currentIndexChanged.connect(self._project_changed)
-        head.addWidget(self.project_box)
+        fl.addWidget(self.project_box)
+        head.addWidget(self.filters)
+        self._head = head
+        self._filter_row = QHBoxLayout()
+        self._filter_row.setContentsMargins(0, 0, 0, 0)
+        self.filters_below = False
         self.capture_btn = QPushButton("+ capture")
         self.capture_btn.setObjectName("primary")
         self.capture_btn.setToolTip("Quick capture (Ctrl+N)")
@@ -454,6 +468,7 @@ class TasksView(QWidget):
         self.capture_btn.clicked.connect(self.capture_requested)
         head.addWidget(self.capture_btn)
         outer.addLayout(head)
+        outer.addLayout(self._filter_row)
 
         # undo strip after a delete
         self.undo_bar = QFrame()
@@ -499,6 +514,7 @@ class TasksView(QWidget):
         self.editor_scroll.setWidget(self.editor)
         self.editor_scroll.hide()
         body.addWidget(self.editor_scroll, 0)
+        body.addStretch(0)   # takes the room only when the editor stands alone
         outer.addLayout(body, 1)
         self._fit_width()
 
@@ -660,6 +676,29 @@ class TasksView(QWidget):
     def _fit_width(self) -> None:
         extra = EDITOR_W + 22 if not self.editor_scroll.isHidden() else 0
         self.content.setMaximumWidth(LIST_MAX + 32 + extra)
+        self._reflow()
+
+    def _reflow(self) -> None:
+        """Fit a narrow Tasks (a small window, or the chat open beside it)."""
+        w = self.width()
+        below = w < FILTERS_BELOW
+        if below != self.filters_below:
+            self.filters_below = below
+            self._head.removeWidget(self.filters)
+            self._filter_row.removeWidget(self.filters)
+            if below:
+                self._filter_row.addWidget(self.filters)
+                self._filter_row.addStretch(1)
+            else:
+                while self._filter_row.count():
+                    self._filter_row.takeAt(0)
+                self._head.insertWidget(self._head.indexOf(self.capture_btn), self.filters)
+        self.editor_alone = w < EDITOR_ALONE_BELOW and not self.editor_scroll.isHidden()
+        self.scroll.setVisible(not self.editor_alone)
+
+    def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(e)
+        self._reflow()
 
     def _write(self, fn: Callable[[], it.Item], message: Callable[[it.Item], str]) -> bool:
         try:

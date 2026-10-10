@@ -472,6 +472,9 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 #thinking {{ color: {t.muted}; font-family: {mono}; font-size: 12px; }}
 #botNote {{ color: {t.unsure}; font-size: 12px; font-style: italic; }}
 #botError {{ color: {t.muted}; font-size: 13px; font-style: italic; }}
+QTextBrowser#userText, QTextBrowser#botText, QTextBrowser#botNote, QTextBrowser#botError {{
+    background: transparent; border: none; padding: 0; selection-background-color: {sel};
+}}
 #composer {{ background: {t.inset}; border: 1px solid {t.border_strong}; border-radius: 10px; }}
 #composer[focus="true"] {{ border-color: {live_line}; }}
 #composerEdit {{

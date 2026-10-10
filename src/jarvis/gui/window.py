@@ -45,7 +45,7 @@ from jarvis.gui.brain import BrainGraph
 from jarvis.gui.brain_data import FILTER_KINDS, BrainData, ago, load_brain, _parse
 from jarvis.gui.capture_overlay import WIDTH as CAPTURE_W
 from jarvis.gui.capture_overlay import CaptureFn, CaptureOverlay, PlainFn
-from jarvis.gui.chat_panel import AskFn, ChatPanel
+from jarvis.gui.chat_panel import PANEL_WIDTH, AskFn, ChatPanel
 from jarvis.gui.cockpit import (
     BriefingHud,
     Inspector,
@@ -61,7 +61,7 @@ from jarvis.gui.cockpit import (
 from jarvis.gui.data import WindowData, describe_error, load_window_data, local_stamp, refresh_message
 from jarvis.gui.home_data import build_home
 from jarvis.gui.home_view import HomeView
-from jarvis.gui.shell import WIDE_FROM, WORKSPACES, NavRail, PlaceholderPage
+from jarvis.gui.shell import RAIL_COMPACT, RAIL_WIDE, WIDE_FROM, WORKSPACES, NavRail, PlaceholderPage
 from jarvis.gui.tasks_view import TasksView
 from jarvis.gui.widgets import ICON_SIZE, PulseDot, _label, refresh_icon, repolish
 from jarvis.lock import RefreshBusy, refresh_lock
@@ -73,6 +73,9 @@ RIGHT_W = 360
 NARROW_BELOW = 1200
 LEFT_W_NARROW = 272   # the longest vitals key + value still fit
 RIGHT_W_NARROW = 256
+# With the chat open the graph keeps at least this much; in a window too small for
+# vitals + graph + chat, the left column steps aside while the chat is open.
+CHAT_GRAPH_MIN = 420
 POLL_MS = 30_000
 DEBOUNCE_MS = 400
 STATUS_CLEAR_MS = 8_000
@@ -533,13 +536,18 @@ class MainWindow(QMainWindow):
         self.capture.move((page.width() - w) // 2, 64)
 
     def _fit_columns(self) -> None:
-        """Narrow the cockpit's side columns in a small window."""
+        """Narrow the cockpit's side columns in a small window; with the chat
+        open (it takes the right column's place) and no room left for the graph,
+        hide the left column too."""
         narrow = self.width() < NARROW_BELOW
         lw, rw = (LEFT_W_NARROW, RIGHT_W_NARROW) if narrow else (LEFT_W, RIGHT_W)
-        if self.left_column.width() != lw:
+        if self.left_column.maximumWidth() != lw:
             self.left_column.setFixedWidth(lw)
             self._left_inner.setFixedWidth(lw - 6)
             self.right.setFixedWidth(rw)
+        rail = RAIL_WIDE if self.width() >= WIDE_FROM else RAIL_COMPACT
+        graph = self.width() - rail - PANEL_WIDTH - lw - 34   # body margins + spacing
+        self.left_column.setVisible(self.chat.isHidden() or graph >= CHAT_GRAPH_MIN)
 
     def _on_captured(self, result: Any) -> None:
         from jarvis.capture import summary
@@ -597,6 +605,7 @@ class MainWindow(QMainWindow):
     def set_chat_open(self, open_: bool, focus: bool = True) -> None:
         self.chat.setVisible(open_)
         self.right.setVisible(not open_)
+        self._fit_columns()
         self.chat_btn.setProperty("active", "true" if open_ else "false")
         repolish(self.chat_btn)
         if open_ and focus:

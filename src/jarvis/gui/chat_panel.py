@@ -22,6 +22,7 @@ one turn (typed or spoken) runs at a time.
 from __future__ import annotations
 
 import inspect
+import math
 import re
 import shutil
 import sqlite3
@@ -33,8 +34,16 @@ from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent, QKeySequence, QShortcut
+from PySide6.QtGui import (
+    QDesktopServices,
+    QKeyEvent,
+    QKeySequence,
+    QShortcut,
+    QTextCursor,
+    QTextOption,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QMenu,
     QHBoxLayout,
@@ -44,6 +53,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
     QWidgetItem,
@@ -65,6 +75,7 @@ SUGGESTED = (
 )
 THINKING_SHOW_SECONDS_AFTER = 3
 THINKING_ORB = 20  # px, the orb next to "thinking…" in a reply
+STREAM_CARET = " ▍"  # after the streamed text until the answer is complete
 THINK_KEY = "chat/think_mode"
 THINK_TOOLTIP = ("Thinking mode (Ctrl+T, typed questions only): answer with the reasoning "
                  "model straight away. Off: a quick answer first, the reasoning model only "
@@ -200,6 +211,14 @@ def chip_text(ref: str, label: str = "") -> str:
     return rest
 
 
+CHIP_MAX = PANEL_WIDTH - 80   # px of chip text: a chip never outgrows the reply
+
+
+def elide_chip(button: QPushButton, text: str) -> str:
+    """A long source title ends in "…" (the tooltip has all of it)."""
+    return button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, CHIP_MAX)
+
+
 # ---------------------------------------------------------------- flow layout
 
 
@@ -260,6 +279,114 @@ class FlowLayout(QLayout):
         return y + line - r.y()
 
 
+# ---------------------------------------------------------------- message text
+
+
+class MessageText(QTextBrowser):
+    """Selectable message text that always fits the panel's width.
+
+    A QLabel can't break a word, so one long path or identifier made a reply as
+    wide as that word and pushed it past the window's edge; this wraps at word
+    boundaries and, when a word is longer than the line, inside it (copying
+    still gives the text as written). Its height follows the laid-out document,
+    and its minimum width is small, so it never widens the conversation.
+
+    Streaming appends to the document (``add_text``): Qt lays out only the
+    paragraph that changed, so each token costs the same however long the reply
+    is. Re-setting a label's whole text per token cost time proportional to the
+    reply (26 ms a token at 5,500 characters) and starved the GUI thread.
+
+    ``fit=True`` (the question bubble): as wide as the text when it is short,
+    wrapping when it isn't."""
+
+    MIN_W = 48
+
+    def __init__(self, name: str, parent: QWidget | None = None, *, fit: bool = False,
+                 links: bool = False):
+        super().__init__(parent)
+        self.setObjectName(name)
+        self.fit = fit
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setOpenLinks(False)          # never navigate the message itself
+        flags = Qt.TextInteractionFlag.TextSelectableByMouse
+        if links:
+            flags |= Qt.TextInteractionFlag.LinksAccessibleByMouse
+            self.anchorClicked.connect(QDesktopServices.openUrl)
+        self.setTextInteractionFlags(flags)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)   # Ctrl+C, never a Tab stop
+        self.viewport().setAutoFillBackground(False)
+        self.document().setDocumentMargin(0)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred if fit else QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Fixed)
+        self._caret = ""
+        self._h = -1
+        self.document().documentLayout().documentSizeChanged.connect(self._fit_height)
+        self._fit_height()
+
+    # -- content
+
+    def text(self) -> str:
+        """The text as shown (without the streaming caret)."""
+        t = self.toPlainText()
+        return t[:-len(self._caret)] if self._caret and t.endswith(self._caret) else t
+
+    def set_plain(self, text: str, caret: str = "") -> None:
+        self._caret = caret
+        self.setPlainText(text + caret)
+        self.updateGeometry()
+
+    def set_html(self, html: str) -> None:
+        self._caret = ""
+        self.setHtml(html)
+        self.updateGeometry()
+
+    def add_text(self, text: str) -> None:
+        """Add streamed text before the caret; only the last paragraph is laid out again."""
+        if not text:
+            return
+        cur = QTextCursor(self.document())
+        cur.movePosition(QTextCursor.MoveOperation.End)
+        if self._caret:
+            cur.movePosition(QTextCursor.MoveOperation.Left, n=len(self._caret))
+        cur.insertText(text)
+
+    # -- size
+
+    def _fit_height(self, *_: Any) -> None:
+        h = math.ceil(self.document().size().height()) + 2 * self.frameWidth()
+        if h != self._h:
+            self._h = h
+            self.setFixedHeight(max(h, 1))
+
+    def natural_width(self) -> int:
+        """The width of the longest line, unwrapped."""
+        fm = self.fontMetrics()
+        widest = max((fm.horizontalAdvance(line) for line in self.text().split("\n")), default=0)
+        return widest + 2 * self.frameWidth() + 4
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        w = self.natural_width() if self.fit else super().sizeHint().width()
+        return QSize(w, max(self._h, 1))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return QSize(self.MIN_W, max(self._h, 1))
+
+    def wheelEvent(self, e) -> None:  # noqa: N802 - Qt API
+        """The conversation scrolls, not the message (it never has anything to scroll)."""
+        area = self.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+        if area is None:
+            e.ignore()
+            return
+        QApplication.sendEvent(area.verticalScrollBar(), e)
+        e.accept()
+
+
 # ---------------------------------------------------------------- messages
 
 
@@ -279,7 +406,6 @@ class UserMessage(QWidget):
         bl.setSpacing(7)
         self.voice = voice
         self.glyph: vt.MicGlyph | None = None
-        extra = 0
         if voice:
             self.glyph = vt.MicGlyph(tokens, 12)
             col = QVBoxLayout()
@@ -290,13 +416,9 @@ class UserMessage(QWidget):
             col.addStretch(1)
             bl.addLayout(col)
             bl.setContentsMargins(10, 8, 12, 9)
-            extra = 19
-        self.label = _label(text, "userText")
-        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        # Short questions stay on one line; long ones wrap inside the bubble.
-        if self.label.fontMetrics().horizontalAdvance(text) > PANEL_WIDTH - 110 - extra:
-            self.label.setWordWrap(True)
-            self.label.setMinimumWidth(PANEL_WIDTH - 130 - extra)
+        # Short questions keep the bubble snug; long ones wrap inside it.
+        self.label = MessageText("userText", fit=True)
+        self.label.set_plain(text)
         bl.addWidget(self.label)
         lay.addWidget(bubble)
         self.text = text
@@ -341,6 +463,9 @@ class VoiceNote(QWidget):
         self.label.setTextFormat(Qt.TextFormat.RichText)
         self.label.setText(note_html(text))
         self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # a no-wrap URL or command line never widens the conversation (it is cut at
+        # the edge instead; selecting and copying still gives all of it)
+        self.label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         lay.addWidget(self.label, 1)
         self.text = text
 
@@ -371,10 +496,9 @@ class BotMessage(QWidget):
         self.name = _label("✦ Jarvis", "botName")
         self.name.setFont(theme.mono_font(11))
         head.addWidget(self.name)
-        self.meta = _label("", "botMeta")
+        self.meta = _label("", "botMeta", wrap=True)   # wraps rather than widening the reply
         self.meta.setFont(theme.mono_font(10, caps=False, spacing_em=0.04))
-        head.addWidget(self.meta)
-        head.addStretch(1)
+        head.addWidget(self.meta, 1)
         lay.addLayout(head)
         # thinking indicator: a small orb in its thinking state + elapsed seconds
         self.thinking = QWidget()
@@ -383,17 +507,14 @@ class BotMessage(QWidget):
         tl.setSpacing(8)
         self.thinking_orb = Orb(tokens, THINKING_ORB, "thinking")
         tl.addWidget(self.thinking_orb)
-        self.thinking_text = _label("thinking…", "thinking")
-        tl.addWidget(self.thinking_text)
-        tl.addStretch(1)
+        self.thinking_text = _label("thinking…", "thinking", wrap=True)
+        tl.addWidget(self.thinking_text, 1)
         lay.addWidget(self.thinking)
-        self.body = _label("", "botText", wrap=True)
-        self.body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
-                                          | Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        self.body.setOpenExternalLinks(True)
+        self.body = MessageText("botText", links=True)
         self.body.hide()
+        self._live = False                # the body holds streamed text (with the caret)
         lay.addWidget(self.body)
-        self.notes = _label("", "botNote", wrap=True)
+        self.notes = MessageText("botNote")
         self.notes.hide()
         lay.addWidget(self.notes)
         self.chips_box = QWidget()
@@ -460,7 +581,8 @@ class BotMessage(QWidget):
             self._discarding = False
             self.body.setGraphicsEffect(None)
             self.body.hide()
-            self.body.setText("")
+            self.body.set_plain("")
+            self._live = False
             self._show_thinking()
 
         motion.fade_out(self.body, motion.BASE, on_done=gone)
@@ -479,9 +601,12 @@ class BotMessage(QWidget):
         if not self.thinking.isHidden():
             self._stop_thinking()
         self.body.show()
+        if self.streamed and self._live:
+            self.body.add_text(text)      # only the new text is laid out
+        else:
+            self.body.set_plain(self.streamed + text, caret=STREAM_CARET)
+            self._live = True
         self.streamed += text
-        self.body.setTextFormat(Qt.TextFormat.PlainText)
-        self.body.setText(self.streamed + " ▍")
 
     def finish(self, answer: Any) -> None:
         self._stop_thinking()
@@ -489,20 +614,19 @@ class BotMessage(QWidget):
             self._discarding = False
             self.body.setGraphicsEffect(None)
         self.answer = answer
+        self._live = False
         self.body.show()
         error = getattr(answer, "error", None)
         text = (getattr(answer, "text", "") or "").strip()
         if error and not getattr(answer, "sources", None) and not self.streamed.strip():
             self.body.setObjectName("botError")
-            self.body.setTextFormat(Qt.TextFormat.PlainText)
-            self.body.setText(text or f"The model failed: {error}")
+            self.body.set_plain(text or f"The model failed: {error}")
             repolish(self.body)
         else:
-            self.body.setTextFormat(Qt.TextFormat.RichText)
-            self.body.setText(markdown_html(text or NO_ANSWER))
+            self.body.set_html(markdown_html(text or NO_ANSWER))
         notes = [n for n in getattr(answer, "notes", None) or [] if n]
         if notes:
-            self.notes.setText("\n".join(notes))
+            self.notes.set_plain("\n".join(notes))
             self.notes.show()
         if hasattr(answer, "cited_sources"):
             # only what the answer itself cited (chat.Answer), at most a handful
@@ -534,9 +658,9 @@ class BotMessage(QWidget):
 
     def fail(self, message: str) -> None:
         self._stop_thinking()
+        self._live = False
         self.body.setObjectName("botError")
-        self.body.setTextFormat(Qt.TextFormat.PlainText)
-        self.body.setText(message)
+        self.body.set_plain(message)
         repolish(self.body)
         self.body.show()
 
@@ -548,8 +672,9 @@ class BotMessage(QWidget):
             ref = getattr(s, "ref", str(s))
             label = getattr(s, "label", "") or ref
             url = getattr(s, "url", None)
-            b = QPushButton(chip_text(ref, label))
+            b = QPushButton()
             b.setObjectName("srcChip")
+            b.setText(elide_chip(b, chip_text(ref, label)))
             b.setToolTip(label + (f"\n{url}" if url else ""))
             if url:
                 b.setCursor(Qt.CursorShape.PointingHandCursor)

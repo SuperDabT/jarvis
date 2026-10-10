@@ -4,7 +4,8 @@ A greeting with the day's count, then compact panels: today (overdue first,
 then due today, each can be ticked off), upcoming deadlines (items and project
 milestones, two weeks out), the project (briefing headline and vitals), next
 steps (computed by Jarvis from the project data, never the model) and recent
-activity. Three columns when there is room, two when narrow. Data comes from
+activity. Three columns when there is room, two when narrow, one beside the
+chat in a small window. Data comes from
 home_data.build_home; Home itself only completes items (through the window).
 """
 from __future__ import annotations
@@ -31,6 +32,7 @@ from jarvis.gui.widgets import _clear, _label
 
 TODAY_MAX = 8
 NARROW_BELOW = 1000   # Home's own width: two columns below this
+SINGLE_BELOW = 640    # ... and one below this (a small window with the chat open)
 KIND_TAG = {"milestone": "milestone", "task": "task", "idea": "idea", "reminder": "reminder"}
 
 
@@ -52,6 +54,7 @@ class HomeView(QWidget):
         self.tokens = tokens
         self.data: HomeData | None = None
         self.narrow: bool | None = None
+        self.columns = 0
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll = QScrollArea()
@@ -109,20 +112,26 @@ class HomeView(QWidget):
         self.page.addStretch(1)
         self.today_rows: list[TaskRow] = []
         self.deadline_rows: list[QWidget] = []
-        self._place(False)
+        self._place(3)
 
     # ------------------------------------------------------------ layout
 
-    def _place(self, narrow: bool) -> None:
-        if narrow == self.narrow:
+    def _place(self, columns: int) -> None:
+        if columns == self.columns:
             return
-        self.narrow = narrow
-        for p in (self.today, self.deadlines, self.project, self.steps, self.activity):
+        self.columns = columns
+        self.narrow = columns < 3
+        panels = (self.today, self.deadlines, self.project, self.steps, self.activity)
+        for p in panels:
             self.grid.removeWidget(p)
         for c in range(3):
             self.grid.setColumnStretch(c, 0)
         top = Qt.AlignmentFlag.AlignTop
-        if narrow:
+        if columns == 1:
+            for r, p in enumerate(panels):
+                self.grid.addWidget(p, r, 0, top)
+            self.grid.setColumnStretch(0, 1)
+        elif columns == 2:
             self.grid.addWidget(self.today, 0, 0, top)
             self.grid.addWidget(self.deadlines, 1, 0, top)
             self.grid.addWidget(self.project, 0, 1, top)
@@ -142,7 +151,8 @@ class HomeView(QWidget):
 
     def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(e)
-        self._place(self.width() < NARROW_BELOW)
+        w = self.width()
+        self._place(1 if w < SINGLE_BELOW else 2 if w < NARROW_BELOW else 3)
 
     # ------------------------------------------------------------ data
 
