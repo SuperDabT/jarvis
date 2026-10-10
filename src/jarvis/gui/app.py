@@ -17,6 +17,9 @@ def make_app(argv: list[str] | None = None, scheme: str | None = None) -> QAppli
     """Create (or reuse) the QApplication with name, font and theme set."""
     app = QApplication.instance()
     if app is None:
+        from jarvis.gui import school_stage
+
+        school_stage.prepare()          # WebEngine must be set up before the app exists
         QGuiApplication.setApplicationName(APP_ID)
         QGuiApplication.setApplicationDisplayName("Jarvis")
         QGuiApplication.setDesktopFileName(APP_ID)

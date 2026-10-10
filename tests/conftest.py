@@ -25,7 +25,13 @@ os.environ["JARVIS_DB"] = os.path.join(tempfile.mkdtemp(prefix="jarvis-db-"), "j
 # empty scratch file, never the user's (which also holds their tokens).
 os.environ.pop("JARVIS_NAME", None)
 os.environ.pop("JARVIS_CANVAS_ICS", None)
+# School's stage page (Qt WebEngine): no GPU offscreen, so Chromium draws in software
+# (WebGL is unavailable there; the 2D page logic still runs).
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 import jarvis.config as _config  # noqa: E402
+from jarvis.gui import school_stage as _school_stage  # noqa: E402
+
+_school_stage.prepare()      # before any test creates the QApplication
 
 _config.ENV_FILE = Path(tempfile.mkdtemp(prefix="jarvis-env-")) / "env"
 

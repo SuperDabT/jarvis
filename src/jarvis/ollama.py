@@ -152,7 +152,7 @@ class OllamaClient:
         return [[float(x) for x in v] for v in vecs]
 
     def chat_stream(
-        self, messages: list[dict[str, str]], options: dict[str, Any] | None = None,
+        self, messages: list[dict[str, Any]], options: dict[str, Any] | None = None,
         keep_alive: str | None = None, think: bool | None = None,
         on_thinking: Callable[[str], None] | None = None,
         max_thinking_s: float | None = None,
@@ -161,6 +161,7 @@ class OllamaClient:
 
         Ollama answers with NDJSON: one object per line carrying ``message.content``,
         the last one with ``done: true`` (its stats are kept in ``last_stream_stats``).
+        A message may carry ``images`` (base64 strings) for a model that reads them.
         A line with ``error`` (e.g. the model crashed mid-reply), a non-200 status, a
         connection failure, or a stream that ends without ``done`` raises OllamaError.
         Thinking is disabled like ``chat_json`` (retried without it if rejected).

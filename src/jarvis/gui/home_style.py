@@ -166,3 +166,44 @@ def tasks_stylesheet(p: HomePalette = PALETTE) -> str:
 #tasksPage QComboBox#tkProject QAbstractItemView {{ background: {p.card_hi}; color: {p.text};
     selection-background-color: {p.wash(p.accent, 0.3)}; }}
 """
+
+
+def school_stylesheet(p: HomePalette = PALETTE) -> str:
+    """School's rules (course tabs, the tutor's cards, the stage card), on top of
+    Home's: the same palette, scoped to the School page."""
+    return stylesheet(p).replace("#homePage", "#schoolPage") + f"""
+#schoolPage QLabel#scTitle {{ color: {p.text}; font-size: 20px; font-weight: 600; }}
+#scTabs {{ background: transparent; }}
+#scTab {{ color: {p.muted}; background: transparent; border: none; border-radius: 7px;
+         padding: 5px 10px; font-weight: 500; }}
+#scTab:hover {{ color: {p.text}; background: {p.wash(p.accent, 0.08)}; }}
+#scTab:checked {{ color: {p.text}; }}
+#scUnderline {{ background: {p.accent}; border-radius: 1px; }}
+#schoolPage QLabel#scExam {{ color: {p.amber}; background: {p.wash(p.amber, 0.14)}; border-radius: 9px; font-size: 13px;
+          padding: 3px 10px; }}
+#schoolPage QComboBox#scModule {{ color: {p.muted}; background: transparent;
+    border: 1px solid {p.border}; border-radius: 7px; padding: 4px 10px; }}
+#schoolPage QComboBox#scModule:hover {{ color: {p.text}; border-color: {p.border_hi}; }}
+#schoolPage QComboBox#scModule::drop-down {{ border: none; width: 16px; }}
+#schoolPage QComboBox#scModule QAbstractItemView {{ background: {p.card_hi}; color: {p.text};
+    selection-background-color: {p.wash(p.accent, 0.3)}; }}
+#scScroll, #scFeed {{ background: transparent; }}
+#schoolPage QLabel#scEmptyTitle {{ color: {p.text}; font-size: 17px; font-weight: 600; }}
+#scStarter {{ color: {p.text}; background: {p.card_hi}; border: 1px solid {p.border};
+             border-radius: 14px; padding: 5px 12px; }}
+#scStarter:hover {{ border-color: {p.accent}; background: {p.wash(p.accent, 0.12)}; }}
+#schoolPage QLabel#scName {{ color: {p.accent}; font-size: 12px; font-weight: 600; }}
+#scCheck {{ background: {p.card_hi}; border: 1px solid {p.border_hi};
+           border-left: 3px solid {p.accent}; border-radius: 9px; }}
+#schoolPage QLabel#scKicker {{ color: {p.accent}; font-size: 10px; font-weight: 700; letter-spacing: 1px; }}
+QTextBrowser#scAnswer {{ color: {p.muted}; background: transparent; border: none; }}
+#scLink {{ color: {p.accent}; background: transparent; border: none; padding: 2px 0; }}
+#scLink:hover {{ color: {mix(p.accent, '#ffffff', 0.3)}; }}
+#scIcon {{ color: {p.muted}; background: transparent; border: none; border-radius: 7px;
+          font-size: 14px; }}
+#scIcon:hover {{ background: {p.wash(p.accent, 0.14)}; }}
+#scGhostIcon {{ color: {p.faint}; background: transparent; border: none; padding: 0 4px; }}
+#scGhostIcon:hover {{ color: {p.red}; }}
+#schoolPage QLabel#scAttach {{ color: {p.accent}; font-size: 12px; }}
+#schoolPage QLabel#scStageTitle {{ color: {p.muted}; font-size: 12px; font-weight: 600; }}
+"""

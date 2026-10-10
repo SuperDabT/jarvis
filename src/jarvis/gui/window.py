@@ -87,6 +87,7 @@ from jarvis.gui.shell import (
     NavRail,
     PlaceholderPage,
 )
+from jarvis.gui.school_view import SchoolView
 from jarvis.gui.tasks_view import TasksView
 from jarvis.gui.widgets import ICON_SIZE, PulseDot, _label, refresh_icon, repolish
 from jarvis.lock import RefreshBusy, refresh_lock
@@ -342,6 +343,10 @@ class MainWindow(QMainWindow):
                 w.open_item.connect(self.open_item)
                 w.open_project.connect(self.open_project_items)
                 w.ask.connect(self.ask_jarvis)
+            elif ws.key == "school":
+                w = self.school_view = SchoolView(self.cfg, self.conn, self.tokens,
+                                                  now_fn=self._now_fn)
+                w.status.connect(lambda text, level: self.set_status(text, level))
             else:
                 w = PlaceholderPage(ws.key, self.tokens)
                 w.open_projects.connect(lambda: self.show_workspace("projects"))
@@ -757,6 +762,7 @@ class MainWindow(QMainWindow):
         """Tasks and Home: items are cheap to read, and each view rebuilds only
         when its own data changed."""
         self.tasks_view.reload()
+        self.school_view.reload()
         try:
             home = build_home(self.conn, data, brain, self._now_fn(),
                               project_name=self._project_name(), repo=self.cfg.repo,
@@ -856,6 +862,8 @@ class MainWindow(QMainWindow):
         if self.chat.stop_voice():
             return
         if self.workspace == "tasks" and self.tasks_view.escape():
+            return
+        if self.workspace == "school" and self.school_view.escape():
             return
         if self.graph.lock_id:
             self.graph.lock(None)

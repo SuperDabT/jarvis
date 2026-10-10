@@ -105,20 +105,18 @@ def test_unknown_workspace_is_an_error(win):
 
 
 def test_placeholders_say_so_and_offer_real_actions(win, app):
-    for key in ("school", "knowledge"):
-        page = win.workspaces[key]
-        assert isinstance(page, PlaceholderPage)
-        assert page.badge.text() == "not built yet"
-        assert page.title.text() == key.capitalize() and page.plan.text()
-    assert not isinstance(win.workspaces["home"], PlaceholderPage)
-    assert not isinstance(win.workspaces["tasks"], PlaceholderPage)
-    school = win.workspaces["school"]
-    win.show_workspace("school")
-    school.capture_btn.click()
+    page = win.workspaces["knowledge"]
+    assert isinstance(page, PlaceholderPage)
+    assert page.badge.text() == "not built yet"
+    assert page.title.text() == "Knowledge" and page.plan.text()
+    for key in ("home", "tasks", "school"):
+        assert not isinstance(win.workspaces[key], PlaceholderPage)
+    win.show_workspace("knowledge")
+    page.capture_btn.click()
     app.processEvents()
     assert win.capture.isVisible()
     win._on_escape()
-    school.projects_btn.click()
+    page.projects_btn.click()
     assert win.workspace == "projects"
 
 

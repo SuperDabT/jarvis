@@ -71,12 +71,13 @@ class CanvasEvent:
     @property
     def course_short(self) -> str | None:
         """The course without its term or section: "ECE 201 - Fall 2026" -> "ECE 201",
-        "COMSC-230-5148" -> "COMSC-230"."""
+        "COMSC-230-5148" -> "COMSC-230", "MATH-1C-0120" -> "MATH-1C"."""
         if not self.course:
             return None
         c = re.sub(r"\s*[-–]\s*(?:fall|spring|summer|winter)\s+\d{4}\s*$", "", self.course,
                    flags=re.I)
         c = re.sub(r"(?<=\d)-\d{3,6}$", "", c)
+        c = re.sub(r"^([A-Za-z]+-\w+)-\d{3,6}$", r"\1", c)     # "MATH-1C-0120" -> "MATH-1C"
         return c.strip() or self.course
 
     @property
@@ -293,6 +294,17 @@ def upcoming(conn: sqlite3.Connection, start: date, end: date) -> list[CanvasEve
         "AND substr(starts_at, 1, 10) BETWEEN ? AND ? ORDER BY starts_at, uid",
         (start.isoformat(), end.isoformat()))
     return [_row(r) for r in rows]
+
+
+def courses(conn: sqlite3.Connection) -> list[str]:
+    """The short course names of current entries ("COMSC-230"), in name order.
+    [] when the database has no Canvas table yet."""
+    if not has_table(conn):
+        return []
+    rows = conn.execute("SELECT DISTINCT course FROM canvas_events WHERE removed_at IS NULL "
+                        "AND course IS NOT NULL AND course != ''")
+    names = {CanvasEvent("", "", "", r["course"], "", None).course_short for r in rows}
+    return sorted(n for n in names if n)
 
 
 def find(conn: sqlite3.Connection, key: str) -> CanvasEvent:

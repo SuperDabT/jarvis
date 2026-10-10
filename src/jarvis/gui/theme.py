@@ -18,6 +18,8 @@ actions, good status. Headings, borders and labels stay in the ink's tints.
 """
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -139,7 +141,13 @@ TYPE: dict[str, tuple[str, int, int]] = {
 # ---------------------------------------------------------------- fonts
 
 FONT_DIR = Path(__file__).with_name("fonts")
-FONT_FILES: dict[str, str] = {}  # bundled file -> voice (none: system fonts suffice)
+# bundled file -> voice. Plus Jakarta Sans (OFL 1.1) is on trial:
+# JARVIS_SANS=jakarta makes it the sans; the default is still the system's.
+# Static instances (tokotype/PlusJakartaSans): Qt's stylesheet weights can't
+# drive a variable font's axis, they'd all draw Regular.
+FONT_FILES: dict[str, str] = {f"PlusJakartaSans-{w}.ttf": "jakarta"
+                              for w in ("Light", "Regular", "Italic", "Medium", "SemiBold")}
+SANS_ENV = "JARVIS_SANS"
 SANS_FALLBACK = ("Adwaita Sans", "Inter", "Inter Variable", "Noto Sans", "Cantarell")
 MONO_FALLBACK = ("JetBrains Mono", "JetBrainsMono Nerd Font", "JetBrainsMono NF",
                  "iA Writer Mono S", "Adwaita Mono", "Noto Sans Mono", "DejaVu Sans Mono",
@@ -171,6 +179,8 @@ def load_fonts() -> dict[str, str]:
         return next((n for n in names if n in available), default)
 
     sans = found.get("sans") or first(SANS_FALLBACK, QGuiApplication.font().family())
+    if os.environ.get(SANS_ENV, "").strip().lower() == "jakarta" and found.get("jakarta"):
+        sans = found["jakarta"]
     _families = {
         "sans": sans, "display": sans, "serif": sans, "button": sans,
         "mono": first(MONO_FALLBACK, "monospace"),
@@ -183,13 +193,21 @@ def family(voice: str) -> str:
     return load_fonts()[voice]
 
 
+def sans_weight(weight: int) -> int:
+    """A sans weight as drawn: Plus Jakarta Sans is set lighter (regular text,
+    medium headings, semibold at most); the system sans keeps ``weight``."""
+    if "Jakarta" not in family("sans"):
+        return weight
+    return 400 if weight <= 400 else 500 if weight <= 650 else 600
+
+
 def display_font(px: int, weight: int = 650, width: int = 100, caps: bool = False,
                  spacing_em: float = -0.01) -> QFont:
     """The sans, semibold: headlines and big numbers. Never all caps (``caps`` and
     ``width`` are accepted for older callers and ignored)."""
     f = QFont(family("display"))
     f.setPixelSize(px)
-    f.setWeight(QFont.Weight(min(700, max(100, weight))))
+    f.setWeight(QFont.Weight(sans_weight(min(700, max(100, weight)))))
     f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     if spacing_em:
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, px * spacing_em)
@@ -215,7 +233,7 @@ def type_font(role: str) -> QFont:
         return mono_font(px, weight=weight)
     f = QFont(family("sans"))
     f.setPixelSize(px)
-    f.setWeight(QFont.Weight(weight))
+    f.setWeight(QFont.Weight(sans_weight(weight)))
     f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     return f
 
@@ -280,7 +298,7 @@ def stylesheet(t: Tokens) -> str:
     sans, mono = f'"{fam["sans"]}"', f'"{fam["mono"]}"'
     sel = t.tint(0.28)
     live_line = mix(t.bg, t.signal, 0.6)
-    return f"""
+    sheet = f"""
 * {{ outline: none; }}
 QMainWindow, #page {{ background: {t.bg}; }}
 QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
@@ -593,6 +611,17 @@ QScrollBar::handle:vertical:hover {{ background: {t.btn_line}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
 """
+    return _sans_weights(sheet, mono)
+
+
+def _sans_weights(sheet: str, mono: str) -> str:
+    """``sans_weight`` for the stylesheet's rules (mono rules keep theirs)."""
+    if sans_weight(600) == 600:
+        return sheet
+    return "}".join(
+        block if mono in block else re.sub(
+            r"font-weight: (\d+)", lambda m: f"font-weight: {sans_weight(int(m[1]))}", block)
+        for block in sheet.split("}"))
 
 
 def apply(app: QGuiApplication, scheme: str | None = None) -> Tokens:

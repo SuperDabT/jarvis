@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stage</title>
+<link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="stage.css">
+</head>
+<body>
+  <main id="stage">
+    <section id="empty" class="layer shown">
+      <svg class="emblem" viewBox="0 0 160 120" aria-hidden="true">
+        <g class="edges">
+          <line x1="30" y1="86" x2="70" y2="34"/>
+          <line x1="70" y1="34" x2="122" y2="48"/>
+          <line x1="30" y1="86" x2="104" y2="96"/>
+          <line x1="104" y1="96" x2="122" y2="48"/>
+        </g>
+        <circle class="pulse" r="4"><animateMotion dur="3.6s" repeatCount="indefinite"
+          path="M30 86 L70 34 L122 48 L104 96 Z"/></circle>
+        <g class="nodes">
+          <circle cx="30" cy="86" r="7"/><circle cx="70" cy="34" r="7"/>
+          <circle cx="122" cy="48" r="7"/><circle cx="104" cy="96" r="7"/>
+        </g>
+      </svg>
+      <h1>Visuals appear here</h1>
+      <p>Ask the tutor about a topic. Truth tables, graphs, diagrams and simulations
+        show up on this stage, and you can play with them.</p>
+    </section>
+    <section id="scene" class="layer"></section>
+  </main>
+  <script type="module" src="stage.js"></script>
+</body>
+</html>

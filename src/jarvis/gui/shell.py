@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Property, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -193,7 +193,7 @@ class NavButton(QAbstractButton):
             icon = QRectF(r.left() + 13, r.center().y() - 11, 22, 22)
             paint_icon(p, self.ws.key, icon, ink)
             font.setPixelSize(14)
-            font.setWeight(font.Weight.DemiBold if on else font.Weight.Normal)
+            font.setWeight(QFont.Weight(theme.sans_weight(600 if on else 400)))
             p.setFont(font)
             p.setPen(color)
             p.drawText(QRectF(icon.right() + 13, r.top(), r.width() - 60, r.height()),
