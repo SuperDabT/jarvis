@@ -12,7 +12,7 @@ The feed link works like a password: it is never printed, logged or put in an
 error message (``FeedError`` says what failed, never the link).
 
 Times are stored like items' dates, as local wall clock ("2026-10-13" or
-"2026-10-13T23:59"). A Canvas event whose title names an exam, quiz and the
+"2026-10-13T23:59"). A Canvas entry whose title names an exam, midterm and the
 like is a fixed commitment (``CanvasEvent.commitment``); assignments are
 deadlines. The feed doesn't say whether something was submitted.
 """
@@ -88,9 +88,9 @@ class CanvasEvent:
 
     @property
     def commitment(self) -> bool:
-        """An exam, quiz, presentation and the like: something to prepare for."""
-        return bool(planning._EVENT_RE.search(self.title)) or bool(
-            re.search(r"\bquiz(?:zes)?\b|\btests?\b", self.title, re.I))
+        """An exam, midterm, presentation and the like: something to prepare for.
+        A quiz is a deadline like any assignment."""
+        return bool(planning._EVENT_RE.search(self.title))
 
     @property
     def short_id(self) -> str:

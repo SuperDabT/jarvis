@@ -252,7 +252,7 @@ def _run_canvas(conn, action: str, key: str | None, days: int,
     if not rows:
         print(f"Nothing from Canvas in the next {days} days.")
     for e in rows:
-        mark = " [exam/quiz]" if e.commitment else ""
+        mark = " [exam]" if e.commitment else ""
         print(f"{e.short_id:>8}  {human_when(e.when):<22} {e.label}{mark}")
     return 0
 

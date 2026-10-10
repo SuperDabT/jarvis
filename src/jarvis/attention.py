@@ -14,7 +14,7 @@ morning summary is instant and can't get a date wrong:
 - ``stale``    undated items nobody has touched for weeks (counted).
 
 Canvas entries (``jarvis.canvas``) count like items from today on: an exam or
-quiz is a commitment, an assignment a deadline, labelled with its course. A
+exam is a commitment, an assignment or quiz a deadline, labelled with its course. A
 past Canvas assignment is never "overdue": the feed can't say whether it was
 submitted.
 

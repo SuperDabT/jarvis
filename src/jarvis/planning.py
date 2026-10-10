@@ -57,8 +57,9 @@ MAX_UNDATED = 12         # undated items in scope (highest priority first)
 DECISIONS = ("set_due", "work_on", "leave", "exclude")
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 # a dated item with one of these words is an event to prepare for (an exam), even
-# without a time; a timed item is a fixed commitment whatever its title
-_EVENT_RE = re.compile(r"\b(?:exams?|midterms?|finals?|quiz(?:zes)?|interviews?|"
+# without a time; a timed item is a fixed commitment whatever its title. A quiz is
+# a deadline, not an exam ("final" alone, as in "final report", isn't one either)
+_EVENT_RE = re.compile(r"\b(?:exams?|midterms?|finals|interviews?|"
                        r"presentations?|defen[cs]e|viva|appointments?)\b", re.I)
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
@@ -146,10 +147,10 @@ class Brief:
                            f"(item_id {b.id}); {lead}")
         if self.canvas:
             out.append("On Canvas (course deadlines and events: facts, not decided here; plan "
-                       "the user's time around them, an exam or quiz is a commitment to "
+                       "the user's time around them, an exam is a commitment to "
                        "prepare for):")
             for c in self.canvas:
-                out.append(f"- {_dated(c.when)} {c.label} [{'exam/quiz' if c.commitment else c.kind}]")
+                out.append(f"- {_dated(c.when)} {c.label} [{'exam' if c.commitment else c.kind}]")
         out.append("Items in scope (decide every one by item_id):")
         for b in self.items.values():
             when = (f"due {_dated(b.due)}" if b.due else "no date") + (

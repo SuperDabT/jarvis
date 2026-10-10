@@ -237,7 +237,7 @@ def test_planner_brief_has_canvas_as_facts_and_refuses_planning_over_the_exam(co
     add(conn, "Shower the dog")
     b = planning.build_brief(conn, NOW.date(), NOW.date() + timedelta(days=6), NOW.date())
     text = "\n".join(b.lines())
-    assert "- Thu 2026-10-15 10:00 Midterm exam (MATH 221 - Fall 2026) [exam/quiz]" in text
+    assert "- Thu 2026-10-15 10:00 Midterm exam (MATH 221 - Fall 2026) [exam]" in text
     assert "- Tue 2026-10-13 23:59 Lab 3: Op-amp filters (ECE 201 - Fall 2026) [assignment]" in text
     dog = next(iter(b.items))
     raw = {"decisions": [{"item_id": dog, "action": "work_on", "date": "2026-10-15",
@@ -282,10 +282,27 @@ def test_cli_list_done_and_undone(conn, tmp_path, capsys, monkeypatch):
     sync(conn)
     assert cli._run_canvas(conn, "list", None, 30, NOW) == 0
     out = capsys.readouterr().out
-    assert "     501  Tue Oct 13, 11:59 PM" in out and "[exam/quiz]" in out
+    assert "     501  Tue Oct 13, 11:59 PM" in out and "[exam]" in out
     assert cli._run_canvas(conn, "done", "501", 30) == 0
     assert "done: Lab 3: Op-amp filters (ECE 201 - Fall 2026)" in capsys.readouterr().out
     assert cli._run_canvas(conn, "done", None, 30) == 2
     monkeypatch.setattr(canvas, "feed_url", lambda *a, **k: None)
     assert cli._run_canvas(conn, "sync", None, 30, NOW) == 1
     assert "set JARVIS_CANVAS_ICS" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("title", "exam"), [
+    ("Chapter Quiz - Week 3", False), ("Video Quiz 3", False), ("Midterm exam", True),
+    ("Final Exam", True), ("Finals week review", True), ("Final project report", False),
+    ("Implications and Digital Circuits", False),
+])
+def test_quizzes_are_deadlines_and_only_exams_are_commitments(title, exam):
+    assert canvas.CanvasEvent("u", "assignment", title, "COMSC-230", "2026-10-13").commitment \
+        is exam
+
+
+def test_weekly_quizzes_dont_crowd_the_summary_as_exams(conn):
+    ics = FEED.replace("Midterm exam [MATH 221 - Fall 2026]", "Video Quiz 3 [COMSC-230]")
+    canvas.sync(conn, SECRET, NOW, LA, Http(ics))
+    kinds = {s.kind for s in attention.picture(conn, NOW).signals}
+    assert "event" not in kinds
