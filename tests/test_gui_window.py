@@ -84,7 +84,9 @@ def test_window_shows_cockpit(setup):
     assert win.vitals.values["progress"].text() == "0 / 0 closed"   # the seed milestone is empty
     assert win.vitals.values["risk"].text() == "No issues"
     assert len(win.milestones.rows) == 1 and win.dash.active.title == "Core demo"
-    assert win.stream.rows and "new suggestion" in " ".join(r.item.text for r in win.stream.rows)
+    assert not hasattr(win, "stream")                   # not part of Projects any more
+    assert "new suggestion" in " ".join(i.text for i in win.brain.stream)   # still recorded
+    assert win.home_view.data.activity                  # Home's "recent activity" shows it
     assert "briefing by gemma4:26b" in win.status_text.text()
     assert win.right.isVisible() and not win.chat.isVisible()  # chat starts closed
     assert win.state_pill.text() == "idle"
@@ -168,8 +170,7 @@ def test_filters_hide_kinds_and_stream_click_selects(setup, app):
     nid = _card_node(win, ids[0])
     pt = win.graph.screen_pos(nid)
     assert win.graph.node_at(pt.x(), pt.y()) != nid
-    row = next(r for r in win.stream.rows if r.item.node_id == nid)
-    row.clicked.emit(nid)  # a stream entry shows its node (and un-hides its kind)
+    win.home_view.open_node.emit(nid)  # Home's recent activity shows its node (un-hides its kind)
     assert win.filter_buttons["card"].isChecked() and win.graph.lock_id == nid
 
 

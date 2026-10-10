@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import UTC, datetime
-from html import escape
 
 from PySide6.QtCore import QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
@@ -61,8 +60,27 @@ COPY_LABEL = "copy prompt"
 # The inspector's summary: this much text and this many relationships, problems
 # first; the rest (up to DETAIL_LINKS) is under "details".
 SUMMARY_CHARS = 220
-SUMMARY_LINKS = 3
+SUMMARY_LINKS = 3       # kept for older callers
+SUMMARY_RELATED = 6     # related rows shown before "details"
+RELATED_PER_GROUP = 3
 DETAIL_LINKS = 12
+RELATION_GROUP = {"milestone": "milestone", "commit": "commits", "issue": "issues"}
+RELATION_HEADS = (("milestone", "milestone"), ("issues", "issues"), ("commits", "commits"),
+                  ("linked", "linked"))
+# How the selected item relates to the other one, and how certain that is.
+RELATION_NOTE = {
+    "mentions": "the commit names the issue",
+    "maybe": "may have closed it · unconfirmed",
+    "milestone": "milestone on GitHub",
+    "history": "commit before / after",
+    "card": "suggestion",
+    "check": "check involves",
+    "project": "in project",
+    "about": "about",
+    "related": "related",
+    "judged": "research judged against it",
+    "hub": "part of",
+}
 ATTENTION_RANK = {"fail": 0, "overdue": 0, "warn": 1, "unknown": 2, "active": 3}
 ATTENTION_WORDS = {"fail": "fail", "overdue": "overdue", "warn": "warn", "unknown": "unsure",
                    "active": "suggestion"}
@@ -177,21 +195,6 @@ class VitalsPanel(Panel):
             self.values[key], self.subs[key] = vl, sl
             if animate:
                 motion.count_up_text(vl, val)
-
-
-class ElideButton(QPushButton):
-    """A button whose text ends in "…" when the column is narrower than it, rather
-    than being cut mid-word (the tooltip has the whole of it)."""
-
-    def __init__(self, text: str, parent: QWidget | None = None):
-        super().__init__(text, parent)
-        self.full_text = text
-
-    def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
-        super().resizeEvent(e)
-        room = max(20, self.width() - 14)        # the stylesheet's side padding
-        self.setText(self.fontMetrics().elidedText(self.full_text,
-                                                   Qt.TextElideMode.ElideRight, room))
 
 
 class IssueRowButton(HoverRow):
@@ -591,6 +594,44 @@ class BriefingHud(QFrame):
 # ---------------------------------------------------------------- inspector
 
 
+class RelationRow(HoverRow):
+    """One related item in the inspector: its readable name and how it relates
+    (an unconfirmed link says so). Click: inspect it."""
+
+    def __init__(self, edge_kind: str, other: Node, tokens: Tokens,
+                 parent: QWidget | None = None):
+        super().__init__(tokens, parent)
+        self.edge_kind, self.other = edge_kind, other
+        self.uncertain = edge_kind == "maybe"
+        if other.kind in ("issue", "commit") and not other.title.startswith(other.label):
+            name = f"{other.label} {other.title}"
+        else:
+            name = other.title or other.label
+        self.name = name
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 5)
+        lay.setSpacing(0)
+        self.name_label = typeset(_label(name, "relName"), "body")
+        self.name_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lay.addWidget(self.name_label)
+        note = RELATION_NOTE.get(edge_kind, EDGE_LABELS.get(edge_kind, edge_kind))
+        if edge_kind == "milestone" and other.kind != "milestone":
+            note = "in this milestone"            # seen from the milestone
+        if other.status in ATTENTION_RANK:
+            note += f" · {ATTENTION_WORDS[other.status]}"
+        self.note = typeset(_label(note, "relNote"), "meta")
+        self.note.setProperty("uncertain", "true" if self.uncertain else "false")
+        lay.addWidget(self.note)
+        self.setToolTip(f"{other.title}\n{note}\nclick: inspect it")
+        self.setMinimumHeight(lay.sizeHint().height())   # a button doesn't size to its layout
+
+    def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(e)
+        fm = self.name_label.fontMetrics()
+        self.name_label.setText(fm.elidedText(self.name, Qt.TextElideMode.ElideRight,
+                                              max(20, self.name_label.width())))
+
+
 class Inspector(Panel):
     """What the graph is pointing at: title, details, links, and for a card the
     actions (copy the Claude prompt, done, not useful)."""
@@ -601,7 +642,7 @@ class Inspector(Panel):
     open_node = Signal(str)            # a neighbour was clicked
     open_item = Signal(int)            # "edit in Tasks" on an item
     complete_item = Signal(int)        # "done" on an item
-    explain = Signal(str)              # a question for the chat about a finding
+    ask = Signal(str)                  # "Ask Jarvis about this ...": the node id
     open_source = Signal(str)          # a finding's source (file:// or GitHub URL)
     copy_prompt = Signal(str)          # a finding's prompt for Claude
 
@@ -636,50 +677,95 @@ class Inspector(Panel):
         self._flash.timeout.connect(self._unflash)
         self.copy_btn: QPushButton | None = None
         self.finding: FindingView | None = None
+        self.focus = None
         self._shown_lock: str | None = None
         self.show_node(None)
 
     def show_node(self, node: Node | None, graph: Graph | None = None,
                   card: Card | None = None, locked: bool = False,
-                  now: datetime | None = None, finding: FindingView | None = None) -> None:
-        """Summary first: what it is, what needs attention, a few relationships;
-        everything else under "details". A finding (a check, or a card about one)
-        gets its explanation, source and next step, with the actions."""
+                  now: datetime | None = None, finding: FindingView | None = None,
+                  focus=None, priority: str = "") -> None:
+        """Header (kind, status, title, priority when labelled, summary), the
+        primary action (Ask Jarvis about this item, with its context), what the
+        item is related to (grouped, with how certain), then everything else
+        folded under "details". A finding (a check, or a card about one) also gets
+        its verified result, source and next step."""
         # a new selection settles in (hovering doesn't fade: scanning stays instant)
         changed = locked and node is not None and node.id != self._shown_lock
         self._shown_lock = node.id if locked and node is not None else None
-        self.node, self.card, self.finding = node, card, finding
+        self.node, self.card, self.finding, self.focus = node, card, finding, focus
         _clear(self.body)
         if changed:
             motion.fade_in(self.scroll.widget(), motion.SELECT)
         self.copy_btn = None
         self.details_btn = None
+        self.ask_btn = None
+        self.related_rows: list[RelationRow] = []
         self.hint.setText("locked · esc to release" if node and locked else "")
         if node is None:
-            self.body.addWidget(typeset(_label(self.HINT, "vNote"), "meta"))
-            self.body.itemAt(0).widget().setWordWrap(True)
+            self.body.addWidget(typeset(_label(self.HINT, "vNote", wrap=True), "meta"))
             return
         now = now or datetime.now(UTC)
-        kind = typeset(_label((node.sub if node.kind == "item" else
-                            KIND_NAMES.get(node.kind, node.kind))
-                           + (f" · {node.status}" if node.status else "")
-                           + (" · live" if node.live else ""), "inspKind"), "label")
-        self.body.addWidget(kind)
-        title = _label(node.title, "inspTitle", wrap=True)
-        title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.body.addWidget(title)
         details: list[QWidget] = []
+
+        # A. header
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        kind = typeset(_label((node.sub if node.kind == "item" else
+                               KIND_NAMES.get(node.kind, node.kind))
+                              + (f" · {node.status}" if node.status else "")
+                              + (" · live" if node.live else ""), "inspKind"), "label")
+        top.addWidget(kind)
+        if priority:
+            self.priority_tag = typeset(_label(priority, "issueTag"), "tag")
+            self.priority_tag.setProperty("kind", "blocker" if priority == "blocker"
+                                          else "priority")
+            top.addWidget(self.priority_tag)
+        top.addStretch(1)
+        self.body.addLayout(top)
+        title = typeset(_label(node.title, "inspTitle", wrap=True), "title")
+        title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.body.addWidget(title)
         detail = (node.detail or "").strip()
-        if finding is not None:
-            self._finding_section(finding, fix_prompt=card is None)  # a card has its own
-            if detail and detail != finding.why:
-                details.append(self._text(detail))
-        elif detail:
+        if finding is None and detail:
             short = detail if len(detail) <= SUMMARY_CHARS else \
                 detail[:SUMMARY_CHARS].rsplit(" ", 1)[0].rstrip(" ,.;") + "…"
             self.body.addWidget(self._text(short))
             if short != detail:
                 details.append(self._text(detail))
+
+        # B. primary action
+        if focus is not None or node.url:
+            actions = QWidget()
+            row = FlowLayout(actions, 6)
+            if focus is not None:
+                self.ask_btn = QPushButton(f"✦ {focus.action}")
+                self.ask_btn.setObjectName("primary")
+                self.ask_btn.setToolTip("Opens the chat with this item's details and "
+                                        "relationships as context; follow-ups keep it.")
+                self.ask_btn.clicked.connect(lambda: self.ask.emit(node.id))
+                row.addWidget(self.ask_btn)
+            if node.url:
+                gh = QPushButton("open ↗")
+                gh.setToolTip(node.url)
+                gh.clicked.connect(lambda: self.open_source.emit(node.url))
+                row.addWidget(gh)
+                self.open_btn = gh
+            for w in actions.findChildren(QPushButton):
+                w.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.body.addSpacing(2)
+            self.body.addWidget(actions)
+        if finding is not None:
+            self._finding_section(finding, fix_prompt=card is None)  # a card has its own
+            if detail and detail != finding.why:
+                details.append(self._text(detail))
+        if card is not None:
+            self._card_actions(card, details)
+        if node.kind == "item" and node.item_id is not None:
+            self._item_actions(node.item_id)
+
+        # C. related items
         links = graph.neighbours(node.id) if graph is not None else []
         links = sorted(links, key=lambda eo: (ATTENTION_RANK.get(eo[1].status or "", 9),))
         attention = Counter(o.status for _, o in links if o.status in ATTENTION_RANK)
@@ -687,56 +773,50 @@ class Inspector(Panel):
             words = " · ".join(f"{n} {ATTENTION_WORDS.get(st, st)}"
                                for st, n in sorted(attention.items(),
                                                    key=lambda kv: ATTENTION_RANK[kv[0]]))
-            self.attention = typeset(_label(f"needs attention · {words}", "inspAttention"), "label")
+            self.attention = typeset(_label(f"needs attention · {words}", "inspAttention"),
+                                     "label")
             self.body.addWidget(self.attention)
-        if links:
-            self.body.addWidget(typeset(_label(f"links · {len(links)}", "panelHead"), "head"))
-            for edge, other in links[:SUMMARY_LINKS]:
-                self.body.addWidget(self._link(edge, other))
-            for edge, other in links[SUMMARY_LINKS:DETAIL_LINKS]:
-                details.append(self._link(edge, other))
-            if len(links) > DETAIL_LINKS:
-                details.append(typeset(_label(f"+{len(links) - DETAIL_LINKS} more", "vNote"), "meta"))
-        meta = []
+        groups: dict[str, list] = {}
+        for edge, other in links:
+            groups.setdefault(RELATION_GROUP.get(other.kind, "linked"), []).append((edge, other))
+        shown = 0
+        for key, head in RELATION_HEADS:
+            items = groups.get(key)
+            if not items:
+                continue
+            self.body.addWidget(typeset(_label(f"{head} · {len(items)}", "panelHead"), "head"))
+            for i, (edge, other) in enumerate(items):
+                r = self._relation(edge, other)
+                if i < RELATED_PER_GROUP and shown < SUMMARY_RELATED:
+                    self.body.addWidget(r)
+                    shown += 1
+                elif i < DETAIL_LINKS:
+                    details.append(r)
+            if len(items) > DETAIL_LINKS:
+                details.append(typeset(_label(f"+{len(items) - DETAIL_LINKS} more {head}",
+                                              "vNote"), "meta"))
+
+        # D. everything else, folded
         from jarvis.gui.brain_data import _parse
 
         if node.when:
-            meta.append(ago(_parse(node.when), now))
-        if node.url:
-            meta.append(f'<a href="{escape(node.url, quote=True)}" '
-                        f'style="color:{self.tokens.signal}">open ↗</a>')
-        if meta:
-            m = typeset(_label(" · ".join(meta), "vKey", rich=True), "meta")
-            m.setOpenExternalLinks(True)
-            self.body.addWidget(m)
-        if card is not None:
-            self._card_actions(card, details)
-        if node.kind == "item" and node.item_id is not None:
-            self._item_actions(node.item_id)
-        if details:
-            self._details(details)
+            details.append(typeset(_label(f"last activity {ago(_parse(node.when), now)}",
+                                          "vNote"), "meta"))
+        details.append(typeset(_label(f"id {node.id}", "vNote"), "code"))
+        self._details(details)
         self.body.addStretch(1)
 
     def _text(self, text: str) -> QLabel:
-        d = _label(text, "inspText", wrap=True)
+        d = typeset(_label(text, "inspText", wrap=True), "body")
         d.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        d.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         return d
 
-    def _link(self, edge, other: Node) -> QPushButton:
-        name = other.label if other.kind in ("issue", "milestone", "commit", "hub",
-                                             "core", "part") else other.title
-        if len(name) > 38:
-            name = name[:37].rstrip() + "…"
-        mark = f" · {ATTENTION_WORDS[other.status]}" if other.status in ATTENTION_RANK else ""
-        b = ElideButton(f"{EDGE_LABELS.get(edge.kind, edge.kind)} → {name}" + mark)
-        b.setObjectName("filter")
-        b.setToolTip(other.title)
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.clicked.connect(lambda _=False, i=other.id: self.open_node.emit(i))
-        b.setStyleSheet("text-align: left;")
-        # never wider than the column (the tooltip has the full name)
-        b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        return b
+    def _relation(self, edge, other: Node) -> "RelationRow":
+        r = RelationRow(edge.kind, other, self.tokens)
+        r.clicked.connect(lambda _=False, i=other.id: self.open_node.emit(i))
+        self.related_rows.append(r)
+        return r
 
     def _details(self, widgets: list[QWidget]) -> None:
         """The rest, folded away: more relationships, full text, the raw prompt."""
@@ -776,10 +856,6 @@ class Inspector(Panel):
         src = f.source
         actions = QWidget()
         row = FlowLayout(actions, 6)      # wraps in a narrow column
-        self.explain_btn = QPushButton("explain")
-        self.explain_btn.setObjectName("primary")
-        self.explain_btn.setToolTip("Ask Jarvis in the chat (answers from the synced data)")
-        self.explain_btn.clicked.connect(lambda: self.explain.emit(f.explain_question))
         self.source_btn = QPushButton("open source")
         if src is not None and src.url:
             self.source_btn.setToolTip(src.url)
@@ -788,7 +864,7 @@ class Inspector(Panel):
             self.source_btn.setEnabled(False)
             self.source_btn.setToolTip("No hardware.yaml found to open")
         self.fix_btn = None
-        buttons = [self.explain_btn, self.source_btn]
+        buttons = [self.source_btn]
         if fix_prompt:
             self.fix_btn = QPushButton("copy fix prompt")
             self.fix_btn.setToolTip("Put a prompt for Claude on the clipboard: the finding with "

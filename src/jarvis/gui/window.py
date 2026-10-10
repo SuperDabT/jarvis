@@ -1,11 +1,14 @@
 """The main window: Jarvis as a project brain.
 
 Top bar (name, state pill, pulse, clock, refresh / ask), a status line, then
-three columns: vitals / milestones / pulse / power on the left; the project
-graph in the middle with the briefing floating over its top-left; the
-inspector and the thought stream on the right. A one-line ticker at the
-bottom. The chat ("Ask Jarvis") slides in over the right column (Ctrl+K /
-Ctrl+J), and its cited sources light up in the graph.
+three columns: the dashboard (vitals, issues, milestones, commit activity) on
+the left; the project graph in the middle with the briefing floating over its
+top-left; the inspector on the right (its "Ask Jarvis about this ..." opens
+the chat with the selected item as context). A one-line ticker at the bottom
+shows the newest event (the full stream is Home's "recent activity"). The
+chat slides in over the right column (Ctrl+K / Ctrl+J), and its cited
+sources light up in the graph. In a narrow window only one side column is
+shown at a time (``side_mode``).
 
 The window reads the database (re-read on file changes and every 30 s; only
 changed parts are rebuilt) and writes only done / not-useful marks and chat
@@ -46,6 +49,7 @@ from PySide6.QtWidgets import (
 from jarvis import cards as cards_mod
 from jarvis import db
 from jarvis.config import Config
+from jarvis.focus import build_focus
 from jarvis.gui import motion, theme
 from jarvis.gui.brain import BrainGraph
 from jarvis.gui.brain_data import FILTER_KINDS, BrainData, _parse, ago, load_brain
@@ -58,13 +62,13 @@ from jarvis.gui.cockpit import (
     Inspector,
     IssuesPanel,
     MilestonesPanel,
-    StreamPanel,
     VitalsPanel,
     mono,
     pill,
     set_pill,
 )
-from jarvis.gui.dashboard_data import Dashboard, build_dashboard
+from jarvis.gui.dashboard_data import Dashboard, build_dashboard, issue_rank
+from jarvis.gui.dashboard_data import _labels as _issue_labels
 from jarvis.gui.data import (
     WindowData,
     describe_error,
@@ -97,6 +101,16 @@ RIGHT_W_NARROW = 256
 # With the chat open the graph keeps at least this much; in a window too small for
 # vitals + graph + chat, the left column steps aside while the chat is open.
 CHAT_GRAPH_MIN = 420
+# Narrow windows (a tiled half screen is 800 px): below CHAT_DOCK_FROM the chat
+# floats over the right side of the workspace instead of squeezing it; when the
+# graph would get less than GRAPH_MIN beside both cockpit columns, Projects shows
+# one side column at a time (dashboard or inspector, a toggle in the status row).
+MIN_SIZE = (800, 560)
+CHAT_DOCK_FROM = 980
+CHAT_OVERLAY_W = 340
+GRAPH_MIN = 300
+TICKER_STATUS_MIN = 200  # px the ticker keeps for its status text before the hint
+HUD_FOLD_BELOW = 480     # graph width under which the briefing folds to its headline
 ACTIVE_MILESTONE_KEY = "projects/active_milestone"
 POLL_MS = 30_000
 DEBOUNCE_MS = 400
@@ -173,6 +187,7 @@ class _GraphStage(QWidget):
     def __init__(self, graph: BrainGraph, hud: BriefingHud, legend: QWidget, counts: QLabel):
         super().__init__()
         self.graph, self.hud, self.legend, self.counts = graph, hud, legend, counts
+        self._auto_folded = False
         for w in (graph, hud, legend, counts):
             w.setParent(self)
         hud.raise_()
@@ -184,6 +199,15 @@ class _GraphStage(QWidget):
     def place(self) -> None:
         w, h = self.width(), self.height()
         self.graph.setGeometry(0, 0, w, h)
+        # a narrow graph: the briefing folds to its headline so the graph stays visible
+        narrow = w < HUD_FOLD_BELOW and self.isVisible()
+        if narrow and self.hud.expanded and not self._auto_folded:
+            self._auto_folded = True
+            self.hud.set_expanded(False)
+        elif not narrow and self._auto_folded:
+            self._auto_folded = False
+            if not self.hud.expanded:
+                self.hud.set_expanded(True)
         self.hud.setFixedWidth(min(BriefingHud.WIDTH, max(260, w - 28)))
         self.hud.adjustSize()
         self.hud.move(14, 14)
@@ -241,12 +265,15 @@ class MainWindow(QMainWindow):
         self._voice_kw = dict(voice or {})
         self._capture_fns = (capture_fn, plain_capture_fn)
         self._now_fn = clock or (lambda: datetime.now().astimezone())
+        self._chat_open = False
+        self._chat_floating = False
+        self.side_mode = "inspector"
         self.open_url: Callable[[QUrl], Any] = QDesktopServices.openUrl   # tests swap it
         self._status_sticky = False
 
         self.setWindowTitle(f"Jarvis · {self.cfg.repo.split('/')[-1]}")
         self.resize(*DEFAULT_SIZE)
-        self.setMinimumSize(980, 600)
+        self.setMinimumSize(MIN_SIZE[0], MIN_SIZE[1])
         self._build()
         self._shortcuts()
         self.show_workspace(start or START_WORKSPACE)
@@ -284,10 +311,11 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        outer.addWidget(self._build_topbar())
+        self.topbar = self._build_topbar()
+        outer.addWidget(self.topbar)
 
         # rail | workspaces | chat
-        middle = QHBoxLayout()
+        middle = self._middle = QHBoxLayout()
         middle.setContentsMargins(0, 0, 0, 0)
         middle.setSpacing(0)
         self.rail = NavRail(self.tokens)
@@ -323,10 +351,12 @@ class MainWindow(QMainWindow):
         self.chat = ChatPanel(self.cfg, self.tokens, self._ask_fn, **self._voice_kw)
         self.chat.close_requested.connect(lambda: self.set_chat_open(False))
         self.chat.answered.connect(self._on_answer)
+        self.chat.focus_selected.connect(self._show_focus)
         middle.addWidget(self.chat)
 
         outer.addLayout(middle, 1)
-        outer.addWidget(self._build_ticker())
+        self.ticker = self._build_ticker()
+        outer.addWidget(self.ticker)
         self.setCentralWidget(page)
 
         # quick capture floats over everything (Ctrl+N)
@@ -335,7 +365,7 @@ class MainWindow(QMainWindow):
 
     def _build_projects(self) -> QWidget:
         """The engineering cockpit: status line, then vitals / milestones / pulse /
-        power, the graph with the briefing over it, and the inspector + stream."""
+        power, the graph with the briefing over it, and the inspector."""
         ws = QWidget()
         lay = QVBoxLayout(ws)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -389,7 +419,7 @@ class MainWindow(QMainWindow):
         fl.addWidget(self.stage)
         body.addWidget(frame, 1)
 
-        # right: inspector + stream (the chat takes this room when it is open)
+        # right: the inspector, full height (the chat takes this room when it is open)
         self.right = QWidget()
         self.right.setFixedWidth(RIGHT_W)
         rl = QVBoxLayout(self.right)
@@ -404,13 +434,10 @@ class MainWindow(QMainWindow):
         self.inspector.open_node.connect(self.select_node)
         self.inspector.open_item.connect(self.open_item)
         self.inspector.complete_item.connect(self.complete_item)
-        self.inspector.explain.connect(self.explain_finding)
+        self.inspector.ask.connect(self.ask_about)
         self.inspector.open_source.connect(lambda url: self.open_url(QUrl(url)))
         self.inspector.copy_prompt.connect(self._copy_finding_prompt)
-        rl.addWidget(self.inspector, 3)
-        self.stream = StreamPanel()
-        self.stream.open_node.connect(self.select_node)
-        rl.addWidget(self.stream, 2)
+        rl.addWidget(self.inspector, 1)
         body.addWidget(self.right)
 
         lay.addLayout(body, 1)
@@ -461,11 +488,29 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(13, 8, 13, 0)  # lines up with the panels below
         lay.setSpacing(10)
         self.status_text = mono(_label("", "statusText"), 11)
-        lay.addWidget(self.status_text)
+        self.status_text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.status_text.setMinimumWidth(60)
+        lay.addWidget(self.status_text, 1)
         self.status_pills = QHBoxLayout()
         self.status_pills.setSpacing(6)
         lay.addLayout(self.status_pills)
-        lay.addStretch(1)
+        # a narrow window shows one side column at a time
+        self.side_toggle = QWidget()
+        st = QHBoxLayout(self.side_toggle)
+        st.setContentsMargins(0, 0, 0, 0)
+        st.setSpacing(0)
+        self.side_buttons: dict[str, QPushButton] = {}
+        for key in ("dashboard", "inspector"):
+            b = QPushButton(key)
+            b.setObjectName("segment")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(f"Show the {key} beside the graph")
+            b.clicked.connect(lambda _=False, k=key: self.set_side_mode(k))
+            st.addWidget(b)
+            self.side_buttons[key] = b
+        self.side_toggle.hide()
+        lay.addWidget(self.side_toggle)
         return row
 
     def _build_legend(self) -> QWidget:
@@ -509,6 +554,8 @@ class MainWindow(QMainWindow):
         self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         lay.addWidget(self.status_label, 1)
         self.hint_label = mono(_label(IDLE_HINT, "tickerHint"), 10)
+        self.hint_label.setMinimumWidth(40)      # shrinks (with "…") only when it must
+        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self.hint_label)
         return bar
 
@@ -539,7 +586,10 @@ class MainWindow(QMainWindow):
     def show_workspace(self, key: str) -> None:
         if key not in self.workspaces:
             raise KeyError(f"no workspace {key!r}")
-        self.stack.setCurrentWidget(self.workspaces[key])
+        page = self.workspaces[key]
+        if self.stack.currentWidget() is not page and self.isVisible():
+            motion.fade_in(page, motion.SWITCH)    # the new workspace settles in
+        self.stack.setCurrentWidget(page)
         self.rail.select(key)
         name = next(w.name for w in WORKSPACES if w.key == key).lower()
         if key == "projects":
@@ -548,7 +598,8 @@ class MainWindow(QMainWindow):
         else:
             self.crumb.setText(f"/ {name}")
             self.crumb.setToolTip("")
-        self.hint_label.setText(IDLE_HINT if key == "projects" else SHELL_HINT)
+        self.hint_label.setProperty("full", IDLE_HINT if key == "projects" else SHELL_HINT)
+        self._fit_hint()
         if key == "projects":
             self.stage.place()
 
@@ -565,10 +616,56 @@ class MainWindow(QMainWindow):
         self.capture.adjustSize()
         self.capture.move((page.width() - w) // 2, 64)
 
+    @property
+    def chat_overlay(self) -> bool:
+        """Whether the chat floats over the workspace (a narrow window)."""
+        return self.width() < CHAT_DOCK_FROM
+
+    def _place_chat(self) -> None:
+        """Dock the chat beside the workspaces, or float it over their right side
+        in a narrow window (it never squeezes them below their minimum)."""
+        overlay = self.chat_overlay
+        if overlay != self._chat_floating:
+            self._chat_floating = overlay
+            if overlay:
+                self._middle.removeWidget(self.chat)
+                self.chat.setParent(self.centralWidget())
+                self.chat.setFixedWidth(CHAT_OVERLAY_W)
+            else:
+                self.chat.setParent(None)
+                self.chat.setFixedWidth(PANEL_WIDTH)
+                self._middle.addWidget(self.chat)
+            self.chat.setVisible(self._chat_open)
+        if overlay and self._chat_open:
+            page = self.centralWidget()
+            top = self.topbar.geometry().bottom() + 1
+            bottom = self.ticker.geometry().top() if self.ticker.isVisible() else page.height()
+            self.chat.setGeometry(page.width() - CHAT_OVERLAY_W, top, CHAT_OVERLAY_W,
+                                  max(200, bottom - top))
+            self.chat.raise_()
+            if not self.capture.isHidden():
+                self.capture.raise_()
+
+    def _fit_hint(self) -> None:
+        """The ticker's shortcut hint, cut at the front with "…" when it doesn't fit."""
+        full = self.hint_label.property("full") or self.hint_label.text()
+        self.hint_label.setProperty("full", full)
+        self.hint_label.setToolTip(full)
+        # the ticker's width less its margins, a gap and room kept for the status text
+        room = max(40, self.ticker.width() - 36 - 16 - TICKER_STATUS_MIN)
+        self.hint_label.setText(self.hint_label.fontMetrics().elidedText(
+            full, Qt.TextElideMode.ElideLeft, room))
+
+    def set_side_mode(self, mode: str) -> None:
+        """Narrow Projects: "dashboard" or "inspector" beside the graph."""
+        self.side_mode = mode
+        self._fit_columns()
+
     def _fit_columns(self) -> None:
-        """Narrow the cockpit's side columns in a small window; with the chat
-        open (it takes the right column's place) and no room left for the graph,
-        hide the left column too."""
+        """Narrow the cockpit's side columns in a small window. With the chat docked
+        (it takes the right column's place) and no room left for the graph, the
+        left column steps aside too. When the graph can't keep GRAPH_MIN beside
+        both columns, one side column is shown at a time (``side_mode``)."""
         narrow = self.width() < NARROW_BELOW
         lw, rw = (LEFT_W_NARROW, RIGHT_W_NARROW) if narrow else (LEFT_W, RIGHT_W)
         if self.left_column.maximumWidth() != lw:
@@ -576,8 +673,22 @@ class MainWindow(QMainWindow):
             self._left_inner.setFixedWidth(lw - 6)
             self.right.setFixedWidth(rw)
         rail = RAIL_WIDE if self.width() >= WIDE_FROM else RAIL_COMPACT
-        graph = self.width() - rail - PANEL_WIDTH - lw - 34   # body margins + spacing
-        self.left_column.setVisible(self.chat.isHidden() or graph >= CHAT_GRAPH_MIN)
+        docked = self._chat_open and not self.chat_overlay
+        room = self.width() - rail - (PANEL_WIDTH if docked else 0) - 34  # margins, gaps
+        single = False
+        if docked:
+            show_left, show_right = room - lw >= CHAT_GRAPH_MIN, False
+        elif room - lw - rw >= GRAPH_MIN:
+            show_left, show_right = True, not self._chat_open
+        else:
+            single = True
+            show_left = self.side_mode == "dashboard"
+            show_right = not show_left
+        self.left_column.setVisible(show_left)
+        self.right.setVisible(show_right)
+        self.side_toggle.setVisible(single)
+        for k, b in self.side_buttons.items():
+            b.setChecked(k == self.side_mode)
 
     def _on_captured(self, result: Any) -> None:
         from jarvis.capture import summary
@@ -633,8 +744,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ chat
 
     def set_chat_open(self, open_: bool, focus: bool = True) -> None:
+        self._chat_open = bool(open_)
         self.chat.setVisible(open_)
-        self.right.setVisible(not open_)
+        self._place_chat()
         self._fit_columns()
         self.chat_btn.setProperty("active", "true" if open_ else "false")
         repolish(self.chat_btn)
@@ -739,6 +851,8 @@ class MainWindow(QMainWindow):
         self._inspect(node_id, locked=False)
 
     def _on_lock(self, node_id: str | None) -> None:
+        if node_id and self.side_toggle.isVisible() and self.side_mode != "inspector":
+            self.set_side_mode("inspector")       # narrow: show what was selected
         self._inspect(node_id or self.graph.hover_id, locked=bool(node_id))
         num = node_id[6:] if node_id and node_id.startswith("issue:") else ""
         self.issues.mark_selected(int(num) if num.isdigit() else None)
@@ -760,17 +874,46 @@ class MainWindow(QMainWindow):
                 finding = load_finding(self.conn, self.cfg, check_id)
             except (sqlite3.Error, OSError, ValueError):
                 finding = None   # the inspector still shows the node
-        self.inspector.show_node(node, g, card, locked, finding=finding)
+        priority = ""
+        if node is not None and node.kind == "issue":
+            row = None
+            try:
+                row = self.conn.execute("SELECT labels FROM issues WHERE number = ?",
+                                        (int(node.id[6:]),)).fetchone()
+            except (sqlite3.Error, ValueError):
+                pass
+            if row is not None:
+                _, tag, tag_kind = issue_rank(_issue_labels(row["labels"]))
+                priority = tag if tag_kind in ("blocker", "priority") else ""
+        self.inspector.show_node(node, g, card, locked, finding=finding,
+                                 focus=self.focus_for(node.id if node else None),
+                                 priority=priority)
 
     # ------------------------------------------------------------ finding actions
 
-    def explain_finding(self, question: str) -> None:
-        """Explain: the chat answers it from the synced data (as a typed question)."""
-        self.set_chat_open(True, focus=False)
-        if self.chat.turn_busy:
-            self.set_status("Jarvis is still answering; ask again when it's done.", "warn")
+    def focus_for(self, node_id: str | None):
+        """The chat context for a graph node (``jarvis.focus``), or None."""
+        node = self.graph.graph.node(node_id) if node_id else None
+        try:
+            return build_focus(self.conn, self.cfg.repo, node, self.graph.graph)
+        except sqlite3.Error:
+            return None
+
+    def _show_focus(self, node_id: str) -> None:
+        """The chat's context chip: show that item in the graph, chat stays open."""
+        self.show_workspace("projects")
+        self.graph.lock(node_id)
+
+    def ask_about(self, node_id: str) -> None:
+        """"Ask Jarvis about this ...": the chat opens with the item as its context
+        (kept for follow-ups) and asks the item's starter question."""
+        focus = self.focus_for(node_id)
+        if focus is None:
             return
-        self.chat.ask(question)
+        self.set_chat_open(True, focus=False)
+        if not self.chat.ask_about(focus):
+            self.set_status("Jarvis is still answering; the context is set, ask when it's "
+                            "done.", "warn")
 
     def _copy_finding_prompt(self, prompt: str) -> None:
         QGuiApplication.clipboard().setText(prompt)
@@ -818,7 +961,6 @@ class MainWindow(QMainWindow):
             sel = self.graph.lock_id or self.graph.hover_id
             self._inspect(sel, locked=bool(self.graph.lock_id))
         if bchanged("stream"):
-            self.stream.set_data(brain.stream, animate=anim and old_brain is not None)
             if not self._status_sticky and not self._status_timer.isActive():
                 self._idle_ticker()
         self._reload_life(new, brain)
@@ -1053,7 +1195,10 @@ class MainWindow(QMainWindow):
         wide = self.width() >= WIDE_FROM
         if wide != self.rail.wide:
             self.rail.set_wide(wide)
+        self._place_chat()
         self._fit_columns()
+        QTimer.singleShot(0, self._place_chat)   # once the bars have their new geometry
+        QTimer.singleShot(0, self._fit_hint)
         if not self.capture.isHidden():
             self._place_capture()
 

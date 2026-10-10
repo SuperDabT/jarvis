@@ -28,6 +28,7 @@ from jarvis.gui.window import (  # noqa: E402
     IDLE_HINT,
     LEFT_W,
     LEFT_W_NARROW,
+    MIN_SIZE,
     RIGHT_W,
     RIGHT_W_NARROW,
     SHELL_HINT,
@@ -134,7 +135,8 @@ def test_cockpit_lives_in_projects_and_pauses_when_hidden(win, app, motion_on):
     app.processEvents()
     win.graph._sync_timer()
     projects = win.workspaces["projects"]
-    for w in (win.graph, win.hud, win.inspector, win.stream, win.right, win.vitals,
+    assert not hasattr(win, "stream")   # the thought stream left Projects
+    for w in (win.graph, win.hud, win.inspector, win.right, win.vitals,
               win.issues, win.milestones, win.commits, win.status_text):
         assert projects.isAncestorOf(w)
     assert win.graph.isVisible() and win.graph._timer.isActive()
@@ -193,7 +195,7 @@ def test_layout_at_desktop_and_minimum_size(win, app):
     app.processEvents()
     assert win.rail.wide and win.rail.width() == shell.RAIL_WIDE
     assert win.left_column.width() == LEFT_W and win.right.width() == RIGHT_W
-    assert win.minimumWidth() == 980 and win.minimumHeight() == 600
+    assert (win.minimumWidth(), win.minimumHeight()) == MIN_SIZE
     win.resize(980, 600)
     app.processEvents()
     assert not win.rail.wide and win.rail.width() == shell.RAIL_COMPACT

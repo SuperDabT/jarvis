@@ -82,9 +82,9 @@ def test_selecting_an_item_inspects_it(setup, app):
     texts = [w.text() for w in insp.findChildren(type(win.status_label))]
     assert "task · today · live" in texts and "Review tracking filter" in texts
     assert any(t.startswith("due today 6:00 PM") for t in texts)
-    links = [b.text() for b in insp.findChildren(type(win.refresh_btn))
-             if b.objectName() == "filter"]
-    assert "in project → lidar" in links and "related to → Adaptive Kalman noise" in links
+    rel = {r.other.id: r.note.text() for r in insp.related_rows}
+    assert rel["project:lidar"] == "in project" and rel[f"item:{ids['idea']}"] == "related"
+    assert any(r.name == "Adaptive Kalman noise" for r in insp.related_rows)
     assert insp.edit_btn.text() == "edit in Tasks" and insp.done_btn.text() == "done"
 
 

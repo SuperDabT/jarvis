@@ -356,6 +356,9 @@ QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; bo
 #inspAi {{ color: {t.muted}; font-style: italic; }}
 #inspSource {{ color: {t.text}; font-family: {mono}; font-size: 11px; }}
 #inspAttention {{ color: {t.unsure}; }}
+#relName {{ color: {t.text}; }}
+#relNote {{ color: {t.faint}; }}
+#relNote[uncertain="true"] {{ color: {t.unsure}; font-style: italic; }}
 #promptBox {{
     background: {t.inset}; color: {t.muted}; border: 1px solid {t.border};
     border-radius: 8px; padding: 8px 10px; font-size: 11px;
@@ -372,6 +375,15 @@ QPushButton {{
 QPushButton:hover {{ border-color: {t.muted}; background: {t.hover}; }}
 QPushButton:pressed {{ background: {t.fill2}; border-color: {t.text}; }}
 QPushButton:disabled {{ color: {t.faint}; border-color: {t.border_strong}; }}
+QPushButton:focus {{ border-color: {t.muted}; }}
+QPushButton#primary:disabled {{ color: {t.faint}; background: {t.fill2}; border-color: {t.fill2}; }}
+QPushButton#primary:focus {{ border-color: {t.signal}; }}
+QPushButton#linkBtn:focus, QPushButton#filter:focus, QPushButton#ghost:focus {{
+    background: {t.hover};
+}}
+QPushButton#linkBtn:disabled {{ color: {t.faint}; }}
+QComboBox:hover {{ border-color: {t.btn_line}; }}
+QComboBox:focus {{ border-color: {t.muted}; }}
 QPushButton::menu-indicator {{ width: 0; image: none; }}
 QPushButton#ghost {{ border: none; color: {t.muted}; padding: 4px 8px; }}
 QPushButton#ghost:hover {{ background: {t.hover}; color: {t.text}; }}
@@ -383,6 +395,14 @@ QPushButton#primary[flash="true"] {{ color: {t.signal}; background: transparent;
 QPushButton#filter {{ border: none; color: {t.faint}; padding: 2px 5px; font-size: 12px; }}
 QPushButton#filter:checked {{ color: {t.text}; }}
 QPushButton#filter:hover {{ color: {t.text}; background: {t.hover}; }}
+QPushButton#segment {{
+    border: 1px solid {t.border_strong}; border-radius: 0; padding: 2px 10px; font-size: 12px;
+    color: {t.muted}; background: transparent;
+}}
+QPushButton#segment:first {{ border-top-left-radius: 6px; border-bottom-left-radius: 6px; }}
+QPushButton#segment:last {{ border-top-right-radius: 6px; border-bottom-right-radius: 6px; }}
+QPushButton#segment:hover {{ color: {t.text}; background: {t.hover}; }}
+QPushButton#segment:checked {{ color: {t.signal_text}; background: {t.signal_soft}; }}
 QPushButton#chip {{
     border: 1px solid {t.btn_line}; border-radius: 8px; padding: 6px 12px;
     color: {t.text}; background: transparent; font-family: {sans}; font-size: 13px;
@@ -425,20 +445,20 @@ QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
 #placeholderTitle {{ color: {t.text}; font-family: {sans}; font-size: 22px; font-weight: 600; }}
 #placeholderLead {{ color: {t.muted}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
 #placeholderBadge {{
-    color: {t.faint}; font-family: {mono}; font-size: 10px; border: 1px dashed {t.btn_line};
+    color: {t.faint}; font-family: {sans}; font-size: 11px; border: 1px dashed {t.btn_line};
     border-radius: 8px; padding: 1px 8px;
 }}
 #placeholderText {{ color: {t.text}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
-#placeholderWhen {{ color: {t.signal_text}; font-family: {mono}; font-size: 11px; }}
+#placeholderWhen {{ color: {t.signal_text}; font-family: {sans}; font-size: 12px; }}
 
 /* workspaces: Tasks + Home */
 #wsTitle {{ color: {t.text}; font-family: {sans}; font-size: 22px; font-weight: 600; }}
-#wsSub {{ color: {t.faint}; font-family: {mono}; font-size: 11px; }}
+#wsSub {{ color: {t.faint}; font-family: {sans}; font-size: 12px; }}
 #homeAttention {{ color: {t.muted}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
 #taskSection {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 10px; }}
-#sectionHead {{ color: {t.muted}; font-family: {mono}; font-size: 11px; }}
+#sectionHead {{ color: {t.muted}; font-family: {sans}; font-size: 12px; }}
 #sectionHead[group="overdue"] {{ color: {t.red}; }}
-#sectionCount {{ color: {t.faint}; font-family: {mono}; font-size: 11px; }}
+#sectionCount {{ color: {t.faint}; font-family: {sans}; font-size: 12px; }}
 #taskRow {{ background: transparent; border: 1px solid transparent; border-radius: 8px; }}
 #taskRow:hover {{ background: {t.hover}; }}
 #taskRow[selected="true"] {{
@@ -446,7 +466,7 @@ QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
 }}
 #taskTitle {{ color: {t.text}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
 #taskTitle[done="true"] {{ color: {t.faint}; text-decoration: line-through; }}
-#taskMeta {{ color: {t.muted}; font-family: {mono}; font-size: 11px; }}
+#taskMeta {{ color: {t.muted}; font-family: {sans}; font-size: 12px; }}
 #taskBody {{ color: {t.faint}; font-family: {sans}; font-size: 12px; font-weight: 400; }}
 #taskPrio {{ color: {t.signal}; font-family: {mono}; font-size: 12px; font-weight: 700; }}
 QPushButton#rowAction {{
@@ -455,7 +475,7 @@ QPushButton#rowAction {{
 QPushButton#rowAction:hover {{ color: {t.red}; }}
 QPushButton#filterChip {{
     border: 1px solid {t.border_strong}; border-radius: 11px; padding: 2px 10px;
-    font-family: {mono}; font-size: 11px; color: {t.muted}; background: transparent;
+    font-family: {sans}; font-size: 12px; color: {t.muted}; background: transparent;
 }}
 QPushButton#filterChip:hover {{ color: {t.text}; border-color: {t.btn_line}; }}
 QPushButton#filterChip:checked {{
@@ -469,7 +489,7 @@ QPushButton#linkBtn:hover {{ color: {t.text}; background: {t.hover}; }}
 QPushButton#linkBtn:pressed {{ background: {t.fill2}; }}
 QComboBox {{
     background: {t.inset}; color: {t.text}; border: 1px solid {t.border_strong};
-    border-radius: 6px; padding: 3px 8px; font-family: {mono}; font-size: 11px;
+    border-radius: 6px; padding: 3px 8px; font-family: {sans}; font-size: 12px;
 }}
 QComboBox:hover {{ border-color: {t.btn_line}; }}
 QComboBox::drop-down {{ border: none; width: 16px; }}
@@ -483,7 +503,7 @@ QLineEdit#field, QPlainTextEdit#fieldBody {{
     selection-background-color: {sel};
 }}
 QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_line}; }}
-#fieldLabel {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
+#fieldLabel {{ color: {t.faint}; font-family: {sans}; font-size: 11px; }}
 #fieldError {{ color: {t.red}; font-family: {sans}; font-size: 12px; font-weight: 400; }}
 #undoBar {{ background: {t.fill2}; border: 1px solid {t.border_strong}; border-radius: 8px; }}
 #undoText {{ color: {t.text}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
@@ -494,7 +514,7 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 #deadlineTitle {{ color: {t.text}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
 #deadlineTag {{ color: {t.faint}; }}
 #deadlineTag[kind="milestone"] {{ color: {t.signal_text}; }}
-#stepNum {{ color: {t.signal}; font-family: {mono}; font-size: 13px; font-weight: 600; }}
+#stepNum {{ color: {t.signal}; font-family: {sans}; font-size: 13px; font-weight: 600; }}
 #stepText {{ color: {t.text}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
 #stepReason {{ color: {t.faint}; font-family: {sans}; font-size: 12px; font-weight: 400; }}
 #homeEmpty {{ color: {t.muted}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
@@ -504,7 +524,7 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 #capture {{
     background: {mix(t.bg, t.inset, 0.6)}; border: 1px solid {live_line}; border-radius: 12px;
 }}
-#captureHead {{ color: {t.signal}; font-family: {mono}; font-size: 11px; }}
+#captureHead {{ color: {t.signal}; font-family: {sans}; font-size: 12px; }}
 #captureHint {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
 #captureOriginal {{ color: {t.muted}; font-family: {sans}; font-size: 12px; font-style: italic; }}
 #captureQuestion {{ color: {t.text}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
@@ -514,7 +534,7 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
     selection-background-color: {sel};
 }}
 #captureEdit:focus {{ border-color: {live_line}; }}
-#captureStatus {{ color: {t.muted}; font-family: {mono}; font-size: 12px; }}
+#captureStatus {{ color: {t.muted}; font-family: {sans}; font-size: 12px; }}
 #captureStatus[level="ok"] {{ color: {t.signal}; }}
 #captureStatus[level="error"] {{ color: {t.red}; }}
 
@@ -529,7 +549,7 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 #botText {{ color: {t.text}; font-size: {BODY_PX}px; font-weight: 400; }}
 #botName {{ color: {t.signal}; }}
 #botMeta {{ color: {t.faint}; }}
-#thinking {{ color: {t.muted}; font-family: {mono}; font-size: 12px; }}
+#thinking {{ color: {t.muted}; font-family: {sans}; font-size: 12px; }}
 #botNote {{ color: {t.unsure}; font-size: 12px; font-style: italic; }}
 #botError {{ color: {t.muted}; font-size: 13px; font-style: italic; }}
 QTextBrowser#userText, QTextBrowser#botText, QTextBrowser#botNote, QTextBrowser#botError {{
@@ -542,7 +562,13 @@ QTextBrowser#userText, QTextBrowser#botText, QTextBrowser#botNote, QTextBrowser#
     selection-background-color: {sel};
 }}
 #composerHint {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
-#voiceCaption {{ color: {t.muted}; font-family: {mono}; font-size: 11px; }}
+#focusChip {{ background: {t.fill2}; border-radius: 8px; }}
+QPushButton#focusLabel {{
+    border: none; background: transparent; color: {t.text}; text-align: left; padding: 2px 0;
+    font-family: {sans}; font-size: 12px; font-weight: 500;
+}}
+QPushButton#focusLabel:hover {{ color: {t.signal_text}; }}
+#voiceCaption {{ color: {t.muted}; font-family: {sans}; font-size: 12px; }}
 #voiceNote {{ color: {t.faint}; font-size: 12px; font-style: italic; }}
 #voiceNote[level="error"] {{
     color: {t.muted}; font-style: normal; background: {t.fill}; border-radius: 8px;

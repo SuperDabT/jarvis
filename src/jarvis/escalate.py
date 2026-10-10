@@ -224,7 +224,7 @@ def answer_with_escalation(
         now: datetime | None = None, fast_budget: int = chat.CONTEXT_TOKEN_BUDGET,
         deep_budget: int = chat.CONTEXT_TOKEN_BUDGET, stable_prefix: bool = False,
         use_embeddings: bool = False, think_budget_s: float | None = None,
-        deep_think: bool = True) -> Answer:
+        deep_think: bool = True, focus: Sequence[str] = ()) -> Answer:
     """Answer ``question`` on the fast tier, escalating to the reasoning model when
     needed (see the module docstring). Never raises for model failures.
 
@@ -279,7 +279,8 @@ def answer_with_escalation(
                        use_embeddings=use_embeddings, brevity=brevity, budget_tokens=budget,
                        stable_prefix=stable_prefix, think=think,
                        on_thinking=on_thinking if think else None,
-                       max_thinking_s=think_budget_s if think else None, ctx_out=ctxs)
+                       max_thinking_s=think_budget_s if think else None, ctx_out=ctxs,
+                       focus=focus)
         ans.tier = tier
         if think and ans.thinking_s is None and think_t:
             ans.thinking_s = time.monotonic() - think_t[0]

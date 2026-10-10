@@ -15,7 +15,7 @@ if not _offscreen_ok():
     pytest.skip("PySide6 cannot start on the offscreen platform", allow_module_level=True)
 
 from PySide6.QtGui import QGuiApplication  # noqa: E402
-from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 from test_finding_view import HW  # noqa: E402
 from test_gui_data import REPO, seed  # noqa: E402
 from test_gui_think import _settings  # noqa: E402
@@ -23,7 +23,6 @@ from test_gui_think import _settings  # noqa: E402
 from jarvis import db  # noqa: E402
 from jarvis.config import Config  # noqa: E402
 from jarvis.gui.app import make_app  # noqa: E402
-from jarvis.gui.cockpit import SUMMARY_LINKS  # noqa: E402
 from jarvis.gui.window import MainWindow  # noqa: E402
 from jarvis.pipeline import run_checks  # noqa: E402
 
@@ -70,10 +69,11 @@ def test_hub_shows_a_summary_and_folds_the_rest(setup):
     win, *_ = setup
     insp = lock(win, "hub:hardware")
     assert "needs attention" in insp.attention.text() and "unsure" in insp.attention.text()
-    links = [b for b in insp.findChildren(QPushButton) if b.objectName() == "filter"]
-    shown = [b for b in links if b.isVisibleTo(insp)]
-    assert len(shown) == SUMMARY_LINKS < len(links)
-    assert all(b.full_text.endswith("· unsure") or "fail" in b.full_text for b in shown)  # problems first
+    rows = insp.related_rows
+    shown = [r for r in rows if r.isVisibleTo(insp)]
+    assert 0 < len(shown) < len(rows)                      # the rest are under "details"
+    assert all(r.other.status in ("unknown", "warn", "fail") for r in shown)   # problems first
+    assert all("unsure" in r.note.text() or "fail" in r.note.text() for r in shown)
     assert insp.details.isHidden()
     insp.details_btn.click()
     assert not insp.details.isHidden() and insp.details_btn.text() == "details ▾"
@@ -88,17 +88,20 @@ def test_check_shows_verified_text_source_and_next_step(setup):
     assert str(hw) in insp.source_text.text() and "rails.5V.ground_common · line 7" in \
         insp.source_text.text()
     assert "doesn't edit files" in insp.edit_note.text()
-    assert [b.text() for b in (insp.explain_btn, insp.source_btn, insp.fix_btn)] == [
-        "explain", "open source", "copy fix prompt"]
+    assert insp.ask_btn.text() == "✦ Ask Jarvis about this finding"
+    assert [b.text() for b in (insp.source_btn, insp.fix_btn)] == [
+        "open source", "copy fix prompt"]
 
 
 def test_actions_explain_open_and_copy_change_nothing(setup):
     win, _, hw, asked, opened = setup
     before = hw.read_bytes()
     insp = lock(win, "check:common_ground:5V")
-    insp.explain_btn.click()
+    insp.ask_btn.click()
     win.chat.wait()
-    assert win.chat.isVisible() and asked and "common_ground:5V" in asked[0]
+    assert win.chat.isVisible() and asked and asked[0].startswith("Explain this finding")
+    assert win.chat.focus is not None and win.chat.focus.node_id == "check:common_ground:5V"
+    assert any("common_ground:5V" in line for line in win.chat.focus.lines)
     insp = lock(win, "check:common_ground:5V")
     insp.source_btn.click()
     assert opened == [hw.resolve().as_uri()]

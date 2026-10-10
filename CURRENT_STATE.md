@@ -107,15 +107,28 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   graph lock gets a mint ring that settles in and the inspector content fades in
   (`SELECT` 180 ms; hovering doesn't fade). With `JARVIS_REDUCE_MOTION=1` (or
   `--no-animations`) all of these are instant.
-- The inspector shows a summary first (what it is, what needs attention, the 3 most relevant
-  links, problems first) and folds the rest under "details". An electrical check, or a card
-  about one, gets `gui/finding_view.py`: the verified result (Python's text), the next step
-  (fixed rules, marked "suggested, not verified"), the source file, field and line in
-  hardware.yaml (only when found), what the check means, and the model's wording only when it
-  rewrote it (marked "AI · not verified"). Actions: explain (asks the chat), open source (the
-  local file, or the repo copy's line on GitHub), copy fix prompt. Jarvis edits no files, so
-  there is no "apply fix": the view says where to change the value and that Refresh reruns
-  the checks.
+- The inspector (the right column, full height; the thought stream is no longer in
+  Projects, its events stay in Home's "recent activity" and the ticker): a header (kind,
+  status, title, a priority tag only when the issue's labels give one, a short summary), the
+  primary action "Ask Jarvis about this issue / commit / milestone / finding / ..." (none
+  for the core and hubs), related items grouped (milestone, issues, commits, linked) as
+  clickable rows that say how certain the link is ("the commit names the issue" vs "may have
+  closed it · unconfirmed"), and everything else (full text, more links, the node id, the
+  raw prompt) under "details". A check, or a card about one, also gets
+  `gui/finding_view.py` (verified result, suggested next step, source file / field / line,
+  open source, copy fix prompt). Jarvis edits no files.
+- Ask Jarvis (`jarvis/focus.py`): the chat opens and asks the item's starter question with a
+  SELECTED block in its context (`chat.build_context(focus=...)`, required, right after
+  PROJECT): repository, the item's own data from the synced tables, its graph relationships
+  each with its certainty, the file names its text mentions, and a line saying Jarvis has no
+  copy of the source code. The chat shows "About <item>" over the composer; follow-ups keep
+  the context until the chip's ✕ or "New"; clicking the chip shows the item in the graph.
+  Spoken questions don't carry it (voice builds its own cache-friendly context).
+- Narrow windows (800 px, a tiled half screen): below 980 px the chat floats over the
+  right of the workspace instead of squeezing it; when the graph can't keep 300 px beside
+  both cockpit columns, Projects shows one at a time (dashboard / inspector toggle in the
+  status row; selecting a node shows the inspector); the briefing folds to its headline on a
+  graph under 480 px; the ticker hint shortens with "…". The window's minimum is 800×560.
 - The chat is at shell level: Ctrl+K / Ctrl+J / Ctrl+Space work in every workspace; in
   Projects it still takes the inspector column. Esc order: capture, voice, graph lock, chat.
 - With the chat open every workspace fits in what is left (524 px at the 980 px minimum, so
@@ -182,7 +195,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 856 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 874 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

@@ -94,14 +94,16 @@ AskFn = Callable[..., Any]
 
 def default_ask(conn: sqlite3.Connection, cfg: Config, question: str, history: list,
                 on_token: Callable[[str], None], session_id: str, *, mode: str = "auto",
-                on_phase: Callable[[str, dict], None] | None = None) -> Any:
+                on_phase: Callable[[str, dict], None] | None = None,
+                focus: tuple[str, ...] = ()) -> Any:
     """Typed chat: gemma without reasoning first, with reasoning when that is weak
-    (``mode="think"``: with reasoning straight away)."""
+    (``mode="think"``: with reasoning straight away). ``focus``: the SELECTED block
+    for the item the conversation is about (``jarvis.focus``)."""
     from jarvis.escalate import answer_with_escalation
 
     return answer_with_escalation(conn, cfg, question, history, mode=mode, fast_client=None,
                                   deep_client=None, on_token=on_token, on_phase=on_phase,
-                                  session_id=session_id)
+                                  session_id=session_id, **({"focus": focus} if focus else {}))
 
 
 def accepted_kw(fn: Callable[..., Any], **kw: Any) -> dict[str, Any]:
@@ -257,7 +259,10 @@ class FlowLayout(QLayout):
         self._do(r, False)
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
-        return self.minimumSize()
+        """All items on one line (it wraps only when given less)."""
+        w = sum(it.sizeHint().width() for it in self._items) + self._sp * max(0, len(self._items) - 1)
+        h = max((it.sizeHint().height() for it in self._items), default=0)
+        return QSize(w, h)
 
     def minimumSize(self) -> QSize:  # noqa: N802 - Qt API
         s = QSize()
@@ -270,7 +275,7 @@ class FlowLayout(QLayout):
         for it in self._items:
             hint = it.sizeHint()
             nx = x + hint.width() + self._sp
-            if nx - self._sp > r.right() and line > 0:
+            if nx - self._sp > r.x() + r.width() and line > 0:
                 x, y = r.x(), y + line + self._sp
                 nx, line = x + hint.width() + self._sp, 0
             if not test:
@@ -809,20 +814,24 @@ def _emit(sig, *args) -> None:
         pass
 
 
-def _phase_kw(fn: Callable[..., Any], mode: str, rid: int, bridge: _ChatBridge) -> dict:
-    return accepted_kw(fn, mode=mode,
-                       on_phase=lambda name, info: _emit(bridge.phase, rid, str(name),
-                                                         dict(info or {})))
+def _phase_kw(fn: Callable[..., Any], mode: str, rid: int, bridge: _ChatBridge,
+              focus: tuple[str, ...] = ()) -> dict:
+    kw: dict[str, Any] = dict(mode=mode, on_phase=lambda name, info: _emit(
+        bridge.phase, rid, str(name), dict(info or {})))
+    if focus:
+        kw["focus"] = tuple(focus)
+    return accepted_kw(fn, **kw)
 
 
 def _run_ask(cfg: Config, ask_fn: AskFn, question: str, history: list, session_id: str,
-             rid: int, bridge: _ChatBridge, mode: str = "auto") -> None:
+             rid: int, bridge: _ChatBridge, mode: str = "auto",
+             focus: tuple[str, ...] = ()) -> None:
     conn = None
     try:
         conn = db.connect(cfg.db_path)
         answer = ask_fn(conn, cfg, question, history,
                         lambda t: _emit(bridge.token, rid, t), session_id,
-                        **_phase_kw(ask_fn, mode, rid, bridge))
+                        **_phase_kw(ask_fn, mode, rid, bridge, focus))
     except Exception as e:  # noqa: BLE001 - shown inline, never crashes the window
         _emit(bridge.failed, rid, f"Something went wrong: {type(e).__name__}: {e}")
     else:
@@ -883,6 +892,7 @@ class ChatPanel(QFrame):
 
     answered = Signal(object)
     close_requested = Signal()
+    focus_selected = Signal(str)   # the context chip was clicked: show that node
     voice_state_changed = Signal(str)
 
     def __init__(self, cfg: Config, tokens: Tokens, ask_fn: AskFn | None = None,
@@ -1062,6 +1072,28 @@ class ChatPanel(QFrame):
             from jarvis.voice import NO_PW_RECORD
 
             self.mic_btn.setToolTip(NO_PW_RECORD)
+        # the item this conversation is about ("Ask Jarvis about this ..."): a chip
+        self.focus = None
+        self.focus_chip = QFrame()
+        self.focus_chip.setObjectName("focusChip")
+        fc = QHBoxLayout(self.focus_chip)
+        fc.setContentsMargins(10, 4, 4, 4)
+        fc.setSpacing(4)
+        self.focus_label = QPushButton("")
+        self.focus_label.setObjectName("focusLabel")
+        self.focus_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.focus_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.focus_label.clicked.connect(
+            lambda: self.focus is not None and self.focus_selected.emit(self.focus.node_id))
+        fc.addWidget(self.focus_label, 1)
+        self.focus_clear = QPushButton("✕")
+        self.focus_clear.setObjectName("ghost")
+        self.focus_clear.setToolTip("Stop sending this item as context")
+        self.focus_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.focus_clear.clicked.connect(lambda: self.set_focus(None))
+        fc.addWidget(self.focus_clear)
+        self.focus_chip.hide()
+        foot.addWidget(self.focus_chip)
         foot.addWidget(self.composer)
         foot.addWidget(_label("enter send · shift+enter new line · ctrl+space talk",
                               "composerHint"))
@@ -1160,8 +1192,38 @@ class ChatPanel(QFrame):
         self.messages = []
         self.history = []
         self.session_id = new_session_id()
+        self.set_focus(None)
         self.empty.show()
         self.focus_input()
+
+    # ------------------------------------------------------------ context (the selected item)
+
+    def set_focus(self, focus: Any) -> None:
+        """What this conversation is about (``jarvis.focus.Focus``), shown as a chip
+        over the composer; every question sends its context until cleared."""
+        self.focus = focus
+        if focus is None:
+            self.focus_chip.hide()
+            return
+        text = f"About {focus.label}"
+        room = max(80, self.width() - 90)        # the chip's padding and its ✕
+        self.focus_label.setText(self.focus_label.fontMetrics().elidedText(
+            text, Qt.TextElideMode.ElideRight, room))
+        self.focus_label.setToolTip(f"{focus.label}\nJarvis gets this item's details and "
+                                    "relationships with each question.\nclick: show it")
+        if self.focus_chip.isHidden():
+            self.focus_chip.show()
+            motion.fade_in(self.focus_chip, motion.SELECT)
+
+    def ask_about(self, focus: Any) -> bool:
+        """Start (or continue) the conversation about an item: set it as the context
+        and ask its starter question. False when a turn is still running (the
+        context is set; the question isn't asked)."""
+        self.set_focus(focus)
+        if self.turn_busy:
+            return False
+        self.ask(focus.question)
+        return True
 
     def ask(self, question: str) -> None:
         question = (question or "").strip()
@@ -1181,7 +1243,8 @@ class ChatPanel(QFrame):
         self._thread = threading.Thread(
             target=_run_ask, name="jarvis-chat", daemon=True,
             args=(self.cfg, self.ask_fn, question, list(self.history), self.session_id,
-                  self._rid, self._bridge, self.mode))
+                  self._rid, self._bridge, self.mode,
+                  tuple(self.focus.lines) if self.focus is not None else ()))
         self._thread.start()
 
     def wait(self, timeout: float = 10.0) -> None:

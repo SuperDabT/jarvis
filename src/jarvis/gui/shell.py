@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import Property, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from jarvis.gui import theme
+from jarvis.gui import motion, theme
 from jarvis.gui.theme import Tokens, mix
 from jarvis.gui.widgets import _label
 
@@ -127,7 +127,7 @@ class NavButton(QAbstractButton):
         self.ws = ws
         self.tokens = tokens
         self.wide = True
-        self._hover = False
+        self._hover = 0.0
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
@@ -143,14 +143,21 @@ class NavButton(QAbstractButton):
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
         return QSize(RAIL_WIDE - 20, 44) if self.wide else QSize(RAIL_COMPACT - 16, 54)
 
-    def enterEvent(self, e) -> None:  # noqa: N802 - Qt API
-        self._hover = True
+    def _get_hover(self) -> float:
+        return self._hover
+
+    def _set_hover(self, v: float) -> None:
+        self._hover = float(v)
         self.update()
+
+    hover = Property(float, _get_hover, _set_hover)   # 0..1, fades (motion.HOVER)
+
+    def enterEvent(self, e) -> None:  # noqa: N802 - Qt API
+        motion.animate(self, b"hover", self._hover, 1.0, motion.HOVER)
         super().enterEvent(e)
 
     def leaveEvent(self, e) -> None:  # noqa: N802 - Qt API
-        self._hover = False
-        self.update()
+        motion.animate(self, b"hover", self._hover, 0.0, motion.HOVER)
         super().leaveEvent(e)
 
     def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
@@ -163,11 +170,24 @@ class NavButton(QAbstractButton):
             p.setPen(QPen(QColor(mix(t.bg, t.signal, 0.32)), 1))
             p.setBrush(QColor(mix(t.bg, t.signal, 0.11)))
             p.drawRoundedRect(r, 10, 10)
-        elif self._hover or self.hasFocus():
+        elif self.isDown() or self._hover > 0:
+            fill = QColor(t.fill2 if self.isDown() else t.hover)
+            fill.setAlphaF(1.0 if self.isDown() else min(1.0, self._hover))
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(t.hover))
+            p.setBrush(fill)
             p.drawRoundedRect(r, 10, 10)
-        color = QColor(t.signal if on else (t.text if self._hover else t.muted))
+        if self.hasFocus() and not on:   # keyboard focus stays visible
+            p.setPen(QPen(QColor(t.muted), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r, 10, 10)
+        ink = QColor(t.muted) if not on else QColor(t.signal)
+        if not on and self._hover > 0:   # muted -> text as the hover fades in
+            k = min(1.0, self._hover)
+            hi = QColor(t.text)
+            ink = QColor(round(ink.red() + (hi.red() - ink.red()) * k),
+                         round(ink.green() + (hi.green() - ink.green()) * k),
+                         round(ink.blue() + (hi.blue() - ink.blue()) * k))
+        color = ink
         font = theme.pick_font()
         if self.wide:
             icon = QRectF(r.left() + 13, r.center().y() - 11, 22, 22)
@@ -181,7 +201,7 @@ class NavButton(QAbstractButton):
         else:
             icon = QRectF(r.center().x() - 11, r.top() + 7, 22, 22)
             paint_icon(p, self.ws.key, icon, color)
-            font.setPixelSize(10)
+            font.setPixelSize(11)
             p.setFont(font)
             p.setPen(color)
             p.drawText(QRectF(r.left(), icon.bottom() + 2, r.width(), 14),

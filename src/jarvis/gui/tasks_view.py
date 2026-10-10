@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from jarvis import items as it
+from jarvis.gui.chat_panel import FlowLayout
 from jarvis.gui.tasks_data import (
     GROUP_LABELS,
     KIND_FILTERS,
@@ -438,9 +439,8 @@ class TasksView(QWidget):
         head.addLayout(titles)
         head.addStretch(1)
         self.filters = QWidget()
-        fl = QHBoxLayout(self.filters)
-        fl.setContentsMargins(0, 0, 0, 0)
-        fl.setSpacing(10)
+        # wraps when narrow, so Tasks' minimum width never depends on where it sits
+        fl = FlowLayout(self.filters, 8)
         self.kind_buttons: dict[str, QPushButton] = {}
         for k in KIND_FILTERS:
             b = QPushButton(k if k == "all" else f"{k}s")

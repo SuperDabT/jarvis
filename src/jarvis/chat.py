@@ -360,6 +360,11 @@ def embedding_scores(embedder: Any, question: str, issues: Sequence[sqlite3.Row]
 # ---------------------------------------------------------------- context
 
 
+# The item selected in the app ("Ask Jarvis about this ...", see jarvis.focus).
+FOCUS_TITLE = ("SELECTED IN THE APP (the user is asking about this; built from the synced "
+               "data, certainty noted per relationship)")
+
+
 @dataclass
 class _Section:
     title: str
@@ -421,7 +426,7 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
                   now: datetime | None = None, *, history: Sequence[tuple[str, str]] = (),
                   embedder: Any | None = None,
                   budget_tokens: int = CONTEXT_TOKEN_BUDGET,
-                  stable_prefix: bool = False) -> Context:
+                  stable_prefix: bool = False, focus: Sequence[str] = ()) -> Context:
     """A compact, reference-tagged text block of real project data for one question.
 
     Facts and milestones are always included; open issue titles next; the rest
@@ -710,6 +715,7 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
             body_for, next_lines)
     sections = {
         "header": _Section("PROJECT", header, required=True),
+        "focus": _Section(FOCUS_TITLE, list(focus), required=True),
         "facts": _Section("FACTS (computed by Jarvis)", fact_lines or ["(none)"], required=True),
         "milestones": _Section("MILESTONES", ms_lines or ["(none)"], required=True),
         "next": _Section(NEXT_STEPS_TITLE, next_lines, required=True),
@@ -721,8 +727,8 @@ def build_context(conn: sqlite3.Connection, cfg: Config, question: str,
         "cards": _Section("ACTIVE SUGGESTION CARDS", card_lines),
     }
     # Fill order: what must be there first; display order is the dict order above.
-    fill = ["header", "facts", "milestones", "next", "asked", "open", "electrical", "commits",
-            "closed", "cards"]
+    fill = ["header", "focus", "facts", "milestones", "next", "asked", "open", "electrical",
+            "commits", "closed", "cards"]
     budget = budget_tokens * CHARS_PER_TOKEN
     used = 0
     kept: dict[str, list[str]] = {}
@@ -1228,7 +1234,7 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
         on_token: Callable[[str], None] | None = None, now: datetime | None = None, *,
         session_id: str | None = None, use_embeddings: bool = False,
         brevity: Brevity = "text", budget_tokens: int = CONTEXT_TOKEN_BUDGET,
-        stable_prefix: bool = False, think: bool | None = None,
+        stable_prefix: bool = False, think: bool | None = None, focus: Sequence[str] = (),
         on_thinking: Callable[[str], None] | None = None,
         max_thinking_s: float | None = None,
         ctx_out: list[Context] | None = None) -> Answer:
@@ -1263,7 +1269,8 @@ def ask(conn: sqlite3.Connection, cfg: Config, question: str,
             save_message(conn, session_id, "user", question)
         ctx = build_context(conn, cfg, question, now, history=history,
                             embedder=client if use_embeddings else None,
-                            budget_tokens=budget_tokens, stable_prefix=stable_prefix)
+                            budget_tokens=budget_tokens, stable_prefix=stable_prefix,
+                            focus=focus)
         if ctx_out is not None:
             ctx_out.append(ctx)
         messages = build_messages(ctx, question, history, brevity)

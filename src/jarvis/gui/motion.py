@@ -37,6 +37,7 @@ FAST, BASE, SLOW = 120, 220, 600  # ms
 HOVER = 140   # ms, hover / press feedback on rows
 EXPAND = 200  # ms, a panel section opening or closing
 SELECT = 180  # ms, a selection settling in (graph ring, inspector content)
+SWITCH = 150  # ms, the incoming workspace fading in
 STAGGER = 60  # ms between items of a list
 RISE = 8  # px a block rises while fading in
 
@@ -507,7 +508,7 @@ QWIDGETSIZE_MAX = (1 << 24) - 1
 
 
 __all__ = [
-    "BASE", "EXPAND", "FAST", "HOVER", "SELECT", "SLOW", "STAGGER", "RISE",
+    "BASE", "EXPAND", "FAST", "HOVER", "SELECT", "SLOW", "STAGGER", "SWITCH", "RISE",
     "animate", "clamp01", "collapse", "count_up", "count_up_text", "created_count", "curve",
     "ease_in_out", "ease_out", "enabled", "fade_in", "fade_out", "fade_rise", "finish_all",
     "grow", "live", "number_formatter", "phase", "pulse", "reveal", "seek_all", "set_enabled",

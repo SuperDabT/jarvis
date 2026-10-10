@@ -24,10 +24,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from jarvis.gui.cockpit import Panel, StreamRow, mono
+from jarvis.gui.cockpit import Panel, StreamRow
 from jarvis.gui.home_data import HomeData
 from jarvis.gui.tasks_view import TaskRow
-from jarvis.gui.theme import Tokens
+from jarvis.gui.theme import Tokens, typeset
 from jarvis.gui.widgets import _clear, _label
 
 TODAY_MAX = 8
@@ -79,7 +79,7 @@ class HomeView(QWidget):
         titles.addWidget(self.attention)
         head.addLayout(titles)
         head.addStretch(1)
-        self.date = mono(_label("", "wsSub"), 11)
+        self.date = typeset(_label("", "wsSub"), "meta")
         head.addWidget(self.date, 0, Qt.AlignmentFlag.AlignBottom)
         self.capture_btn = QPushButton("+ capture")
         self.capture_btn.setObjectName("primary")
@@ -203,12 +203,12 @@ class HomeView(QWidget):
             lay = QHBoxLayout(row)
             lay.setContentsMargins(2, 4, 2, 4)
             lay.setSpacing(10)
-            when = mono(_label(dl.label + (f" {dl.time}" if dl.time else ""), "deadlineWhen"), 11)
+            when = typeset(_label(dl.label + (f" {dl.time}" if dl.time else ""), "deadlineWhen"), "label")
             when.setFixedWidth(136)
             lay.addWidget(when, 0, Qt.AlignmentFlag.AlignTop)
             title = _label(dl.title, "deadlineTitle", wrap=True)
             lay.addWidget(title, 1)
-            tag = mono(_label(KIND_TAG.get(dl.kind, dl.kind), "deadlineTag"), 10)
+            tag = typeset(_label(KIND_TAG.get(dl.kind, dl.kind), "deadlineTag"), "tag")
             tag.setProperty("kind", dl.kind)
             lay.addWidget(tag, 0, Qt.AlignmentFlag.AlignTop)
             if dl.kind == "milestone":
@@ -224,7 +224,7 @@ class HomeView(QWidget):
         if d.headline:
             self.headline = _label(d.headline, "homeHeadline", wrap=True)
             self.project.body.addWidget(self.headline)
-            by = mono(_label(f"briefing · {d.briefing_by}", "panelHint"), 10)
+            by = typeset(_label(f"briefing · {d.briefing_by}", "panelHint"), "code")
             self.project.body.addWidget(by)
         else:
             self.headline = None
@@ -236,8 +236,8 @@ class HomeView(QWidget):
             grid.setContentsMargins(0, 6, 0, 0)
             grid.setColumnStretch(1, 1)
             for r, v in enumerate(d.vitals):
-                grid.addWidget(mono(_label(v.key, "vKey"), 11), r, 0)
-                val = mono(_label(v.value, "vVal"), 11, 600)
+                grid.addWidget(typeset(_label(v.key, "vKey"), "label"), r, 0)
+                val = typeset(_label(v.value, "vVal"), "value")
                 val.setProperty("live", "true" if v.live else "false")
                 val.setProperty("level", v.level or "")
                 grid.addWidget(val, r, 1)
