@@ -80,14 +80,15 @@ def test_window_shows_cockpit(setup):
     assert {n.card_id for n in g.nodes if n.kind == "card"} == set(ids)
     assert "nodes" in win.counts.text() and "links" in win.counts.text()
     # columns
-    assert "suggestions" in win.vitals.values and win.vitals.values["suggestions"].text() == "2"
-    assert len(win.milestones.rows) == 1
-    assert win.pulse.bars.counts and "events" in win.pulse.caption.text()
+    assert set(win.vitals.values) == {"deadline", "progress", "risk"}
+    assert win.vitals.values["progress"].text() == "0 / 0 closed"   # the seed milestone is empty
+    assert win.vitals.values["risk"].text() == "No issues"
+    assert len(win.milestones.rows) == 1 and win.dash.active.title == "Core demo"
     assert win.stream.rows and "new suggestion" in " ".join(r.item.text for r in win.stream.rows)
     assert "briefing by gemma4:26b" in win.status_text.text()
     assert win.right.isVisible() and not win.chat.isVisible()  # chat starts closed
     assert win.state_pill.text() == "idle"
-    for w in (win.graph, win.pulse.bars):
+    for w in (win.graph, win.commits):
         assert not w.grab().isNull()
 
 
@@ -95,9 +96,9 @@ def test_window_without_hardware_says_why(app, tmp_path):
     cfg = _cfg(tmp_path, hardware=False)
     conn = db.connect(cfg.db_path)
     win = MainWindow(cfg, conn, auto_refresh=False, watch=False, start="projects")
-    texts = [win.power.body.itemAt(i).widget().text() for i in range(win.power.body.count())
-             if win.power.body.itemAt(i).widget()]
-    assert any("hardware.yaml" in t.lower() for t in texts)
+    pills = [win.status_pills.itemAt(i).widget() for i in range(win.status_pills.count())]
+    hw = next(p for p in pills if p.text() == "no hardware checks")
+    assert "hardware.yaml" in hw.toolTip().lower()
     assert win.hud.headline.text() == "No briefing yet"
     win.close()
     conn.close()

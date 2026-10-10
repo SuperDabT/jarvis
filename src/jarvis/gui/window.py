@@ -54,16 +54,17 @@ from jarvis.gui.capture_overlay import CaptureFn, CaptureOverlay, PlainFn
 from jarvis.gui.chat_panel import PANEL_WIDTH, AskFn, ChatPanel
 from jarvis.gui.cockpit import (
     BriefingHud,
+    CommitPanel,
     Inspector,
+    IssuesPanel,
     MilestonesPanel,
-    PowerPanel,
-    PulsePanel,
     StreamPanel,
     VitalsPanel,
     mono,
     pill,
     set_pill,
 )
+from jarvis.gui.dashboard_data import Dashboard, build_dashboard
 from jarvis.gui.data import (
     WindowData,
     describe_error,
@@ -96,6 +97,7 @@ RIGHT_W_NARROW = 256
 # With the chat open the graph keeps at least this much; in a window too small for
 # vitals + graph + chat, the left column steps aside while the chat is open.
 CHAT_GRAPH_MIN = 420
+ACTIVE_MILESTONE_KEY = "projects/active_milestone"
 POLL_MS = 30_000
 DEBOUNCE_MS = 400
 STATUS_CLEAR_MS = 8_000
@@ -344,7 +346,7 @@ class MainWindow(QMainWindow):
         body.setContentsMargins(12, 10, 12, 10)
         body.setSpacing(10)
 
-        # left: vitals, milestones, pulse, power
+        # left: vitals, issues, milestones, commit activity
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -357,10 +359,14 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(10)
         self.vitals = VitalsPanel()
+        self.issues = IssuesPanel()
+        self.issues.selected.connect(self.select_issue)
+        self.issues.view_all.connect(lambda url: self.open_url(QUrl(url)))
         self.milestones = MilestonesPanel(self.tokens)
-        self.pulse = PulsePanel(self.tokens)
-        self.power = PowerPanel(self.tokens)
-        for w in (self.vitals, self.milestones, self.pulse, self.power):
+        self.milestones.picked.connect(self.pick_milestone)
+        self.commits = CommitPanel(self.tokens)
+        self.dash: Dashboard | None = None
+        for w in (self.vitals, self.issues, self.milestones, self.commits):
             ll.addWidget(w)
         ll.addStretch(1)
         left_scroll.setWidget(left)
@@ -669,6 +675,54 @@ class MainWindow(QMainWindow):
         hidden = {k for k, b in self.filter_buttons.items() if not b.isChecked()}
         self.graph.set_hidden_kinds(hidden)
 
+    # ------------------------------------------------------------ dashboard
+
+    @property
+    def chosen_milestone(self) -> int | None:
+        """The milestone the user made active (a UI preference), None = nearest due."""
+        v = self.chat.settings.value(ACTIVE_MILESTONE_KEY)
+        try:
+            return int(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    def pick_milestone(self, number: int) -> None:
+        """Make a milestone active (-1: back to the nearest-due one); Vitals,
+        Issues and Milestones follow."""
+        if number < 0:
+            self.chat.settings.remove(ACTIVE_MILESTONE_KEY)
+        else:
+            self.chat.settings.setValue(ACTIVE_MILESTONE_KEY, int(number))
+        self.chat.settings.sync()
+        self.milestones.expanded = False
+        self._render_dashboard(force=True)
+
+    def _render_dashboard(self, force: bool = False, animate: bool = False) -> None:
+        timeline = self.data.timeline if self.data is not None else None
+        try:
+            dash = build_dashboard(self.conn, self.cfg.repo, timeline, self.chosen_milestone,
+                                   self._now_fn().date())
+        except sqlite3.Error:
+            dash = None
+        if dash == self.dash and not force:
+            return
+        self.dash = dash
+        self.vitals.set_data(dash, animate=animate)
+        self.issues.set_data(dash)
+        self.milestones.set_data(dash)
+
+    def select_issue(self, number: int) -> None:
+        """An issue from the Issues tile: the inspector when it is in the graph,
+        else its GitHub page."""
+        nid = f"issue:{number}"
+        if self.graph.graph.node(nid) is not None:
+            self.select_node(nid)
+            return
+        row = next((r for r in (self.dash.issues if self.dash else ()) if r.number == number),
+                   None)
+        if row is not None and row.url:
+            self.open_url(QUrl(row.url))
+
     def select_node(self, node_id: str) -> None:
         """Lock a node (from the stream or the inspector's links)."""
         self.show_workspace("projects")
@@ -746,14 +800,9 @@ class MainWindow(QMainWindow):
         if changed("briefing"):
             self.hud.set_data(new.briefing, animate=anim)
             self.stage.place()
-        if changed("kpis") or bchanged("vitals"):
-            self.vitals.set_data(new.kpis, brain.vitals, animate=anim)
-        if changed("timeline"):
-            self.milestones.set_data(new.timeline)
-        if bchanged("pulse"):
-            self.pulse.set_data(brain.pulse, animate=anim)
-        if changed("power") or changed("power_note"):
-            self.power.set_data(new.power, new.power_note)
+        self._render_dashboard(force=force or old is None, animate=anim)
+        if changed("grid"):
+            self.commits.set_data(new.grid)
         if bchanged("graph"):
             self.graph.set_data(brain.graph, animate=anim)
             g = brain.graph
@@ -813,6 +862,11 @@ class MainWindow(QMainWindow):
                 self.status_pills.addWidget(pill(f"checks {unsure} unconfirmed"))
             elif b.graph.count("check"):
                 self.status_pills.addWidget(pill("checks clean ✓", live=True))
+            elif d is not None and d.power_note:
+                # no (valid) hardware.yaml: say why there are no electrical checks
+                hw = pill("no hardware checks")
+                hw.setToolTip(d.power_note)
+                self.status_pills.addWidget(hw)
             if cards:
                 self.status_pills.addWidget(pill(f"{cards} suggestion{'s' if cards != 1 else ''}",
                                                  live=True))

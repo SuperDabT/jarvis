@@ -135,7 +135,7 @@ def test_cockpit_lives_in_projects_and_pauses_when_hidden(win, app, motion_on):
     win.graph._sync_timer()
     projects = win.workspaces["projects"]
     for w in (win.graph, win.hud, win.inspector, win.stream, win.right, win.vitals,
-              win.milestones, win.pulse, win.power, win.status_text):
+              win.issues, win.milestones, win.commits, win.status_text):
         assert projects.isAncestorOf(w)
     assert win.graph.isVisible() and win.graph._timer.isActive()
     win.show_workspace("home")

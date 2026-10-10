@@ -242,7 +242,7 @@ def test_animations_on_first_show_and_data_change_only(motion_on, tmp_path):
     assert motion.created_count() > before  # first show animates
     assert win.graph.progress < 1.0
     motion.finish_all()
-    assert win.graph.progress == 1.0 and win.pulse.bars.progress == 1.0
+    assert win.graph.progress == 1.0
     assert all(r.graphicsEffect() is None for r in win.hud.rows)
 
     n = motion.created_count()

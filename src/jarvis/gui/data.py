@@ -338,7 +338,11 @@ def load_window_data(conn: sqlite3.Connection, repo: str,
     kpis = build_kpis(facts, today)
     try:
         timeline = load_timeline(conn, facts, today)
-        grid = build_grid(commit_days(conn), today)
+        log = commit_log(conn)
+        since = history_start(conn, log)
+        # no history at all: every day is "no data" (the panel says so), not zero
+        grid = build_grid([d for d, cs in log.items() for _ in cs], today, log=log,
+                          covered_from=since or today + timedelta(days=1))
         phases = build_phase_bars(conn.execute("SELECT * FROM issues").fetchall())
         status_by_check = finding_statuses(conn)
     except sqlite3.Error as e:
@@ -623,6 +627,8 @@ class GridDay:
     level: int
     col: int  # week index, 0 = oldest
     row: int  # 0 = Monday .. 6 = Sunday
+    known: bool = True  # inside the synced commit history (else: no data, not "no commits")
+    commits: tuple[str, ...] = ()  # "02fb2d2 first line" for that day, newest first
 
 
 @dataclass(frozen=True)
@@ -636,6 +642,17 @@ class ContributionGrid:
     active_days: int
     longest_streak: int
     current_streak: int
+    covered_from: date | None = None  # first day the synced history covers
+
+    @property
+    def available(self) -> bool:
+        """Whether any day of the grid has commit data at all."""
+        return any(d.known for d in self.days)
+
+    @property
+    def range_label(self) -> str:
+        first = next((d.day for d in self.days if d.known), None)
+        return f"{fmt_day(first)} – {fmt_day(self.today)}" if first else ""
 
     @property
     def caption(self) -> str:
@@ -649,8 +666,45 @@ class ContributionGrid:
         return " · ".join(bits)
 
     def tooltip(self, d: GridDay) -> str:
+        when = f"{d.day.strftime('%a')}, {fmt_day(d.day)}"
+        if not d.known:
+            return f"{when}: before the synced history (no data)"
         what = "No commits" if d.count == 0 else plural(d.count, "commit")
-        return f"{what} on {d.day.strftime('%a')}, {fmt_day(d.day)}"
+        lines = [f"{what} on {when}"] + [f"  {c}" for c in d.commits[:TOOLTIP_COMMITS]]
+        if len(d.commits) > TOOLTIP_COMMITS:
+            lines.append(f"  +{len(d.commits) - TOOLTIP_COMMITS} more")
+        return "\n".join(lines)
+
+
+TOOLTIP_COMMITS = 5
+
+
+def commit_log(conn: sqlite3.Connection) -> dict[date, list[str]]:
+    """Local calendar day -> "sha7 first line" of each stored commit, newest first."""
+    out: dict[date, list[str]] = {}
+    for sha, msg, ts in conn.execute("SELECT sha, message, committed_at FROM commits WHERE "
+                                     "committed_at IS NOT NULL ORDER BY committed_at DESC"):
+        try:
+            d = _parse(ts).astimezone().date()
+        except ValueError:
+            continue
+        first = (msg or "").strip().splitlines()[0] if (msg or "").strip() else ""
+        out.setdefault(d, []).append(f"{(sha or '')[:7]} {first}".strip())
+    return out
+
+
+def history_start(conn: sqlite3.Connection, log: dict[date, list[str]]) -> date | None:
+    """First day the synced history covers: the sync's own marker, else the oldest
+    stored commit (nothing before it is known), None with neither."""
+    from jarvis import db
+
+    marker = db.get_sync_state(conn, "commits_since")
+    if marker:
+        try:
+            return _parse(marker).astimezone().date()
+        except ValueError:
+            pass
+    return min(log) if log else None
 
 
 def commit_days(conn: sqlite3.Connection) -> list[date]:
@@ -664,8 +718,12 @@ def commit_days(conn: sqlite3.Connection) -> list[date]:
     return out
 
 
-def build_grid(days: list[date], today: date, weeks: int = GRID_WEEKS) -> ContributionGrid:
-    """Commits per local day for ``weeks`` columns ending with today's week."""
+def build_grid(days: list[date], today: date, weeks: int = GRID_WEEKS,
+               log: dict[date, list[str]] | None = None,
+               covered_from: date | None = None) -> ContributionGrid:
+    """Commits per local day for ``weeks`` columns ending with today's week.
+    Days before ``covered_from`` are marked unknown (outside the synced history);
+    ``log`` adds each day's commit lines for the tooltip."""
     start = today - timedelta(days=today.weekday()) - timedelta(weeks=weeks - 1)
     counts: dict[date, int] = {}
     for d in days:
@@ -676,7 +734,9 @@ def build_grid(days: list[date], today: date, weeks: int = GRID_WEEKS) -> Contri
     while d <= today:
         i = (d - start).days
         n = counts.get(d, 0)
-        cells.append(GridDay(d, n, grid_level(n), i // 7, i % 7))
+        known = covered_from is None or d >= covered_from
+        cells.append(GridDay(d, n, grid_level(n), i // 7, i % 7, known,
+                             tuple((log or {}).get(d, ()))))
         d += timedelta(days=1)
     # Month labels over the first column whose Monday is in a new month; the first
     # column only gets one when the next label is at least 3 columns away.
@@ -698,7 +758,7 @@ def build_grid(days: list[date], today: date, weeks: int = GRID_WEEKS) -> Contri
         else:
             break
     return ContributionGrid(today, start, weeks, tuple(cells), tuple(months),
-                            sum(counts.values()), len(counts), longest, current)
+                            sum(counts.values()), len(counts), longest, current, covered_from)
 
 
 # ---------------------------------------------------------------- issues by phase

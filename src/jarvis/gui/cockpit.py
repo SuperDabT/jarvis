@@ -9,8 +9,15 @@ from collections import Counter
 from datetime import UTC, datetime
 from html import escape
 
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication
+from PySide6.QtCore import QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QGuiApplication,
+    QPainter,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -21,24 +28,31 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from jarvis.cards import FEEDBACK_REASONS, Card
 from jarvis.gui import motion, theme
-from jarvis.gui.brain import MilestoneMini, PulseBars, RailMini
+from jarvis.gui.brain import MilestoneMini
 from jarvis.gui.brain_data import (
     EDGE_LABELS,
     Graph,
     Node,
-    Pulse,
     StreamItem,
-    Vital,
     ago,
 )
 from jarvis.gui.chat_panel import FlowLayout
-from jarvis.gui.data import BriefingView, Kpi, RailPower, Timeline, fmt_num
+from jarvis.gui.dashboard_data import Dashboard, IssueRow
+from jarvis.gui.data import (
+    BriefingView,
+    ContributionGrid,
+    GridDay,
+    MilestoneBar,
+    fmt_day,
+    plural,
+)
 from jarvis.gui.finding_view import FindingView
 from jarvis.gui.theme import Tokens
 from jarvis.gui.widgets import SentenceRow, _clear, _label, repolish, set_font
@@ -109,117 +123,347 @@ class Panel(QFrame):
 
 
 class VitalsPanel(Panel):
+    """Three answers about the active milestone: when is it due, how far along is
+    it, is it on track (with the reason; "too early to tell" when the data can't
+    say)."""
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__("vitals", parent=parent)
         self.grid = QGridLayout()
         self.grid.setHorizontalSpacing(12)
-        self.grid.setVerticalSpacing(5)
+        self.grid.setVerticalSpacing(2)
         self.grid.setColumnStretch(1, 1)
         self.body.addLayout(self.grid)
         self.values: dict[str, QLabel] = {}
+        self.subs: dict[str, QLabel] = {}
 
-    def set_data(self, kpis: tuple[Kpi, ...], vitals: tuple[Vital, ...],
-                 animate: bool = False) -> None:
+    def set_data(self, dash: Dashboard | None, animate: bool = False) -> None:
         _clear(self.grid)
-        self.values = {}
-        rows: list[tuple[str, str, bool, str | None, str]] = []
-        for k in kpis:
-            rows.append((k.label.lower(), k.value, k.tone == "good", "fail" if k.tone == "bad"
-                         else None, (k.sub + ("\n" + k.tooltip if k.tooltip else "")).strip()))
-        for v in vitals:
-            rows.append((v.key, v.value, v.live, v.level, v.tip))
-        for r, (key, val, live, level, tip) in enumerate(rows):
+        self.values, self.subs = {}, {}
+        m = dash.active if dash else None
+        if m is None:
+            rows = [("deadline", "none", "no open milestones", "muted", "")]
+        else:
+            days = dash.days_left
+            if days is None:
+                dl = ("none", f"{m.title} has no due date", "muted")
+            elif days < 0:
+                dl = (f"{plural(-days, 'day')} late", f"{m.title} · {fmt_day(m.due)}", "bad")
+            elif days == 0:
+                dl = ("today", f"{m.title} · {fmt_day(m.due)}", "warn")
+            else:
+                dl = (f"{plural(days, 'day')} left", f"{m.title} · {fmt_day(m.due)}",
+                      "warn" if days <= 3 else "default")
+            pct = round(m.closed / m.total * 100) if m.total else 0
+            maybe = f" · {m.maybe} may be done" if m.maybe else ""
+            r = dash.risk
+            rows = [("deadline", dl[0], dl[1], dl[2], ""),
+                    ("progress", f"{m.closed} / {m.total} closed", f"{pct}%{maybe}",
+                     "good" if m.total and m.closed == m.total else "default",
+                     "Unconfirmed: recent commits look like the same work." if m.maybe else ""),
+                    ("risk", r.label, r.why, r.tone, "")]
+        for i, (key, val, sub, tone, tip) in enumerate(rows):
             kl = mono(_label(key, "vKey"), 11)
             vl = mono(_label(val, "vVal"), 11, 600)
-            vl.setProperty("live", "true" if live else "false")
-            vl.setProperty("level", level or "")
-            vl.setToolTip(tip)
-            kl.setToolTip(tip)
-            self.grid.addWidget(kl, r, 0, Qt.AlignmentFlag.AlignLeft)
-            self.grid.addWidget(vl, r, 1, Qt.AlignmentFlag.AlignLeft)
-            self.values[key] = vl
+            vl.setProperty("tone", tone)
+            sl = _label(sub, "vSub", wrap=True)
+            sl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            for w in (kl, vl, sl):
+                w.setToolTip(tip)
+            self.grid.addWidget(kl, i * 2, 0, Qt.AlignmentFlag.AlignLeft)
+            self.grid.addWidget(vl, i * 2, 1, Qt.AlignmentFlag.AlignLeft)
+            self.grid.addWidget(sl, i * 2 + 1, 1)
+            self.grid.setRowMinimumHeight(i * 2 + 1, 0)
+            self.values[key], self.subs[key] = vl, sl
             if animate:
                 motion.count_up_text(vl, val)
 
 
+class IssueRowButton(QPushButton):
+    """One issue: number, title, its label tag, and a "›" to inspect it."""
+
+    def __init__(self, row: IssueRow, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.row = row
+        self.setObjectName("issueRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"#{row.number} {row.title}" + (f"  [{row.tag}]" if row.tag else "")
+                        + "\nclick: inspect it")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 4, 4, 4)
+        lay.setSpacing(6)
+        num = mono(_label(f"#{row.number}", "issueNum"), 10)
+        lay.addWidget(num)
+        self.title_label = _label(row.title, "issueTitle")
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lay.addWidget(self.title_label, 1)
+        if row.tag:
+            tag = mono(_label(row.tag, "issueTag"), 9)
+            tag.setProperty("kind", row.tag_kind)
+            lay.addWidget(tag)
+        lay.addWidget(mono(_label("›", "issueGo"), 12))
+        self.setMinimumHeight(28)
+
+    def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(e)
+        fm = self.title_label.fontMetrics()
+        self.title_label.setText(fm.elidedText(self.row.title, Qt.TextElideMode.ElideRight,
+                                               max(20, self.title_label.width())))
+
+
+class IssuesPanel(Panel):
+    """What to work on: the active milestone's open issues, best first (by their
+    labels only), and the open count."""
+
+    selected = Signal(int)        # issue number
+    view_all = Signal(str)        # URL of the issue list
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__("issues", parent=parent)
+        self.rows: list[IssueRowButton] = []
+        self.count = mono(_label("", "issueCount"), 18, 700)
+        self.view_btn = QPushButton("view all →")
+        self.view_btn.setObjectName("linkBtn")
+        self.view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._url: str | None = None
+        self.view_btn.clicked.connect(lambda: self._url and self.view_all.emit(self._url))
+
+    def set_data(self, dash: Dashboard | None) -> None:
+        _clear(self.body)
+        self.rows = []
+        if dash is None:
+            self.body.addWidget(mono(_label("no issue data", "vNote"), 10))
+            return
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.count = mono(_label(str(dash.open_total), "issueCount"), 18, 700)
+        top.addWidget(self.count)
+        where = (f"open · {dash.milestone_open} in {dash.active.title}" if dash.active
+                 else "open")
+        self.where = mono(_label(where, "vKey"), 10)
+        self.where.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        top.addWidget(self.where, 1, Qt.AlignmentFlag.AlignBottom)
+        self.view_btn = QPushButton("view all →")
+        self.view_btn.setObjectName("linkBtn")
+        self.view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._url = dash.view_all_url
+        self.view_btn.setToolTip(("The milestone's issues on GitHub" if dash.active
+                                  else "The issues on GitHub") + f"\n{self._url}")
+        self.view_btn.clicked.connect(lambda: self.view_all.emit(self._url))
+        top.addWidget(self.view_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        self.body.addLayout(top)
+        for r in dash.issues:
+            b = IssueRowButton(r)
+            b.clicked.connect(lambda _=False, n=r.number: self.selected.emit(n))
+            self.body.addWidget(b)
+            self.rows.append(b)
+        if not dash.issues:
+            self.body.addWidget(mono(_label(
+                "no open issues in this milestone" if dash.active else "no open issues",
+                "vNote"), 10))
+        elif not any(r.tag for r in dash.issues):
+            hint = mono(_label("no priority labels: ordered by issue number", "vNote"), 9)
+            self.body.addWidget(hint)
+
+
 class MilestonesPanel(Panel):
+    """The active milestone up front; the others folded, any of them can be made
+    active (``picked``; -1 = back to the nearest-due one)."""
+
+    picked = Signal(int)
+
     def __init__(self, tokens: Tokens, parent: QWidget | None = None):
         super().__init__("milestones", parent=parent)
         self.tokens = tokens
         self.rows: list[QWidget] = []
+        self.expanded = False
+        self.toggle_btn: QPushButton | None = None
+        self._dash: Dashboard | None = None
 
-    def set_data(self, timeline: Timeline | None) -> None:
+    def set_expanded(self, on: bool) -> None:
+        self.expanded = bool(on)
+        self.set_data(self._dash)
+
+    def set_data(self, dash: Dashboard | None) -> None:
+        self._dash = dash
         _clear(self.body)
         self.rows = []
-        bars = timeline.bars if timeline else ()
-        if not bars:
+        self.toggle_btn = None
+        m = dash.active if dash else None
+        if m is None:
             self.body.addWidget(mono(_label("no open milestones", "vNote"), 11))
             return
-        today = timeline.today
-        for b in bars:
-            w = QWidget()
-            col = QVBoxLayout(w)
-            col.setContentsMargins(0, 0, 0, 2)
-            col.setSpacing(4)
-            top = QHBoxLayout()
-            top.addWidget(mono(_label(b.title, "vVal"), 11, 600))
-            top.addStretch(1)
-            days = (b.due - today).days if b.due else None
-            when = ("no due date" if days is None else "overdue" if days < 0
-                    else "today" if days == 0 else f"{days}d")
-            maybe = f" +{b.maybe}?" if b.maybe else ""
-            top.addWidget(mono(_label(f"{b.closed}/{b.total}{maybe} · {when}", "vKey"), 11))
-            col.addLayout(top)
-            col.addWidget(MilestoneMini(b, self.tokens))
-            w.setToolTip(f"{b.title}: {b.label}" + (f"\n{b.url}" if b.url else ""))
+        self.hint.setText("picked" if dash.picked else "nearest due")
+        self.body.addWidget(self._block(m, dash.today, active=True))
+        if not dash.others and not dash.picked:
+            return
+        n = len(dash.others)
+        self.toggle_btn = QPushButton((f"▾ hide {plural(n, 'other')}" if self.expanded
+                                       else f"▸ {plural(n, 'other milestone')}") if n
+                                      else "▸ options")
+        self.toggle_btn.setObjectName("linkBtn")
+        self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle_btn.clicked.connect(lambda: self.set_expanded(not self.expanded))
+        self.body.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        if not self.expanded:
+            return
+        for b in dash.others:
+            w = self._block(b, dash.today, active=False)
             self.body.addWidget(w)
-            self.rows.append(w)
+        if dash.picked:
+            auto = QPushButton("use the nearest-due milestone")
+            auto.setObjectName("linkBtn")
+            auto.setCursor(Qt.CursorShape.PointingHandCursor)
+            auto.clicked.connect(lambda: self.picked.emit(-1))
+            self.body.addWidget(auto, 0, Qt.AlignmentFlag.AlignLeft)
+
+    def _block(self, b: MilestoneBar, today, active: bool) -> QWidget:
+        w = QPushButton() if not active else QWidget()
+        w.setObjectName("msActive" if active else "msRow")
+        col = QVBoxLayout(w)
+        col.setContentsMargins(0 if active else 6, 2, 0 if active else 6, 4)
+        col.setSpacing(4)
+        top = QHBoxLayout()
+        title = mono(_label(b.title, "msTitle" if active else "vVal"), 12 if active else 11, 600)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        top.addWidget(title, 1)
+        days = (b.due - today).days if b.due else None
+        when = ("no due date" if days is None else f"{-days}d late" if days < 0
+                else "today" if days == 0 else f"{days}d")
+        maybe = f" +{b.maybe}?" if b.maybe else ""
+        top.addWidget(mono(_label(f"{b.closed}/{b.total}{maybe} · {when}", "vKey"), 11))
+        col.addLayout(top)
+        col.addWidget(MilestoneMini(b, self.tokens))
+        if active and b.due:
+            col.addWidget(mono(_label(f"due {fmt_day(b.due)}", "vNote"), 10))
+        tip = f"{b.title}: {b.label}"
+        if not active:
+            w.setCursor(Qt.CursorShape.PointingHandCursor)
+            w.setToolTip(tip + "\nclick: make it the active milestone")
+            w.clicked.connect(lambda _=False, n=b.number: self.picked.emit(n))
+            w.setMinimumHeight(40)
+        else:
+            w.setToolTip(tip + (f"\n{b.url}" if b.url else ""))
+        self.rows.append(w)
+        return w
 
 
-class PulsePanel(Panel):
+class CommitHeatmap(QWidget):
+    """Commits per day, GitHub style: one column per week (Monday on top),
+    brighter green for more commits; days before the synced history are drawn
+    hollow (no data, not zero). Hover shows the day, its count and commits."""
+
+    GAP = 2
+
     def __init__(self, tokens: Tokens, parent: QWidget | None = None):
-        super().__init__("pulse", parent=parent)
-        self.bars = PulseBars(tokens)
-        self.body.addWidget(self.bars)
+        super().__init__(parent)
+        self.tokens = tokens
+        self.grid: ContributionGrid | None = None
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(120)
+
+    def cell(self) -> float:
+        weeks = self.grid.weeks if self.grid else 26
+        return max(3.0, (self.width() - self.GAP * (weeks - 1)) / weeks)
+
+    def set_data(self, grid: ContributionGrid | None) -> None:
+        self.grid = grid
+        self.updateGeometry()
+        self.resizeEvent(None)
+        self.update()
+
+    def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        if e is not None:
+            super().resizeEvent(e)
+        h = round(7 * self.cell() + 6 * self.GAP)
+        if self.height() != h:
+            self.setFixedHeight(h)
+
+    def day_at(self, x: float, y: float) -> GridDay | None:
+        if self.grid is None:
+            return None
+        step = self.cell() + self.GAP
+        col, row = int(x // step), int(y // step)
+        return next((d for d in self.grid.days if d.col == col and d.row == row), None)
+
+    def mouseMoveEvent(self, e) -> None:  # noqa: N802 - Qt API
+        d = self.day_at(e.position().x(), e.position().y())
+        if d is not None and self.grid is not None:
+            QToolTip.showText(e.globalPosition().toPoint(), self.grid.tooltip(d), self)
+        else:
+            QToolTip.hideText()
+
+    def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
+        if self.grid is None:
+            return
+        t = self.tokens
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = self.cell()
+        step = c + self.GAP
+        signal = QColor(t.signal)
+        empty = QColor(t.fill2)
+        for d in self.grid.days:
+            r = QRectF(d.col * step, d.row * step, c, c)
+            if not d.known:
+                p.setPen(QPen(QColor(t.border), 1))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 1.5, 1.5)
+                continue
+            p.setPen(Qt.PenStyle.NoPen)
+            if d.level == 0:
+                p.setBrush(empty)
+            else:
+                col = QColor(signal)
+                col.setAlphaF(HEAT_ALPHA[d.level])
+                p.setBrush(col)
+            p.drawRoundedRect(r, 1.5, 1.5)
+        if self.grid.today:
+            today = next((d for d in self.grid.days if d.day == self.grid.today), None)
+            if today is not None:
+                p.setPen(QPen(QColor(t.text), 1))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(QRectF(today.col * step, today.row * step, c, c)
+                                  .adjusted(0.5, 0.5, -0.5, -0.5), 1.5, 1.5)
+        p.end()
+
+
+HEAT_ALPHA = {1: 0.3, 2: 0.5, 3: 0.75, 4: 1.0}
+
+
+class CommitPanel(Panel):
+    """The repository's commits per day (synced history only)."""
+
+    def __init__(self, tokens: Tokens, parent: QWidget | None = None):
+        super().__init__("commit activity", parent=parent)
+        self.tokens = tokens
+        self.heatmap = CommitHeatmap(tokens)
+        self.body.addWidget(self.heatmap)
         self.caption = mono(_label("", "vNote", wrap=True), 10)
         self.body.addWidget(self.caption)
+        self.empty = mono(_label("No commit history synced yet. Refresh (Ctrl+R) syncs it "
+                                 "from GitHub.", "vNote", wrap=True), 10)
+        self.body.addWidget(self.empty)
 
-    def set_data(self, pulse: Pulse, animate: bool = False) -> None:
-        self.bars.set_data(pulse.counts, animate)
-        self.caption.setText(pulse.caption)
-        self.caption.setToolTip("Commits, plus issues opened and closed, per day")
-        self.set_live(bool(pulse.counts and any(pulse.counts[-2:])))
-
-
-class PowerPanel(Panel):
-    def __init__(self, tokens: Tokens, parent: QWidget | None = None):
-        super().__init__("power", "hardware.yaml", parent=parent)
-        self.tokens = tokens
-
-    def set_data(self, rails: tuple[RailPower, ...], note: str | None) -> None:
-        _clear(self.body)
-        if not rails:
-            self.body.addWidget(mono(_label(note or "no rails with parts", "vNote"), 10))
+    def set_data(self, grid: ContributionGrid | None) -> None:
+        ok = grid is not None and grid.available
+        self.heatmap.setVisible(ok)
+        self.caption.setVisible(ok)
+        self.empty.setVisible(not ok)
+        if not ok:
+            self.hint.setText("")
+            self.heatmap.set_data(None)
             return
-        for r in rails:
-            b = r.budget
-            top = QHBoxLayout()
-            top.addWidget(mono(_label(f"{r.rail} rail", "vVal"), 11, 600))
-            top.addStretch(1)
-            if b is not None:
-                rating = f"{fmt_num(b.rating_a)} A" if b.rating_a is not None else "? A"
-                txt = f"{fmt_num(b.worst_case_a)} A / {rating}"
-            else:
-                txt = f"{fmt_num(r.nominal_v)} V"
-            val = mono(_label(txt, "vKey"), 11)
-            top.addWidget(val)
-            self.body.addLayout(top)
-            if b is not None:
-                bar = RailMini(b, self.tokens)
-                bar.setToolTip(b.caption)
-                self.body.addWidget(bar)
-            if r.window is not None and r.window.tolerance_pct is None:
-                self.body.addWidget(mono(_label("tolerance unknown", "vNote"), 10))
+        self.heatmap.set_data(grid)
+        self.hint.setText(plural(grid.total, "commit"))
+        self.caption.setText(grid.range_label + (" · hover a day for its commits"
+                                                 if grid.total else " · no commits yet"))
+        partial = grid.covered_from is not None and grid.covered_from > grid.start
+        self.caption.setToolTip("Hollow squares: before the synced history, no data."
+                                if partial else "Commits per day from the synced repository "
+                                "history.")
+        self.set_live(bool(grid.days and grid.days[-1].count))
 
 
 # ---------------------------------------------------------------- briefing HUD
@@ -678,6 +922,6 @@ class StreamPanel(Panel):
         self.set_live(any(i.live for i in items[:3]))
 
 
-__all__ = ["Panel", "VitalsPanel", "MilestonesPanel", "PulsePanel", "PowerPanel",
+__all__ = ["Panel", "VitalsPanel", "IssuesPanel", "MilestonesPanel", "CommitPanel",
            "BriefingHud", "Inspector", "StreamPanel", "StreamRow", "pill", "set_pill",
            "COPY_LABEL", "QUrl", "QDesktopServices"]

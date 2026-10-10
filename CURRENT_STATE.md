@@ -83,6 +83,22 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   pulse / power, graph + briefing, inspector + stream). Its widgets are still attributes of
   the window (`win.graph`, `win.hud`, `win.inspector`, ...). Picking a graph reference from
   anywhere switches to Projects.
+- The cockpit's left column (`gui/dashboard_data.py`, tiles in `gui/cockpit.py`) answers
+  four questions about the active milestone. Active = the one picked in the Milestones tile
+  (UI setting `projects/active_milestone`, only the number), else the nearest-due open one.
+  Vitals: deadline and days left, closed / total, and risk: issues of that milestone closed
+  in the last 14 days give the pace; on track when the open ones fit before the due date at
+  that pace, at risk when not; none closed and due within 7 days is at risk, otherwise "too
+  early to tell"; no due date, no issues, done and overdue are said as such. Issues: the
+  repo's open count and the milestone's top 4 by their labels only (blocker, then P0..P4 /
+  critical / high / medium / low, then phase-N, then number; "blocked" last); a row inspects
+  the issue in the graph (else opens it), "view all" opens the milestone on GitHub.
+  Milestones: the active one, the others folded; any can be made active. Commit activity:
+  commits per local day from the synced history (`commits`, `commits_since`), 26 weeks,
+  days before the synced range hollow (no data), hover for the day's commits; no history
+  shows an empty state. Power and the old pulse are gone from the column; hardware.yaml,
+  checks and findings are unchanged (a "no hardware checks" pill says why when the file is
+  missing or invalid).
 - The inspector shows a summary first (what it is, what needs attention, the 3 most relevant
   links, problems first) and folds the rest under "details". An electrical check, or a card
   about one, gets `gui/finding_view.py`: the verified result (Python's text), the next step
@@ -158,7 +174,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 810 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 845 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

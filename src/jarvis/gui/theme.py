@@ -279,6 +279,24 @@ QToolTip {{
 #vVal[live="true"] {{ color: {t.signal}; }}
 #vVal[level="fail"] {{ color: {t.red}; }}
 #vNote {{ color: {t.faint}; }}
+#vSub {{ color: {t.muted}; font-family: {sans}; font-size: 12px; }}
+#vVal[tone="good"] {{ color: {t.signal}; }}
+#vVal[tone="warn"] {{ color: {t.unsure}; }}
+#vVal[tone="bad"] {{ color: {t.red}; }}
+#vVal[tone="muted"] {{ color: {t.faint}; }}
+#issueCount {{ color: {t.text}; }}
+QPushButton#issueRow, QPushButton#msRow {{
+    background: transparent; border: 1px solid transparent; border-radius: 6px; text-align: left;
+}}
+QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; border-color: {t.border}; }}
+#issueNum {{ color: {t.faint}; }}
+#issueTitle {{ color: {t.text}; font-family: {sans}; font-size: 13px; }}
+#issueTag {{ color: {t.muted}; border: 1px solid {t.border}; border-radius: 4px; padding: 0 4px; }}
+#issueTag[kind="blocker"] {{ color: {t.red}; border-color: {t.red}; }}
+#issueTag[kind="priority"] {{ color: {t.unsure}; border-color: {t.unsure}; }}
+#issueTag[kind="blocked"] {{ color: {t.faint}; }}
+#issueGo {{ color: {t.faint}; }}
+#msTitle {{ color: {t.text}; }}
 #hairline {{ background: {t.border}; border: none; }}
 
 /* briefing HUD */
