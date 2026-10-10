@@ -740,6 +740,8 @@ class MainWindow(QMainWindow):
 
     def _on_lock(self, node_id: str | None) -> None:
         self._inspect(node_id or self.graph.hover_id, locked=bool(node_id))
+        num = node_id[6:] if node_id and node_id.startswith("issue:") else ""
+        self.issues.mark_selected(int(num) if num.isdigit() else None)
 
     def _inspect(self, node_id: str | None, locked: bool) -> None:
         g = self.graph.graph

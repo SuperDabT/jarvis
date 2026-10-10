@@ -105,13 +105,14 @@ def test_vitals_issues_and_milestones_show_the_active_milestone(made):
     assert win.issues.count.text() == "4"                   # all open issues in the repo
     assert [r.row.number for r in win.issues.rows] == [12, 7, 31]   # blocker, phase, number
     assert win.milestones.hint.text() == "nearest due"
-    assert len(win.milestones.rows) == 1 and not win.milestones.expanded   # others folded
+    assert not win.milestones.expanded and win.milestones.others.isHidden()   # folded
 
 
 def test_switching_the_milestone_updates_every_tile(made):
     win, *_ = made()
     win.milestones.toggle_btn.click()
-    assert win.milestones.expanded and len(win.milestones.rows) == 2
+    assert win.milestones.expanded and not win.milestones.others.isHidden()
+    assert win.milestones.toggle_btn.text() == "▾ hide 1 other"
     win.milestones.rows[1].click()                           # "Field test"
     assert win.chat.settings.value(ACTIVE_MILESTONE_KEY) in (2, "2")
     assert win.dash.active.title == "Field test" and win.milestones.hint.text() == "picked"

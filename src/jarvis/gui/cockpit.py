@@ -54,8 +54,8 @@ from jarvis.gui.data import (
     plural,
 )
 from jarvis.gui.finding_view import FindingView
-from jarvis.gui.theme import Tokens
-from jarvis.gui.widgets import SentenceRow, _clear, _label, repolish, set_font
+from jarvis.gui.theme import Tokens, typeset
+from jarvis.gui.widgets import HoverRow, SentenceRow, _clear, _label, repolish, set_font
 
 COPY_LABEL = "copy prompt"
 # The inspector's summary: this much text and this many relationships, problems
@@ -79,7 +79,7 @@ def mono(w: QWidget, px: int = 11, weight: int = 400) -> QWidget:
 
 def pill(text: str, live: bool = False, level: str | None = None) -> QLabel:
     lb = _label(text, "pill")
-    mono(lb, 10, 500)
+    typeset(lb, "pill")
     set_pill(lb, text, live, level)
     return lb
 
@@ -103,10 +103,10 @@ class Panel(QFrame):
         lay.setSpacing(8)
         head = QHBoxLayout()
         head.setSpacing(6)
-        self.head = mono(_label(title, "panelHead"), 11, 500)
+        self.head = typeset(_label(title, "panelHead"), "head")
         head.addWidget(self.head)
         head.addStretch(1)
-        self.hint = mono(_label(hint, "panelHint"), 10)
+        self.hint = typeset(_label(hint, "panelHint"), "meta")
         head.addWidget(self.hint)
         lay.addLayout(head)
         self.body = QVBoxLayout()
@@ -163,10 +163,10 @@ class VitalsPanel(Panel):
                      "Unconfirmed: recent commits look like the same work." if m.maybe else ""),
                     ("risk", r.label, r.why, r.tone, "")]
         for i, (key, val, sub, tone, tip) in enumerate(rows):
-            kl = mono(_label(key, "vKey"), 11)
-            vl = mono(_label(val, "vVal"), 11, 600)
+            kl = typeset(_label(key, "vKey"), "label")
+            vl = typeset(_label(val, "vVal"), "value")
             vl.setProperty("tone", tone)
-            sl = _label(sub, "vSub", wrap=True)
+            sl = typeset(_label(sub, "vSub", wrap=True), "meta")
             sl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             for w in (kl, vl, sl):
                 w.setToolTip(tip)
@@ -179,29 +179,43 @@ class VitalsPanel(Panel):
                 motion.count_up_text(vl, val)
 
 
-class IssueRowButton(QPushButton):
-    """One issue: number, title, its label tag, and a "›" to inspect it."""
+class ElideButton(QPushButton):
+    """A button whose text ends in "…" when the column is narrower than it, rather
+    than being cut mid-word (the tooltip has the whole of it)."""
+
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.full_text = text
+
+    def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(e)
+        room = max(20, self.width() - 14)        # the stylesheet's side padding
+        self.setText(self.fontMetrics().elidedText(self.full_text,
+                                                   Qt.TextElideMode.ElideRight, room))
+
+
+class IssueRowButton(HoverRow):
+    """One issue: number, title, its label tag, and a "›" to inspect it. Marked
+    while its issue is the graph's selection."""
 
     def __init__(self, row: IssueRow, parent: QWidget | None = None):
-        super().__init__(parent)
+        super().__init__(parent=parent)
         self.row = row
-        self.setObjectName("issueRow")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(f"#{row.number} {row.title}" + (f"  [{row.tag}]" if row.tag else "")
                         + "\nclick: inspect it")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(6, 4, 4, 4)
         lay.setSpacing(6)
-        num = mono(_label(f"#{row.number}", "issueNum"), 10)
+        num = typeset(_label(f"#{row.number}", "issueNum"), "code")
         lay.addWidget(num)
-        self.title_label = _label(row.title, "issueTitle")
+        self.title_label = typeset(_label(row.title, "issueTitle"), "body")
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         lay.addWidget(self.title_label, 1)
         if row.tag:
-            tag = mono(_label(row.tag, "issueTag"), 9)
+            tag = typeset(_label(row.tag, "issueTag"), "tag")
             tag.setProperty("kind", row.tag_kind)
             lay.addWidget(tag)
-        lay.addWidget(mono(_label("›", "issueGo"), 12))
+        lay.addWidget(typeset(_label("›", "issueGo"), "value"))
         self.setMinimumHeight(28)
 
     def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
@@ -221,26 +235,32 @@ class IssuesPanel(Panel):
     def __init__(self, parent: QWidget | None = None):
         super().__init__("issues", parent=parent)
         self.rows: list[IssueRowButton] = []
-        self.count = mono(_label("", "issueCount"), 18, 700)
+        self.selected_number: int | None = None
+        self.count = typeset(_label("", "issueCount"), "big")
         self.view_btn = QPushButton("view all →")
         self.view_btn.setObjectName("linkBtn")
         self.view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._url: str | None = None
         self.view_btn.clicked.connect(lambda: self._url and self.view_all.emit(self._url))
 
+    def mark_selected(self, number: int | None) -> None:
+        """The graph's selection: mark its row (if listed)."""
+        self.selected_number = number
+        _mark(self.rows, number)
+
     def set_data(self, dash: Dashboard | None) -> None:
         _clear(self.body)
         self.rows = []
         if dash is None:
-            self.body.addWidget(mono(_label("no issue data", "vNote"), 10))
+            self.body.addWidget(typeset(_label("no issue data", "vNote"), "meta"))
             return
         top = QHBoxLayout()
         top.setSpacing(8)
-        self.count = mono(_label(str(dash.open_total), "issueCount"), 18, 700)
+        self.count = typeset(_label(str(dash.open_total), "issueCount"), "big")
         top.addWidget(self.count)
         where = (f"open · {dash.milestone_open} in {dash.active.title}" if dash.active
                  else "open")
-        self.where = mono(_label(where, "vKey"), 10)
+        self.where = typeset(_label(where, "vKey"), "meta")
         self.where.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         top.addWidget(self.where, 1, Qt.AlignmentFlag.AlignBottom)
         self.view_btn = QPushButton("view all →")
@@ -257,18 +277,25 @@ class IssuesPanel(Panel):
             b.clicked.connect(lambda _=False, n=r.number: self.selected.emit(n))
             self.body.addWidget(b)
             self.rows.append(b)
+        _mark(self.rows, self.selected_number)
         if not dash.issues:
-            self.body.addWidget(mono(_label(
+            self.body.addWidget(typeset(_label(
                 "no open issues in this milestone" if dash.active else "no open issues",
-                "vNote"), 10))
+                "vNote"), "meta"))
         elif not any(r.tag for r in dash.issues):
-            hint = mono(_label("no priority labels: ordered by issue number", "vNote"), 9)
+            hint = typeset(_label("no priority labels: ordered by issue number", "vNote"), "meta")
             self.body.addWidget(hint)
 
 
+def _mark(rows, number: int | None) -> None:
+    for r in rows:
+        r.set_selected(r.row.number == number)
+
+
 class MilestonesPanel(Panel):
-    """The active milestone up front; the others folded, any of them can be made
-    active (``picked``; -1 = back to the nearest-due one)."""
+    """The active milestone up front; the others folded (they open and close with
+    ``motion.reveal``), any of them can be made active (``picked``; -1 = back to
+    the nearest-due one)."""
 
     picked = Signal(int)
 
@@ -278,70 +305,88 @@ class MilestonesPanel(Panel):
         self.rows: list[QWidget] = []
         self.expanded = False
         self.toggle_btn: QPushButton | None = None
+        self.others: QWidget | None = None
         self._dash: Dashboard | None = None
+        self._active_number: int | None = None
+
+    def _toggle_text(self) -> str:
+        n = len(self._dash.others) if self._dash else 0
+        if not n:
+            return "▾ options" if self.expanded else "▸ options"
+        return f"▾ hide {plural(n, 'other')}" if self.expanded else \
+            f"▸ {plural(n, 'other milestone')}"
 
     def set_expanded(self, on: bool) -> None:
         self.expanded = bool(on)
-        self.set_data(self._dash)
+        if self.toggle_btn is not None:
+            self.toggle_btn.setText(self._toggle_text())
+        if self.others is not None:
+            motion.reveal(self.others, self.expanded)
 
     def set_data(self, dash: Dashboard | None) -> None:
         self._dash = dash
         _clear(self.body)
         self.rows = []
         self.toggle_btn = None
+        self.others = None
         m = dash.active if dash else None
         if m is None:
-            self.body.addWidget(mono(_label("no open milestones", "vNote"), 11))
+            self.body.addWidget(typeset(_label("no open milestones", "vNote"), "meta"))
             return
         self.hint.setText("picked" if dash.picked else "nearest due")
-        self.body.addWidget(self._block(m, dash.today, active=True))
+        active = self._block(m, dash.today, active=True)
+        self.body.addWidget(active)
+        if self._active_number is not None and self._active_number != m.number:
+            motion.fade_rise(active, 6, motion.SELECT)    # the new active one settles in
+        self._active_number = m.number
         if not dash.others and not dash.picked:
             return
-        n = len(dash.others)
-        self.toggle_btn = QPushButton((f"▾ hide {plural(n, 'other')}" if self.expanded
-                                       else f"▸ {plural(n, 'other milestone')}") if n
-                                      else "▸ options")
+        self.toggle_btn = QPushButton(self._toggle_text())
         self.toggle_btn.setObjectName("linkBtn")
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_btn.clicked.connect(lambda: self.set_expanded(not self.expanded))
         self.body.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        if not self.expanded:
-            return
+        self.others = QWidget()
+        col = QVBoxLayout(self.others)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
         for b in dash.others:
-            w = self._block(b, dash.today, active=False)
-            self.body.addWidget(w)
+            col.addWidget(self._block(b, dash.today, active=False))
         if dash.picked:
             auto = QPushButton("use the nearest-due milestone")
             auto.setObjectName("linkBtn")
             auto.setCursor(Qt.CursorShape.PointingHandCursor)
             auto.clicked.connect(lambda: self.picked.emit(-1))
-            self.body.addWidget(auto, 0, Qt.AlignmentFlag.AlignLeft)
+            col.addWidget(auto, 0, Qt.AlignmentFlag.AlignLeft)
+        self.others.setVisible(self.expanded)
+        self.body.addWidget(self.others)
 
     def _block(self, b: MilestoneBar, today, active: bool) -> QWidget:
-        w = QPushButton() if not active else QWidget()
+        w = HoverRow(self.tokens) if not active else QWidget()
         w.setObjectName("msActive" if active else "msRow")
         col = QVBoxLayout(w)
-        col.setContentsMargins(0 if active else 6, 2, 0 if active else 6, 4)
+        col.setContentsMargins(0 if active else 8, 2 if active else 6, 0 if active else 8,
+                               4 if active else 6)
         col.setSpacing(4)
         top = QHBoxLayout()
-        title = mono(_label(b.title, "msTitle" if active else "vVal"), 12 if active else 11, 600)
+        title = typeset(_label(b.title, "msTitle" if active else "vVal"),
+                        "title" if active else "value")
         title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         top.addWidget(title, 1)
         days = (b.due - today).days if b.due else None
         when = ("no due date" if days is None else f"{-days}d late" if days < 0
                 else "today" if days == 0 else f"{days}d")
         maybe = f" +{b.maybe}?" if b.maybe else ""
-        top.addWidget(mono(_label(f"{b.closed}/{b.total}{maybe} · {when}", "vKey"), 11))
+        top.addWidget(typeset(_label(f"{b.closed}/{b.total}{maybe} · {when}", "vKey"), "label"))
         col.addLayout(top)
         col.addWidget(MilestoneMini(b, self.tokens))
         if active and b.due:
-            col.addWidget(mono(_label(f"due {fmt_day(b.due)}", "vNote"), 10))
+            col.addWidget(typeset(_label(f"due {fmt_day(b.due)}", "vNote"), "meta"))
         tip = f"{b.title}: {b.label}"
         if not active:
-            w.setCursor(Qt.CursorShape.PointingHandCursor)
             w.setToolTip(tip + "\nclick: make it the active milestone")
             w.clicked.connect(lambda _=False, n=b.number: self.picked.emit(n))
-            w.setMinimumHeight(40)
+            w.setMinimumHeight(44)
         else:
             w.setToolTip(tip + (f"\n{b.url}" if b.url else ""))
         self.rows.append(w)
@@ -440,10 +485,10 @@ class CommitPanel(Panel):
         self.tokens = tokens
         self.heatmap = CommitHeatmap(tokens)
         self.body.addWidget(self.heatmap)
-        self.caption = mono(_label("", "vNote", wrap=True), 10)
+        self.caption = typeset(_label("", "vNote", wrap=True), "meta")
         self.body.addWidget(self.caption)
-        self.empty = mono(_label("No commit history synced yet. Refresh (Ctrl+R) syncs it "
-                                 "from GitHub.", "vNote", wrap=True), 10)
+        self.empty = typeset(_label("No commit history synced yet. Refresh (Ctrl+R) syncs it "
+                                 "from GitHub.", "vNote", wrap=True), "meta")
         self.body.addWidget(self.empty)
 
     def set_data(self, grid: ContributionGrid | None) -> None:
@@ -489,9 +534,9 @@ class BriefingHud(QFrame):
         lay.setSpacing(8)
         head = QHBoxLayout()
         head.setSpacing(8)
-        self.head = mono(_label("briefing", "hudHead"), 11, 500)
+        self.head = typeset(_label("briefing", "hudHead"), "head")
         head.addWidget(self.head)
-        self.source = mono(_label("", "panelHint"), 10)
+        self.source = typeset(_label("", "panelHint"), "code")
         head.addWidget(self.source)
         head.addStretch(1)
         self.toggle_btn = QPushButton("−")
@@ -591,6 +636,7 @@ class Inspector(Panel):
         self._flash.timeout.connect(self._unflash)
         self.copy_btn: QPushButton | None = None
         self.finding: FindingView | None = None
+        self._shown_lock: str | None = None
         self.show_node(None)
 
     def show_node(self, node: Node | None, graph: Graph | None = None,
@@ -599,20 +645,25 @@ class Inspector(Panel):
         """Summary first: what it is, what needs attention, a few relationships;
         everything else under "details". A finding (a check, or a card about one)
         gets its explanation, source and next step, with the actions."""
+        # a new selection settles in (hovering doesn't fade: scanning stays instant)
+        changed = locked and node is not None and node.id != self._shown_lock
+        self._shown_lock = node.id if locked and node is not None else None
         self.node, self.card, self.finding = node, card, finding
         _clear(self.body)
+        if changed:
+            motion.fade_in(self.scroll.widget(), motion.SELECT)
         self.copy_btn = None
         self.details_btn = None
         self.hint.setText("locked · esc to release" if node and locked else "")
         if node is None:
-            self.body.addWidget(mono(_label(self.HINT, "vNote"), 11))
+            self.body.addWidget(typeset(_label(self.HINT, "vNote"), "meta"))
             self.body.itemAt(0).widget().setWordWrap(True)
             return
         now = now or datetime.now(UTC)
-        kind = mono(_label((node.sub if node.kind == "item" else
+        kind = typeset(_label((node.sub if node.kind == "item" else
                             KIND_NAMES.get(node.kind, node.kind))
                            + (f" · {node.status}" if node.status else "")
-                           + (" · live" if node.live else ""), "inspKind"), 10, 500)
+                           + (" · live" if node.live else ""), "inspKind"), "label")
         self.body.addWidget(kind)
         title = _label(node.title, "inspTitle", wrap=True)
         title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -636,16 +687,16 @@ class Inspector(Panel):
             words = " · ".join(f"{n} {ATTENTION_WORDS.get(st, st)}"
                                for st, n in sorted(attention.items(),
                                                    key=lambda kv: ATTENTION_RANK[kv[0]]))
-            self.attention = mono(_label(f"needs attention · {words}", "inspAttention"), 10, 500)
+            self.attention = typeset(_label(f"needs attention · {words}", "inspAttention"), "label")
             self.body.addWidget(self.attention)
         if links:
-            self.body.addWidget(mono(_label(f"links · {len(links)}", "panelHead"), 10, 500))
+            self.body.addWidget(typeset(_label(f"links · {len(links)}", "panelHead"), "head"))
             for edge, other in links[:SUMMARY_LINKS]:
                 self.body.addWidget(self._link(edge, other))
             for edge, other in links[SUMMARY_LINKS:DETAIL_LINKS]:
                 details.append(self._link(edge, other))
             if len(links) > DETAIL_LINKS:
-                details.append(mono(_label(f"+{len(links) - DETAIL_LINKS} more", "vNote"), 10))
+                details.append(typeset(_label(f"+{len(links) - DETAIL_LINKS} more", "vNote"), "meta"))
         meta = []
         from jarvis.gui.brain_data import _parse
 
@@ -655,7 +706,7 @@ class Inspector(Panel):
             meta.append(f'<a href="{escape(node.url, quote=True)}" '
                         f'style="color:{self.tokens.signal}">open ↗</a>')
         if meta:
-            m = mono(_label(" · ".join(meta), "vKey", rich=True), 10)
+            m = typeset(_label(" · ".join(meta), "vKey", rich=True), "meta")
             m.setOpenExternalLinks(True)
             self.body.addWidget(m)
         if card is not None:
@@ -677,7 +728,7 @@ class Inspector(Panel):
         if len(name) > 38:
             name = name[:37].rstrip() + "…"
         mark = f" · {ATTENTION_WORDS[other.status]}" if other.status in ATTENTION_RANK else ""
-        b = QPushButton(f"{EDGE_LABELS.get(edge.kind, edge.kind)} → {name}" + mark)
+        b = ElideButton(f"{EDGE_LABELS.get(edge.kind, edge.kind)} → {name}" + mark)
         b.setObjectName("filter")
         b.setToolTip(other.title)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -702,7 +753,7 @@ class Inspector(Panel):
         self.details.hide()
 
         def toggle(on: bool) -> None:
-            self.details.setVisible(on)
+            motion.reveal(self.details, on)
             self.details_btn.setText("details ▾" if on else "details ▸")
 
         self.details_btn.toggled.connect(toggle)
@@ -710,7 +761,7 @@ class Inspector(Panel):
         self.body.addWidget(self.details)
 
     def _section(self, head: str, text: str, name: str = "inspText") -> QLabel:
-        self.body.addWidget(mono(_label(head, "panelHead"), 10, 500))
+        self.body.addWidget(typeset(_label(head, "panelHead"), "head"))
         lb = _label(text, name, wrap=True)
         lb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lb.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # paths
@@ -759,7 +810,7 @@ class Inspector(Panel):
                 else:
                     where += " · not found in the file"
             self.source_text = self._section("source", where, "inspSource")
-            self.edit_note = mono(_label(src.edit_note, "vNote", wrap=True), 10)
+            self.edit_note = typeset(_label(src.edit_note, "vNote", wrap=True), "meta")
             self.body.addWidget(self.edit_note)
         if f.explain:
             self.explained = self._section("what it checks", f.explain + " " + f.matters)
@@ -856,19 +907,20 @@ class StreamRow(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 4, 0, 6)
         lay.setSpacing(8)
-        mark = mono(_label(ORIGIN_MARK.get(item.origin, "·"), "vVal"), 11)
+        mark = typeset(_label(ORIGIN_MARK.get(item.origin, "·"), "vVal"), "value")
         mark.setProperty("live", "true" if item.live else "false")
         mark.setFixedWidth(12)
         lay.addWidget(mark, 0, Qt.AlignmentFlag.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(2)
-        self.text = mono(_label(item.text, "streamText", wrap=True), 11)
+        self.text = typeset(_label(item.text, "streamText", wrap=True), "body")
         col.addWidget(self.text)
         from jarvis.gui.brain_data import _parse
 
         kind = "" if item.kind == item.origin else f"{item.kind} · "
-        col.addWidget(mono(_label(f"{kind}origin:{item.origin} · "
-                                  f"{ago(_parse(item.when), now)}", "streamMeta"), 10))
+        col.addWidget(typeset(_label(f"{kind}origin:{item.origin} · "
+                                     f"{ago(_parse(item.when), now)}", "streamMeta",
+                                     wrap=True), "code"))
         lay.addLayout(col, 1)
         if item.node_id:
             self.setCursor(Qt.CursorShape.PointingHandCursor)

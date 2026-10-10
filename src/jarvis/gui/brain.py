@@ -57,6 +57,7 @@ class BrainGraph(QWidget):
         self.hidden_kinds: set[str] = set()
         self.hover_id: str | None = None
         self.lock_id: str | None = None
+        self._lock_t = 0.0
         self.highlight: set[str] = set()
         self._born: dict[str, float] = {}     # node id -> time it appeared (grow-in)
         self._progress = 1.0                  # first-show reveal, 0 -> 1
@@ -122,7 +123,10 @@ class BrainGraph(QWidget):
         self.update()
 
     def lock(self, node_id: str | None) -> None:
-        self.lock_id = node_id if node_id and self.graph.node(node_id) else None
+        new = node_id if node_id and self.graph.node(node_id) else None
+        if new and new != self.lock_id:
+            self._lock_t = time.monotonic()      # the selection ring settles in
+        self.lock_id = new
         self.update()
         self.locked.emit(self.lock_id)
 
@@ -388,8 +392,18 @@ class BrainGraph(QWidget):
                 p.drawEllipse(pt, r, r)
             if nid == sel:
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                p.setPen(QPen(qc(t.ink, 0.9), 1.2))
-                p.drawEllipse(pt, r + 4, r + 4)
+                if nid == self.lock_id:
+                    # locked: a mint ring that settles in from a little further out
+                    k = 1.0
+                    if motion.enabled():
+                        k = min(1.0, (time.monotonic() - self._lock_t) * 1000 / motion.SELECT)
+                    k = motion.ease_out(k)
+                    p.setPen(QPen(qc(t.signal, 0.35 + 0.6 * k), 1.6))
+                    rr = r + 4 + 7 * (1 - k)
+                else:   # hovered: a quiet ink ring
+                    p.setPen(QPen(qc(t.ink, 0.7), 1.0))
+                    rr = r + 4
+                p.drawEllipse(pt, rr, rr)
             show_label = (n.kind in LABELLED or nid == sel
                           or (nid in focus and n.kind in ("issue", "milestone", "part", "item"))
                           or (n.kind == "issue" and n.live)

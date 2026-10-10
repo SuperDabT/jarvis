@@ -8,7 +8,7 @@ from html import escape
 import math
 import time
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import Property, QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QIcon,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QWidget,
 )
@@ -164,6 +165,75 @@ class SentenceRow(QWidget):
         if sentence.uncertain:
             self.setToolTip(UNSURE_TIP)
             self.text_label.setToolTip(UNSURE_TIP)
+
+
+class HoverRow(QPushButton):
+    """A clickable row (an issue, a milestone): no outline at rest, a fill that
+    fades in on hover (``motion.HOVER``), a brighter one while pressed, and a
+    mint edge with a tint while ``selected``. Painted here rather than by the
+    stylesheet, which can't fade."""
+
+    RADIUS = 6.0
+
+    def __init__(self, tokens: Tokens | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.tokens = tokens or theme.DARK
+        self._hover = 0.0
+        self._selected = False
+        self.setObjectName("hoverRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.pressed.connect(self.update)
+        self.released.connect(self.update)
+
+    def _get_hover(self) -> float:
+        return self._hover
+
+    def _set_hover(self, v: float) -> None:
+        self._hover = float(v)
+        self.update()
+
+    hover = Property(float, _get_hover, _set_hover)
+
+    @property
+    def selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, on: bool) -> None:
+        self._selected = bool(on)
+        self.update()
+
+    def enterEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().enterEvent(e)
+        motion.animate(self, b"hover", self._hover, 1.0, motion.HOVER)
+
+    def leaveEvent(self, e) -> None:  # noqa: N802 - Qt API
+        super().leaveEvent(e)
+        motion.animate(self, b"hover", self._hover, 0.0, motion.HOVER)
+
+    def paintEvent(self, e) -> None:  # noqa: N802 - Qt API
+        t = self.tokens
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        if self._selected:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(theme.mix(t.panel, t.signal, 0.10)))
+            p.drawRoundedRect(r, self.RADIUS, self.RADIUS)
+            p.setBrush(QColor(t.signal))
+            p.drawRoundedRect(QRectF(r.left(), r.top() + 5, 2.5, r.height() - 10), 1.2, 1.2)
+        level = 1.0 if self.isDown() else self._hover
+        if level > 0:
+            fill = QColor(t.fill2 if self.isDown() else t.hover)
+            fill.setAlphaF(min(1.0, level))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(fill)
+            p.drawRoundedRect(r, self.RADIUS, self.RADIUS)
+        if self.hasFocus():   # keyboard focus stays visible
+            p.setPen(QPen(QColor(t.muted), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r, self.RADIUS, self.RADIUS)
+        p.end()
 
 
 class PulseDot(QWidget):

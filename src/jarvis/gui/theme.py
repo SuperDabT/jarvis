@@ -6,10 +6,14 @@ everything live: graph nodes with recent activity, status pills, sparklines,
 the orb while it listens or speaks, new arrivals, focus. A muted red is kept
 for genuinely failing checks only.
 
-Type: JetBrains Mono for the cockpit (labels, numbers, the graph, the stream,
-pills, the ticker); Adwaita Sans (Inter's design, every weight, installed
-with the desktop) for reading (the briefing, chat answers).
+Type: Adwaita Sans (Inter's design, every weight, installed with the desktop)
+for headings, labels, values and reading, on one scale (``TYPE``, applied with
+``typeset``); JetBrains Mono only for what is technical: issue numbers, hashes,
+paths, label tags, the graph's labels, the ticker and keyboard hints.
 Labels are lower case: the look is a terminal, not a poster.
+
+Green (the mint) is for what is live, active or positive: selection, primary
+actions, good status. Headings, borders and labels stay in the ink's tints.
 """
 from __future__ import annotations
 
@@ -88,8 +92,8 @@ def _dark() -> Tokens:
     t = lambda k: mix(BG, INK, k)  # noqa: E731 - a tint of the pair
     m = lambda k: mix(BG, MINT, k)  # noqa: E731 - towards the mint
     return Tokens(
-        name="dark", bg=BG, ink=INK, side="#041614", text=INK, muted=t(0.72),
-        faint=t(0.5), border=t(0.11), border_strong=t(0.18), btn_line=t(0.3),
+        name="dark", bg=BG, ink=INK, side="#041614", text=INK, muted=t(0.78),
+        faint=t(0.6), border=t(0.085), border_strong=t(0.17), btn_line=t(0.28),
         fill=t(0.045), fill2=t(0.1), inset="#061a18", hover=t(0.07), accent=INK,
         accent_hover="#f2fbf6", on_accent=BG, signal=MINT, signal_text=MINT,
         signal_soft=m(0.14), unsure=t(0.72), unsure_bg=t(0.1), warn=MINT, red=RED,
@@ -116,6 +120,20 @@ LIGHT = DARK  # dark only; kept so older imports keep working
 BODY_PX = 14
 SMALL_PX = 12
 TITLE_PX = 22
+
+# The type scale: role -> (voice, px, weight). Mono only for technical text.
+TYPE: dict[str, tuple[str, int, int]] = {
+    "big": ("sans", 22, 650),      # a headline number (open issues)
+    "title": ("sans", 15, 600),    # an item's name (inspector, active milestone)
+    "head": ("sans", 12, 600),     # panel and section headings
+    "value": ("sans", 13, 600),    # a vital's value
+    "body": ("sans", 13, 400),     # running text
+    "label": ("sans", 12, 400),    # a vital's key, a row's secondary text
+    "meta": ("sans", 12, 400),     # hints, captions, timestamps
+    "pill": ("sans", 11, 500),     # status pills
+    "code": ("mono", 11, 400),     # #12, 02fb2d2, paths, model names
+    "tag": ("mono", 10, 500),      # label tags (P1, blocker, phase-1)
+}
 
 # ---------------------------------------------------------------- fonts
 
@@ -187,6 +205,25 @@ def mono_font(px: int = 11, caps: bool = False, spacing_em: float = 0.0,
     if spacing_em:
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, px * spacing_em)
     return f
+
+
+def type_font(role: str) -> QFont:
+    """The font of a ``TYPE`` role."""
+    voice, px, weight = TYPE[role]
+    if voice == "mono":
+        return mono_font(px, weight=weight)
+    f = QFont(family("sans"))
+    f.setPixelSize(px)
+    f.setWeight(QFont.Weight(weight))
+    f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+    return f
+
+
+def typeset(widget, role: str):
+    """Give ``widget`` the font of a ``TYPE`` role (returns it, for chaining)."""
+    widget.setFont(type_font(role))
+    widget.setProperty("type", role)
+    return widget
 
 
 def pick_font() -> QFont:
@@ -270,16 +307,16 @@ QToolTip {{
 #pill[level="fail"] {{ color: {t.red}; border-color: {mix(t.bg, t.red, 0.5)}; }}
 
 /* panels */
-#panel {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 8px; }}
-#panel[live="true"] {{ border-color: {mix(t.bg, t.signal, 0.45)}; }}
-#panelHead {{ color: {t.muted}; }}
+#panel {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 10px; }}
+#panel[live="true"] {{ border-color: {mix(t.border, t.signal, 0.25)}; }}
+#panelHead {{ color: {t.text}; }}
 #panelHint {{ color: {t.faint}; }}
 #vKey {{ color: {t.faint}; }}
 #vVal {{ color: {t.text}; }}
 #vVal[live="true"] {{ color: {t.signal}; }}
 #vVal[level="fail"] {{ color: {t.red}; }}
 #vNote {{ color: {t.faint}; }}
-#vSub {{ color: {t.muted}; font-family: {sans}; font-size: 12px; }}
+#vSub {{ color: {t.muted}; }}
 #vVal[tone="good"] {{ color: {t.signal}; }}
 #vVal[tone="warn"] {{ color: {t.unsure}; }}
 #vVal[tone="bad"] {{ color: {t.red}; }}
@@ -290,10 +327,10 @@ QPushButton#issueRow, QPushButton#msRow {{
 }}
 QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; border-color: {t.border}; }}
 #issueNum {{ color: {t.faint}; }}
-#issueTitle {{ color: {t.text}; font-family: {sans}; font-size: 13px; }}
-#issueTag {{ color: {t.muted}; border: 1px solid {t.border}; border-radius: 4px; padding: 0 4px; }}
-#issueTag[kind="blocker"] {{ color: {t.red}; border-color: {t.red}; }}
-#issueTag[kind="priority"] {{ color: {t.unsure}; border-color: {t.unsure}; }}
+#issueTitle {{ color: {t.text}; }}
+#issueTag {{ color: {t.muted}; background: {t.fill2}; border-radius: 4px; padding: 1px 5px; }}
+#issueTag[kind="blocker"] {{ color: {t.red}; background: {mix(t.bg, t.red, 0.16)}; }}
+#issueTag[kind="priority"] {{ color: {t.text}; }}
 #issueTag[kind="blocked"] {{ color: {t.faint}; }}
 #issueGo {{ color: {t.faint}; }}
 #msTitle {{ color: {t.text}; }}
@@ -315,8 +352,8 @@ QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; bo
 /* inspector + stream */
 #inspTitle {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
 #inspText {{ color: {t.muted}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
-#inspKind {{ color: {t.signal}; }}
-#inspAi {{ color: {t.faint}; font-family: {sans}; font-size: 12px; font-style: italic; }}
+#inspKind {{ color: {t.muted}; }}
+#inspAi {{ color: {t.muted}; font-style: italic; }}
 #inspSource {{ color: {t.text}; font-family: {mono}; font-size: 11px; }}
 #inspAttention {{ color: {t.unsure}; }}
 #promptBox {{
@@ -330,10 +367,10 @@ QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; bo
 
 QPushButton {{
     color: {t.text}; background: transparent; border: 1px solid {t.btn_line};
-    border-radius: 6px; padding: 4px 10px; font-family: {mono}; font-size: 12px;
+    border-radius: 6px; padding: 4px 10px; font-family: {sans}; font-size: 13px;
 }}
-QPushButton:hover {{ border-color: {t.text}; }}
-QPushButton:pressed {{ background: {t.hover}; }}
+QPushButton:hover {{ border-color: {t.muted}; background: {t.hover}; }}
+QPushButton:pressed {{ background: {t.fill2}; border-color: {t.text}; }}
 QPushButton:disabled {{ color: {t.faint}; border-color: {t.border_strong}; }}
 QPushButton::menu-indicator {{ width: 0; image: none; }}
 QPushButton#ghost {{ border: none; color: {t.muted}; padding: 4px 8px; }}
@@ -341,10 +378,11 @@ QPushButton#ghost:hover {{ background: {t.hover}; color: {t.text}; }}
 QPushButton#ghost[active="true"] {{ background: {t.hover}; color: {t.signal}; }}
 QPushButton#primary {{ color: {t.on_accent}; background: {t.accent}; border: 1px solid {t.accent}; }}
 QPushButton#primary:hover {{ background: {t.accent_hover}; border-color: {t.accent_hover}; }}
+QPushButton#primary:pressed {{ background: {t.tint(0.8)}; border-color: {t.tint(0.8)}; }}
 QPushButton#primary[flash="true"] {{ color: {t.signal}; background: transparent; border-color: {t.signal}; }}
-QPushButton#filter {{ border: none; color: {t.faint}; padding: 2px 5px; font-size: 11px; }}
+QPushButton#filter {{ border: none; color: {t.faint}; padding: 2px 5px; font-size: 12px; }}
 QPushButton#filter:checked {{ color: {t.text}; }}
-QPushButton#filter:hover {{ color: {t.signal}; }}
+QPushButton#filter:hover {{ color: {t.text}; background: {t.hover}; }}
 QPushButton#chip {{
     border: 1px solid {t.btn_line}; border-radius: 8px; padding: 6px 12px;
     color: {t.text}; background: transparent; font-family: {sans}; font-size: 13px;
@@ -359,7 +397,7 @@ QPushButton#srcChip:hover {{ color: {t.signal}; border-color: {live_line}; }}
 QPushButton#srcChip[more="true"] {{ background: transparent; border-style: dashed; }}
 QPushButton#thinkToggle {{
     border: 1px solid {t.btn_line}; border-radius: 9px; padding: 2px 9px;
-    font-family: {mono}; font-size: 11px; color: {t.muted}; background: transparent;
+    font-family: {sans}; font-size: 12px; color: {t.muted}; background: transparent;
 }}
 QPushButton#thinkToggle:hover {{ color: {t.text}; border-color: {t.text}; }}
 QPushButton#thinkToggle:checked {{ color: {t.signal}; background: {t.signal_soft}; border-color: {live_line}; }}
@@ -373,7 +411,7 @@ QPushButton#send:disabled {{ background: {t.fill2}; color: {t.faint}; }}
 QMenu {{
     background: {t.inset}; color: {t.text};
     border: 1px solid {t.border_strong}; border-radius: 8px; padding: 4px;
-    font-family: {mono}; font-size: 12px;
+    font-family: {sans}; font-size: 13px;
 }}
 QMenu::item {{ padding: 5px 16px; border-radius: 5px; }}
 QMenu::item:selected {{ background: {t.hover}; color: {t.signal}; }}
@@ -424,10 +462,11 @@ QPushButton#filterChip:checked {{
     color: {t.signal}; border-color: {live_line}; background: {t.signal_soft};
 }}
 QPushButton#linkBtn {{
-    border: none; color: {t.signal_text}; font-family: {mono}; font-size: 11px;
-    padding: 0 2px; background: transparent;
+    border: none; color: {t.signal_text}; font-family: {sans}; font-size: 12px;
+    font-weight: 500; padding: 1px 3px; background: transparent; border-radius: 4px;
 }}
-QPushButton#linkBtn:hover {{ color: {t.text}; }}
+QPushButton#linkBtn:hover {{ color: {t.text}; background: {t.hover}; }}
+QPushButton#linkBtn:pressed {{ background: {t.fill2}; }}
 QComboBox {{
     background: {t.inset}; color: {t.text}; border: 1px solid {t.border_strong};
     border-radius: 6px; padding: 3px 8px; font-family: {mono}; font-size: 11px;

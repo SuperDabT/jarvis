@@ -73,7 +73,7 @@ def test_hub_shows_a_summary_and_folds_the_rest(setup):
     links = [b for b in insp.findChildren(QPushButton) if b.objectName() == "filter"]
     shown = [b for b in links if b.isVisibleTo(insp)]
     assert len(shown) == SUMMARY_LINKS < len(links)
-    assert all(b.text().endswith("· unsure") or "fail" in b.text() for b in shown)  # problems first
+    assert all(b.full_text.endswith("· unsure") or "fail" in b.full_text for b in shown)  # problems first
     assert insp.details.isHidden()
     insp.details_btn.click()
     assert not insp.details.isHidden() and insp.details_btn.text() == "details ▾"

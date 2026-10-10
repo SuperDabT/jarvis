@@ -99,6 +99,14 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   shows an empty state. Power and the old pulse are gone from the column; hardware.yaml,
   checks and findings are unchanged (a "no hardware checks" pill says why when the file is
   missing or invalid).
+- Type and motion are shared: `theme.TYPE` is the scale (sans for headings, labels, values
+  and text; mono only for ids, hashes, paths, label tags, the ticker and keys), applied with
+  `theme.typeset(widget, role)`. Green marks live, active or positive things only. Rows that
+  can be clicked are `widgets.HoverRow` (hover fades in over `motion.HOVER` 140 ms, press,
+  a mint edge when selected); sections open with `motion.reveal` (`EXPAND` 200 ms); a new
+  graph lock gets a mint ring that settles in and the inspector content fades in
+  (`SELECT` 180 ms; hovering doesn't fade). With `JARVIS_REDUCE_MOTION=1` (or
+  `--no-animations`) all of these are instant.
 - The inspector shows a summary first (what it is, what needs attention, the 3 most relevant
   links, problems first) and folds the rest under "details". An electrical check, or a card
   about one, gets `gui/finding_view.py`: the verified result (Python's text), the next step
@@ -174,7 +182,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 845 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 856 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

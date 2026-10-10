@@ -34,6 +34,9 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect, QLabel, QWidget
 from shiboken6 import isValid
 
 FAST, BASE, SLOW = 120, 220, 600  # ms
+HOVER = 140   # ms, hover / press feedback on rows
+EXPAND = 200  # ms, a panel section opening or closing
+SELECT = 180  # ms, a selection settling in (graph ring, inspector content)
 STAGGER = 60  # ms between items of a list
 RISE = 8  # px a block rises while fading in
 
@@ -474,10 +477,40 @@ def collapse(w: QWidget, dx: float = 28.0, duration: int = BASE,
     return _run(seq, 0, w, on_done)
 
 
+def reveal(w: QWidget, show: bool, duration: int = EXPAND,
+           on_done: Callable[[], None] | None = None) -> QAbstractAnimation | None:
+    """Open (``show``) or close a section by animating its height, then leave it at
+    its natural size (open) or hidden (closed). Motion off: shown or hidden now."""
+    def settle() -> None:
+        if isValid(w):
+            w.setMaximumHeight(QWIDGETSIZE_MAX)
+            w.setVisible(show)
+        if on_done is not None:
+            on_done()
+
+    if not enabled():
+        settle()
+        return None
+    target = max(1, w.sizeHint().height()) if show else 0
+    start = 0 if show else max(1, w.height())
+    w.setMaximumHeight(start)
+    w.setVisible(True)
+    a = QPropertyAnimation(w, b"maximumHeight", w)
+    a.setStartValue(start)
+    a.setEndValue(target)
+    a.setDuration(duration)
+    a.setEasingCurve(curve("out" if show else "inout"))
+    return _run(a, 0, w, settle)
+
+
+QWIDGETSIZE_MAX = (1 << 24) - 1
+
+
 __all__ = [
-    "BASE", "FAST", "SLOW", "STAGGER", "RISE",
+    "BASE", "EXPAND", "FAST", "HOVER", "SELECT", "SLOW", "STAGGER", "RISE",
     "animate", "clamp01", "collapse", "count_up", "count_up_text", "created_count", "curve",
     "ease_in_out", "ease_out", "enabled", "fade_in", "fade_out", "fade_rise", "finish_all",
-    "grow", "live", "number_formatter", "phase", "pulse", "seek_all", "set_enabled", "slide",
+    "grow", "live", "number_formatter", "phase", "pulse", "reveal", "seek_all", "set_enabled",
+    "slide",
     "split_number", "stagger",
 ]
