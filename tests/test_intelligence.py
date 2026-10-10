@@ -59,6 +59,13 @@ class Model:
 
 @pytest.fixture
 def conn(tmp_path):
+    c = scratch_conn(tmp_path)
+    yield c
+    c.close()
+
+
+def scratch_conn(tmp_path):
+    """A scratch database file with the project's GitHub data (never the real DB)."""
     path = tmp_path / "x.db"
     assert path.parent == tmp_path                       # a scratch file, never the real DB
     c = db.connect(path)
@@ -71,8 +78,7 @@ def conn(tmp_path):
     issue(c, 12, "servo_write returns a status", milestone=1)
     issue(c, 10, "Kalman filter on x/y", milestone=1)
     c.commit()
-    yield c
-    c.close()
+    return c
 
 
 def add(conn, title, **kw):

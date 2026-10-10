@@ -32,6 +32,8 @@ class Config:
     stt_url: str = DEFAULT_STT_URL
     tts_url: str = DEFAULT_TTS_URL
     voice: str = DEFAULT_VOICE
+    # The tool-using assistant's model (jarvis.agent); None = ``model``.
+    agent_model: str | None = None
 
     @classmethod
     def from_env(cls) -> Config:
@@ -50,4 +52,5 @@ class Config:
             stt_url=os.environ.get("JARVIS_STT_URL") or DEFAULT_STT_URL,
             tts_url=os.environ.get("JARVIS_TTS_URL") or DEFAULT_TTS_URL,
             voice=os.environ.get("JARVIS_VOICE") or DEFAULT_VOICE,
+            agent_model=os.environ.get("JARVIS_AGENT_MODEL") or None,
         )

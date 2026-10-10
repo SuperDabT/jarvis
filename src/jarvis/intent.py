@@ -14,8 +14,11 @@ Intents and their sources:
                timeframe. Answered by code, no model (``assistant``).
 - ``capture``  "remind me to ...", "add a task ...": handed to the existing
                capture flow, which the user confirms. Nothing is saved here.
-- ``planning`` "what should I work on": the user's open items and the
-               project's suggested next steps, presented as options.
+- ``planning`` "what should I work on", "help me organize my weekend",
+               "schedule these": open-ended goals. With a tool-calling model
+               these go to the assistant loop (jarvis.agent), which picks
+               its own tools; otherwise one answer from the user's open items
+               and the project's suggested next steps, presented as options.
 - ``project``  questions about the engineering project (issues, commits,
                milestones, hardware): the synced GitHub data.
 - ``recall``   "what did I decide / say ...": past conversations and items.
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
@@ -72,6 +76,16 @@ _PLANNING_RE = re.compile("|".join([
     r"\bwhat'?s\s+next\b", r"\bwhat\s+is\s+next\b", r"\bnext\s+steps?\b",
     r"\bfocus\s+on\b", r"\bwhat'?s\s+the\s+plan\b",
     r"\bwhat(?:'s|\s+is|\s+are)\s+(?:our|the)\s+(?:tasks?|plan|job)\b",
+]), re.I)
+# A goal to work on rather than a lookup: asking for help organizing, planning or
+# scheduling (the tool-using assistant takes these).
+_GOAL_RE = re.compile("|".join([
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|jarvis,?\s+)?(?:help\s+me\b|"
+    r"organi[sz]e\b|plan\b|schedule\b|reschedule\b|arrange\b|sort\s+out\b|"
+    r"figure\s+out\b|work\s+out\b|make\s+(?:me\s+)?a\s+(?:plan|schedule)\b)",
+    r"\bhelp\s+me\s+(?:to\s+)?(?:plan|organi[sz]e|schedule|figure|prioriti[sz]e|decide|"
+    r"fit|balance|sort|get\s+through|manage)\b",
+    r"\b(?:organi[sz]e|plan|schedule)\s+(?:my|the|these|this|those|it|them)\b",
 ]), re.I)
 # Asking about something said or decided before.
 _RECALL_RE = re.compile("|".join([
@@ -184,6 +198,8 @@ def route_by_rules(question: str, today: date,
     if _RECALL_RE.search(q) and not re.search(r"\b(?:work(?:ed)?\s+on|commit|change)", q, re.I):
         return Route("recall", project=slug)
     tf = timeframe(q, today)
+    if _GOAL_RE.search(q):
+        return Route("planning", *(tf or (None, None, "")), project=slug)
     if _AGENDA_RE.search(q) and not _PLANNING_RE.search(q):
         if names_project and not re.search(r"\bmy\s+(?:tasks?|to-?dos?|day|agenda)\b", q, re.I):
             return Route("project", project=slug)
@@ -203,7 +219,7 @@ Classify a message to a personal assistant that knows the user's task list and o
 engineering project (GitHub issues, commits, milestones, hardware). Reply with JSON.
 intent is one of:
 - agenda: what the user has due, scheduled or planned for some time
-- capture: the user wants something added to their list or a reminder set
+- capture: the user explicitly asks to add something to their list or set a reminder (a statement of facts, such as when they are free, is not a capture)
 - planning: the user wants help choosing what to work on
 - project: a question about the engineering project, its code, issues or hardware
 - recall: what the user said, asked or decided in an earlier conversation
@@ -228,12 +244,16 @@ def classify_with_model(client: Any, question: str) -> str | None:
 
 
 def route(question: str, now: datetime, conn: sqlite3.Connection | None = None,
-          client: Any | None = None) -> Route:
-    """The route for ``question``: the rules, then the model, then "mixed"."""
+          client: Any | None = None, history: Sequence[tuple[str, str]] = ()) -> Route:
+    """The route for ``question``: the rules; then, when Jarvis's last message was a
+    question, an answer to it (planning continues); then the model; then "mixed"."""
     today = now.date()
     r = route_by_rules(question, today, conn)
     if r is not None:
         return r
+    last = next((c for role, c in reversed(list(history)) if role == "assistant"), "")
+    if last.rstrip().endswith("?"):
+        return Route("planning", project=_project_slug(conn, question), by="followup")
     slug = _project_slug(conn, question)
     intent = classify_with_model(client, question)
     if intent is None:

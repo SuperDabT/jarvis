@@ -354,6 +354,7 @@ class MainWindow(QMainWindow):
         self.chat = ChatPanel(self.cfg, self.tokens, self._ask_fn, **self._voice_kw)
         self.chat.close_requested.connect(lambda: self.set_chat_open(False))
         self.chat.capture_requested.connect(self.open_capture)
+        self.chat.decide_fn = self.decide_proposal
         self.chat.answered.connect(self._on_answer)
         self.chat.focus_selected.connect(self._show_focus)
         middle.addWidget(self.chat)
@@ -608,6 +609,27 @@ class MainWindow(QMainWindow):
             self.stage.place()
 
     # ------------------------------------------------------------ quick capture
+
+    def decide_proposal(self, action: dict) -> tuple[bool, str, bool]:
+        """Apply or Dismiss a proposal from the chat: (ok, message, final). Applying
+        is one transaction, checked against the saved rows (``actions.decide``)."""
+        from jarvis import actions
+
+        apply = bool(action.get("apply"))
+        try:
+            proposal = actions.Proposal.from_dict(action.get("proposal"))
+            result = actions.decide(self.conn, proposal, action.get("message_id"), apply,
+                                    self._now_fn())
+        except (actions.ProposalError, sqlite3.Error) as e:
+            return False, f"Nothing was changed: {e}", False
+        lines = [result.message]
+        for row in result.stored:
+            when = row["due_at"] or row["remind_at"]
+            lines.append(f"✓ {row['title']}" + (f": {when}" if when else ""))
+        if result.ok and apply:
+            self.reload()
+            self.set_status(result.message, "ok")
+        return result.ok, "\n".join(lines), result.ok or "already" in result.message
 
     def open_capture(self, text: str = "") -> None:
         """Quick capture; ``text`` prefills it (from a chat answer). Saving is

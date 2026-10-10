@@ -92,6 +92,47 @@ class OllamaClient:
             raise OllamaError("Ollama reply is not a JSON object")
         return out
 
+    def chat_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None,
+                   think: bool = False, options: dict[str, Any] | None = None
+                   ) -> dict[str, Any]:
+        """One non-streamed chat step with native tool calling (Ollama ``tools``).
+
+        Returns ``{"content": str, "tool_calls": [{"name": str, "arguments": dict}]}``
+        (``tool_calls`` empty when the model answered). ``tools`` None or empty: a
+        plain answer. Tool results go back as ``{"role": "tool", "tool_name": ...,
+        "content": ...}`` messages; the caller runs the tools, never this client.
+        Raises OllamaError for connection failures and unusable replies."""
+        payload: dict[str, Any] = {
+            "model": self.model, "stream": False, "messages": messages,
+            "options": {"temperature": 0.2, **(options or {})},
+        }
+        if tools:
+            payload["tools"] = tools
+        if self._think_supported:
+            payload["think"] = bool(think)
+        if self.keep_alive is not None:
+            payload["keep_alive"] = self.keep_alive
+        resp = self._post(payload)
+        if resp.status_code == 400 and "think" in resp.text.lower() and "think" in payload:
+            self._think_supported = False
+            payload.pop("think")
+            resp = self._post(payload)
+        if resp.status_code != 200:
+            raise OllamaError(f"Ollama returned {resp.status_code}: {resp.text[:200]}")
+        try:
+            msg = resp.json()["message"]
+            calls = []
+            for c in msg.get("tool_calls") or []:
+                fn = c.get("function") or {}
+                args = fn.get("arguments") or {}
+                if isinstance(args, str):
+                    args = json.loads(args or "{}")
+                calls.append({"name": str(fn.get("name") or ""),
+                              "arguments": args if isinstance(args, dict) else {}})
+            return {"content": str(msg.get("content") or ""), "tool_calls": calls}
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise OllamaError(f"unparseable reply from Ollama: {e}") from e
+
     def embed(self, texts: list[str], model: str = DEFAULT_EMBED_MODEL) -> list[list[float]]:
         """One embedding vector per text via /api/embed (raises OllamaError)."""
         if not texts:

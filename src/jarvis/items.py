@@ -33,7 +33,8 @@ duplicate or removing one.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, tzinfo
 from typing import Any
@@ -229,14 +230,45 @@ def _item_id(value: Any) -> int:
     return value
 
 
+_IN_TRANSACTION: set[int] = set()   # id() of connections inside ``transaction``
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Several item writes as one: inside, the service functions validate and
+    write as usual but nothing is committed; leaving normally commits them all,
+    any exception rolls all of them back (and is re-raised). Not nestable, and
+    refused while the connection has an uncommitted write of its own."""
+    key = id(conn)
+    if key in _IN_TRANSACTION:
+        raise ItemError("a transaction is already open on this connection")
+    if conn.in_transaction:
+        raise ItemError("the connection has an uncommitted write; commit it first")
+    conn.execute("BEGIN IMMEDIATE")
+    _IN_TRANSACTION.add(key)
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+    finally:
+        _IN_TRANSACTION.discard(key)
+
+
 def _write(conn: sqlite3.Connection, sql: str, params: Any) -> sqlite3.Cursor:
     """Run one write and commit; a constraint the checks above missed becomes an
-    ItemError (and nothing is kept)."""
+    ItemError (and nothing is kept). Inside ``transaction`` the commit (or the
+    rollback) is the transaction's."""
+    inside = id(conn) in _IN_TRANSACTION
     try:
         cur = conn.execute(sql, params)
-        conn.commit()
+        if not inside:
+            conn.commit()
     except sqlite3.IntegrityError as e:
-        conn.rollback()
+        if not inside:
+            conn.rollback()
         raise ItemError(f"the database refused the change: {e}") from e
     return cur
 

@@ -209,6 +209,26 @@ items, searched by the question's words; the user's own words are labelled apart
 Jarvis's earlier answers. Selected graph items (focus) keep the project route; `chat.ask`
 without a route is unchanged. Regression cases: `tests/test_intelligence.py`.
 
+## The tool-using assistant (`jarvis/agent.py`, `tools.py`, `actions.py`, no Qt)
+
+Open-ended requests (route "planning" or "mixed": "help me organize my weekend", "schedule
+these", "what should I work on", unclear asks, and answers to a question Jarvis just asked)
+run a bounded loop when the model can call tools (`OllamaClient.chat_tools`, Ollama's native
+tool calling): at most 5 model calls (the last without tools), 8 tool calls and 150 s. The
+tools (`tools.TOOLS`) wrap existing services: `get_agenda`, `list_items`, `search_memory`,
+`project_status` (labelled backlog, not commitments), `list_projects`, `propose_changes` and
+`ask_user`. None writes. `propose_changes` validates with the item service's own checks and
+returns an `actions.Proposal` (create / set_due / set_remind, with the target's snapshot);
+GitHub backlog is refused unless the user's request asked for project work. The chat shows it
+with Apply and Dismiss; Apply runs `actions.apply_proposal`: one `items.transaction` (BEGIN
+IMMEDIATE; the service functions don't commit inside it), stale targets / past dates / any
+validation or database error roll everything back, and the rows are read back before and after
+the commit. Proposals are stored in the assistant message's `chat_messages.sources_json`
+(`proposal`, `proposal_status`) and applied at most once. `cfg.agent_model`
+(`JARVIS_AGENT_MODEL`) changes the loop's model; default gemma4:26b. Agenda, capture, recall
+and project questions keep their single-pass paths; voice doesn't use the loop. Tests:
+`tests/test_agent.py`.
+
 ## The real database
 
 The real `~/.local/share/jarvis/jarvis.db` is at version 1 (upgraded on 2026-10-09 during
@@ -219,7 +239,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 909 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 945 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

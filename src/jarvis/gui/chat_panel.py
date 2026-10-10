@@ -475,6 +475,85 @@ class VoiceNote(QWidget):
         self.text = text
 
 
+TOOL_WORDS = {
+    "get_agenda": "Checking your dates…", "list_items": "Reading your tasks…",
+    "search_memory": "Searching earlier conversations…",
+    "project_status": "Checking the project…", "list_projects": "Listing projects…",
+    "propose_changes": "Drafting changes…", "ask_user": "Preparing a question…",
+}
+
+
+class ProposalCard(QFrame):
+    """Changes the assistant proposed, with Apply and Dismiss. Nothing is saved
+    until Apply; the window applies it (``actions.decide``) and reports back
+    with ``show_result``."""
+
+    decided = Signal(bool)     # True = Apply
+
+    def __init__(self, action: dict, tokens: Tokens, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("focusChip")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        p = action.get("proposal") or {}
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(4)
+        lay.addWidget(_label("Proposed changes · not saved", "focusLabel"))
+        self.rows: list[QLabel] = []
+        for c in p.get("changes") or []:
+            text = _describe(c)
+            if c.get("backlog_ref"):
+                text += f"  [from GitHub backlog {c['backlog_ref']}]"
+            row = _label(f"• {text}", "voiceCaption", wrap=True)
+            if c.get("reason"):
+                row.setToolTip(str(c["reason"]))
+            lay.addWidget(row)
+            self.rows.append(row)
+        for u in p.get("unscheduled") or []:
+            lay.addWidget(_label(f"◦ Left undated: {u.get('title')}"
+                                 + (f" ({u['reason']})" if u.get("reason") else ""),
+                                 "voiceCaption", wrap=True))
+        for a in p.get("assumptions") or []:
+            lay.addWidget(_label(f"Assumes: {a}", "botNote", wrap=True))
+        buttons = QHBoxLayout()
+        buttons.setSpacing(6)
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setObjectName("primary")
+        self.dismiss_btn = QPushButton("Dismiss")
+        for b, flag in ((self.apply_btn, True), (self.dismiss_btn, False)):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, f=flag: self._decide(f))
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        lay.addLayout(buttons)
+        self.result = _label("", "captureStatus", wrap=True)
+        self.result.hide()
+        lay.addWidget(self.result)
+
+    def _decide(self, apply: bool) -> None:
+        self.apply_btn.setEnabled(False)
+        self.dismiss_btn.setEnabled(False)
+        self.decided.emit(apply)
+
+    def show_result(self, ok: bool, message: str, final: bool) -> None:
+        """What happened; buttons stay off once decided, back on after a failed Apply."""
+        self.result.setText(message)
+        self.result.setProperty("level", "ok" if ok else "error")
+        self.result.show()
+        if not final:
+            self.apply_btn.setEnabled(True)
+            self.dismiss_btn.setEnabled(True)
+
+
+def _describe(c: dict) -> str:
+    from jarvis.actions import Change, ProposalError
+
+    try:
+        return Change(**{k: c.get(k) for k in Change.__dataclass_fields__ if k in c}).describe()
+    except (TypeError, ProposalError):
+        return str(c.get("title") or "a change")
+
+
 class BotMessage(QWidget):
     """Jarvis's reply: thinking state, streamed text, then the validated answer.
 
@@ -532,6 +611,7 @@ class BotMessage(QWidget):
         lay.addWidget(self.chips_box)
         self.chip_buttons: list[QPushButton] = []
         self.action_btn: QPushButton | None = None
+        self.proposal: ProposalCard | None = None
         self._timer = QTimer(self, interval=1000)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
@@ -569,6 +649,8 @@ class BotMessage(QWidget):
             self.thinking_cut = True
         elif name == "fallback":
             self.fallback = True
+        elif name == "tool":       # the assistant reading data: say what, not "thinking"
+            self.thinking_text.setText(TOOL_WORDS.get(str(info.get("name")), "Checking…"))
 
     def _show_thinking(self) -> None:
         self.thinking.show()
@@ -646,6 +728,12 @@ class BotMessage(QWidget):
             self._set_sources(getattr(answer, "sources", None) or [])
         self.meta.setText(" · ".join(self.meta_bits(answer)))
         action = getattr(answer, "action", None)
+        if isinstance(action, dict) and action.get("kind") == "proposal" and self.proposal is None:
+            self.proposal = ProposalCard(action, self.tokens)
+            self.proposal.decided.connect(
+                lambda apply: self.action_requested.emit({**action, "kind": "decide",
+                                                          "apply": apply}))
+            self.layout().addWidget(self.proposal)
         if isinstance(action, dict) and action.get("kind") == "capture" and self.action_btn is None:
             self.action_btn = QPushButton("Review in Capture →")
             self.action_btn.setObjectName("chip")
@@ -910,6 +998,9 @@ class ChatPanel(QFrame):
     close_requested = Signal()
     focus_selected = Signal(str)   # the context chip was clicked: show that node
     capture_requested = Signal(str)  # an answer offered to capture this text
+    # Apply / Dismiss on a proposal: the window decides (it owns the database) and
+    # returns (ok, message, final); set by the window, None = not available.
+    decide_fn: Callable[[dict], tuple[bool, str, bool]] | None = None
     voice_state_changed = Signal(str)
 
     def __init__(self, cfg: Config, tokens: Tokens, ask_fn: AskFn | None = None,
@@ -1196,9 +1287,15 @@ class ChatPanel(QFrame):
         self.settings.setValue(THINK_KEY, on)
         self.settings.sync()
 
-    def _on_action(self, action: dict) -> None:
+    def _on_action(self, action: dict, bot: BotMessage | None = None) -> None:
         if action.get("kind") == "capture":
             self.capture_requested.emit(str(action.get("text") or ""))
+        elif action.get("kind") == "decide" and bot is not None and bot.proposal is not None:
+            if self.decide_fn is None:
+                bot.proposal.show_result(False, "Applying isn't available here.", False)
+                return
+            ok, message, final = self.decide_fn(action)
+            bot.proposal.show_result(ok, message, final)
 
     def focus_input(self) -> None:
         self.composer.edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
@@ -1255,7 +1352,7 @@ class ChatPanel(QFrame):
         self._sync_controls()
         self._add(UserMessage(question))
         bot = BotMessage(self.tokens)
-        bot.action_requested.connect(self._on_action)
+        bot.action_requested.connect(lambda a, b=bot: self._on_action(a, b))
         self._current = bot
         self._add(bot)
         self._stick = True
@@ -1583,7 +1680,7 @@ class ChatPanel(QFrame):
         self.empty.hide()
         self._add(UserMessage(text, voice=True, tokens=self.tokens))
         bot = BotMessage(self.tokens)
-        bot.action_requested.connect(self._on_action)
+        bot.action_requested.connect(lambda a, b=bot: self._on_action(a, b))
         self._current = bot
         self._add(bot)
         self._stick = True

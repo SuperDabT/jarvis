@@ -57,7 +57,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from jarvis import assistant, chat, intent
+from jarvis import agent, assistant, chat, intent
 from jarvis.chat import Answer, Brevity, Context
 from jarvis.config import Config
 from jarvis.facts import NextStep, compute_next_steps
@@ -259,7 +259,7 @@ def answer_with_escalation(
         if route_client is None:
             route_client = fast_client if fast_client is not None else deep_client
         route = (intent.Route("project", by="focus") if focus
-                 else intent.route(question, local, conn, route_client))
+                 else intent.route(question, local, conn, route_client, history))
     qclass: QuestionClass = ("planning" if route.intent == "planning"
                              else "out_of_scope" if route.intent == "general" else "project")
     direct = _direct_answer(conn, question, local, route)
@@ -279,6 +279,23 @@ def answer_with_escalation(
         if on_phase:
             on_phase(name, info)
 
+    if route.intent in agent.AGENT_INTENTS and brevity == "text":
+        loop_client = agent.agent_client(cfg, deep_client)
+        if hasattr(loop_client, "chat_tools"):     # a model that can call tools
+            try:
+                if session_id:
+                    chat.save_message(conn, session_id, "user", question)
+                phase("agent", model=getattr(loop_client, "model", None))
+                found = agent.run_agent(conn, cfg, question, history, loop_client, local,
+                                        route=route, on_phase=on_phase)
+                if on_token:
+                    on_token(found.text)
+                return _finish(conn, session_id, found, t0, None, phase)
+            finally:
+                if loop_client is not deep_client:
+                    loop_client.close()
+                if own_deep:
+                    deep_client.close()
     if think_budget_s is None:
         think_budget_s = DEEP_THINK_BUDGET_S.get(brevity, DEEP_THINK_BUDGET_S["text"])
 
@@ -414,13 +431,19 @@ def _finish(conn: sqlite3.Connection, session_id: str | None, ans: Answer, t0: f
         ans.first_token_s = start + ans.first_token_s
     ans.duration = time.monotonic() - t0
     if session_id and (ans.error is None or ans.tier == "fallback"):
-        chat.save_message(conn, session_id, "assistant", ans.text, {
+        extra: dict[str, Any] = {}
+        if ans.action and ans.action.get("kind") == "proposal":
+            extra = {"proposal": ans.action["proposal"], "proposal_status": "pending"}
+        mid = chat.save_message(conn, session_id, "assistant", ans.text, {**extra,
             "sources": [asdict(s) for s in ans.sources],
             "cited_sources": [asdict(s) for s in ans.cited_sources],
             "notes": ans.notes, "unverified_numbers": ans.unverified_numbers,
             "model": ans.model, "duration": round(ans.duration, 2), "tier": ans.tier,
             "escalated": ans.escalated, "escalation_reasons": ans.escalation_reasons,
-            "thinking_s": round(ans.thinking_s, 2) if ans.thinking_s is not None else None})
+            "thinking_s": round(ans.thinking_s, 2) if ans.thinking_s is not None else None,
+            "intent": ans.intent, "steps": ans.steps})
+        if extra:
+            ans.action["message_id"] = mid   # Apply decides on the stored copy
     phase("done", tier=ans.tier, escalated=ans.escalated)
     return ans
 
