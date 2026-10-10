@@ -66,6 +66,10 @@ _AGENDA_RE = re.compile("|".join([
     r"\bwhat'?s\s+(?:on|happening)\s+(?:today|tomorrow|this|next|on)\b",
     r"\bdo\s+i\s+have\s+(?:anything|any|to|stuff|plans|something)\b",
     r"\bam\s+i\s+(?:busy|free)\b",
+    r"\bwhat\s+(?:tasks?|things|items|stuff|to-?dos?|reminders?)\s+(?:do\s+|have\s+)?i\b",
+    r"\bwhat\s+(?:do\s+i\s+have|have\s+i\s+got)\s*(?:$|\?|(?:on\s+|for\s+|planned\s+)?"
+    r"(?:today|tonight|tomorrow|this|next|on|for)\b)",
+    r"\b(?:tasks?|to-?dos?)\s+(?:for\s+|due\s+)?(?:today|tonight|tomorrow|this\s+week|next\s+week)\b",
     r"\b(?:have|got)\s+(?:due|coming\s+up|scheduled|planned)\b",
     r"\bdue\s+(?:today|tonight|tomorrow|this|next|on)\b",
     r"\b(?:upcoming|coming\s+up)\b",

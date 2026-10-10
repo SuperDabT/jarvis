@@ -483,6 +483,9 @@ def test_agenda_stays_direct_with_zero_model_calls(conn, tmp_path, week):
     t = time.monotonic()
     a = run(conn, tmp_path, "What do I need to do today?", m)
     assert a.tier == "direct" and m.requests == [] and time.monotonic() - t < 0.5
+    m = Script()
+    a = run(conn, tmp_path, "what tasks i have for today?", m)        # once went to the planner
+    assert a.tier == "direct" and m.requests == [] and m.classified == 0
     project = Model("#31 is open.\nSOURCES: #31")
     b = run(conn, tmp_path, "Is #31 done?", project)
     assert b.tier == "fast" and len(project.requests) == 1
