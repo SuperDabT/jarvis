@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from jarvis import chat, planning
+from jarvis import canvas, chat, planning
 from jarvis import items as it
 from jarvis.chat import Answer, Context, Source
 from jarvis.config import Config
@@ -170,6 +170,13 @@ def build_agenda(conn: sqlite3.Connection, start: date, end: date, span: str,
             ag.due.append(e)
         elif d > end and (ag.later is None or (d, e.time) < (ag.later.day, ag.later.time)):
             ag.later = e
+    if chosen is None:              # Canvas: from today on (it can't say what was submitted)
+        for c in canvas.upcoming(conn, max(start, today), end + timedelta(days=60)):
+            e = Entry(c.ref, c.title, c.day, _clock(c.when), "canvas", c.course, url=c.url)
+            if c.day <= end:
+                ag.due.append(e)
+            elif ag.later is None or (c.day, e.time) < (ag.later.day, ag.later.time):
+                ag.later = e
     ag.due.sort(key=lambda e: (e.day, e.time == "", _time_key(e.time)))
     if chosen is None or chosen.github_repo:      # milestones belong to the GitHub project
         try:

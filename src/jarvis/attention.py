@@ -13,6 +13,11 @@ morning summary is instant and can't get a date wrong:
 - ``soon``     due in the next three days;
 - ``stale``    undated items nobody has touched for weeks (counted).
 
+Canvas entries (``jarvis.canvas``) count like items from today on: an exam or
+quiz is a commitment, an assignment a deadline, labelled with its course. A
+past Canvas assignment is never "overdue": the feed can't say whether it was
+submitted.
+
 ``signals`` ranks them; ``daily_brief`` shows the top three (the morning
 summary), ``attention_answer`` the full list, and ``study_check`` what is
 coming before the user sits down to study. Everything stated is a fact from
@@ -25,7 +30,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from jarvis import chat, planning
+from jarvis import canvas, chat, planning
 from jarvis import items as it
 from jarvis.actions import human_when
 from jarvis.chat import Answer, Source
@@ -51,18 +56,27 @@ class Signal:
     when: str = ""                   # sort key inside a kind (a date)
 
 
+@dataclass(frozen=True)
+class Rec:
+    """One dated thing on the user's plate: their own item or a Canvas entry."""
+    ref: str                         # "item:12" / "canvas:event-assignment-3"
+    title: str
+    when: str                        # stored local wall clock
+    event: bool                      # a fixed commitment (exam, appointment, ...)
+
+    @property
+    def day(self) -> date:
+        return date.fromisoformat(self.when[:10])
+
+
 @dataclass
 class Picture:
     today: date
     signals: list[Signal]
     labels: dict[str, str] = field(default_factory=dict)   # ref -> title
-    events: list[it.Item] = field(default_factory=list)    # next EVENT_DAYS, soonest first
-    due_soon: list[it.Item] = field(default_factory=list)  # dated, not events, next week
-    overdue: list[it.Item] = field(default_factory=list)
-
-
-def _day_of(stored: str | None) -> date | None:
-    return date.fromisoformat(stored[:10]) if stored else None
+    events: list[Rec] = field(default_factory=list)        # next EVENT_DAYS, soonest first
+    due_soon: list[Rec] = field(default_factory=list)      # dated, not events, next week
+    overdue: list[Rec] = field(default_factory=list)
 
 
 def _days(n: int) -> str:
@@ -86,84 +100,91 @@ def _before(event_day: date, today: date) -> str:
     return f"{_days(len(days))} left before it ({names})"
 
 
+def _records(conn: sqlite3.Connection, today: date) -> tuple[list[Rec], list[it.Item]]:
+    """(dated records, undated items). Canvas entries come from today on: the feed
+    can't say whether a past assignment was submitted, so none is "overdue"."""
+    recs: list[Rec] = []
+    undated: list[it.Item] = []
+    for i in it.open_items(conn):
+        stored = i.due_at or i.remind_at
+        if stored:
+            recs.append(Rec(f"item:{i.id}", i.title, stored, planning.is_event(i)))
+        else:
+            undated.append(i)
+    for e in canvas.upcoming(conn, today, today + timedelta(days=EVENT_DAYS)):
+        recs.append(Rec(e.ref, e.label, e.when, e.commitment))
+    return recs, undated
+
+
 def picture(conn: sqlite3.Connection, now: datetime) -> Picture:
-    """Every signal in the user's open items, most important first."""
+    """Every signal in the user's open items and Canvas entries, most important first."""
     today = now.date()
     pic = Picture(today, [])
     out: list[Signal] = []
-    dated: list[tuple[date, it.Item]] = []
-    stale: list[it.Item] = []
-    for i in it.open_items(conn):
-        ref = f"item:{i.id}"
-        pic.labels[ref] = i.title
-        stored = i.due_at or i.remind_at
-        day = _day_of(stored)
-        if day is None:
-            touched = datetime.fromisoformat(i.updated_at).date()
-            if (today - touched).days >= STALE_DAYS:
-                stale.append(i)
-            continue
-        event = planning.is_event(i)
+    recs, undated = _records(conn, today)
+    dated: list[Rec] = []
+    for r in recs:
+        pic.labels[r.ref] = r.title
+        day = r.day
         if day < today:
-            pic.overdue.append(i)
-            late = (today - day).days
-            out.append(Signal("overdue", f"{i.title}: {_days(late)} overdue (was due "
-                                         f"{human_when(stored)})", (ref,), stored))
-        elif day == today:
-            what = (f"{i.title} {human_when(stored).split(', ')[-1]} today" if "T" in stored
-                    else f"{i.title} is due today")
-            out.append(Signal("today", what, (ref,), stored))
-            dated.append((day, i))
-            if event:
-                pic.events.append(i)
-        elif event and (day - today).days <= EVENT_DAYS:
-            pic.events.append(i)
-            out.append(Signal("event", f"{i.title} {human_when(stored)}: "
-                                       f"{_before(day, today)}", (ref,), stored))
-            dated.append((day, i))
+            pic.overdue.append(r)
+            out.append(Signal("overdue", f"{r.title}: {_days((today - day).days)} overdue (was "
+                                         f"due {human_when(r.when)})", (r.ref,), r.when))
+            continue
+        dated.append(r)
+        if day == today:
+            what = (f"{r.title} {human_when(r.when).split(', ')[-1]} today" if "T" in r.when
+                    else f"{r.title} is due today")
+            out.append(Signal("today", what, (r.ref,), r.when))
+            if r.event:
+                pic.events.append(r)
+        elif r.event and (day - today).days <= EVENT_DAYS:
+            pic.events.append(r)
+            out.append(Signal("event", f"{r.title} {human_when(r.when)}: "
+                                       f"{_before(day, today)}", (r.ref,), r.when))
         else:
-            dated.append((day, i))
             if (day - today).days <= EVENT_DAYS:
-                pic.due_soon.append(i)
+                pic.due_soon.append(r)
             if (day - today).days <= SOON_DAYS:
-                out.append(Signal("soon", f"{i.title} is due {_short(day, today)}", (ref,),
-                                  stored))
+                out.append(Signal("soon", f"{r.title} is due {_short(day, today)}", (r.ref,),
+                                  r.when))
     # a deadline right on or after a commitment competes with preparing for it
     for e in pic.events:
-        eday = _day_of(e.due_at or e.remind_at)
-        for day, i in dated:
-            if i.id != e.id and not planning.is_event(i) and eday <= day <= eday + timedelta(
-                    days=1):
-                rel = "the same day as" if day == eday else "the day after"
-                out.append(Signal("squeeze", f"{i.title} is due {_short(day, today)}, {rel} "
+        for r in dated:
+            if r.ref != e.ref and not r.event and e.day <= r.day <= e.day + timedelta(days=1):
+                rel = "the same day as" if r.day == e.day else "the day after"
+                out.append(Signal("squeeze", f"{r.title} is due {_short(r.day, today)}, {rel} "
                                              f"{e.title}: it needs time before then too",
-                                  (f"item:{i.id}", f"item:{e.id}"), i.due_at or ""))
+                                  (r.ref, e.ref), r.when))
     # several deadlines in a couple of days
-    ahead = sorted(((d, i) for d, i in dated if today <= d <= today + timedelta(
-        days=EVENT_DAYS)), key=lambda x: (x[0], x[1].id))
-    used: set[int] = set()
-    for k, (d, _) in enumerate(ahead):
-        group = [(d2, i2) for d2, i2 in ahead[k:] if (d2 - d).days < CLUSTER_SPAN
-                 and i2.id not in used]
+    ahead = sorted((r for r in dated if r.day <= today + timedelta(days=EVENT_DAYS)),
+                   key=lambda r: (r.when[:10], r.ref))
+    used: set[str] = set()
+    for k, r in enumerate(ahead):
+        group = [r2 for r2 in ahead[k:] if (r2.day - r.day).days < CLUSTER_SPAN
+                 and r2.ref not in used]
         if len(group) >= CLUSTER_MIN:
-            used |= {i2.id for _, i2 in group}
-            last = group[-1][0]
-            span = (_short(d, today) if last == d
-                    else f"{_short(d, today)} to {_short(last, today)}")
+            used |= {r2.ref for r2 in group}
+            last = group[-1].day
+            span = (_short(r.day, today) if last == r.day
+                    else f"{_short(r.day, today)} to {_short(last, today)}")
             out.append(Signal("cluster", f"{len(group)} deadlines {span}: "
-                                         + ", ".join(i2.title for _, i2 in group),
-                              tuple(f"item:{i2.id}" for _, i2 in group), d.isoformat()))
+                                         + ", ".join(r2.title for r2 in group),
+                              tuple(r2.ref for r2 in group), r.when[:10]))
+    stale = sorted((i for i in undated
+                    if (today - datetime.fromisoformat(i.updated_at).date()).days >= STALE_DAYS),
+                   key=lambda i: i.updated_at)
     if stale:
-        stale.sort(key=lambda i: i.updated_at)
         oldest = stale[0]
         weeks = (today - datetime.fromisoformat(oldest.updated_at).date()).days // 7
         out.append(Signal("stale", f"{len(stale)} undated item{'s' if len(stale) != 1 else ''} "
                                    f"untouched for {STALE_DAYS // 7}+ weeks (oldest: "
                                    f"{oldest.title}, {weeks} weeks)",
                           tuple(f"item:{i.id}" for i in stale), oldest.updated_at))
-    pic.events.sort(key=lambda i: i.due_at or i.remind_at or "")
-    pic.due_soon.sort(key=lambda i: i.due_at or i.remind_at or "")
-    pic.overdue.sort(key=lambda i: i.due_at or i.remind_at or "")
+        for i in stale:
+            pic.labels[f"item:{i.id}"] = i.title
+    for lst in (pic.events, pic.due_soon, pic.overdue):
+        lst.sort(key=lambda r: (r.when, r.ref))
     out.sort(key=lambda s: (RANK[s.kind], s.when))
     pic.signals = out
     return pic
@@ -223,35 +244,31 @@ def study_check(conn: sqlite3.Connection, now: datetime) -> Answer:
     today = pic.today
     lines = ["**Before you study** (by the dates on your list):"]
     refs: list[str] = []
-    upcoming = [e for e in pic.events if _day_of(e.due_at or e.remind_at) >= today]
+    upcoming = [e for e in pic.events if e.day >= today]
     if upcoming:
         for e in upcoming[:2]:
-            stored = e.due_at or e.remind_at
-            lines.append(f"- {e.title}, {human_when(stored)}: "
-                         f"{_before(_day_of(stored), today)}.")
-            refs.append(f"item:{e.id}")
+            lines.append(f"- {e.title}, {human_when(e.when)}: {_before(e.day, today)}.")
+            refs.append(e.ref)
     else:
         lines.append(f"- No exam or other fixed commitment in the next {EVENT_DAYS} days.")
     if pic.due_soon:
         lines.append("- Due in the next week: " + ", ".join(
-            f"{i.title} ({_short(_day_of(i.due_at or i.remind_at), today)})"
-            for i in pic.due_soon[:4]) + (f", and {len(pic.due_soon) - 4} more"
-                                          if len(pic.due_soon) > 4 else "") + ".")
-        refs += [f"item:{i.id}" for i in pic.due_soon[:4]]
+            f"{r.title} ({_short(r.day, today)})" for r in pic.due_soon[:4])
+            + (f", and {len(pic.due_soon) - 4} more" if len(pic.due_soon) > 4 else "") + ".")
+        refs += [r.ref for r in pic.due_soon[:4]]
     if pic.overdue:
         lines.append("- Overdue: " + ", ".join(
-            f"{i.title} ({_days((today - _day_of(i.due_at or i.remind_at)).days)})"
-            for i in pic.overdue[:3]) + ".")
-        refs += [f"item:{i.id}" for i in pic.overdue[:3]]
+            f"{r.title} ({_days((today - r.day).days)})" for r in pic.overdue[:3]) + ".")
+        refs += [r.ref for r in pic.overdue[:3]]
     if upcoming:
         e = upcoming[0]
         tip = f"{e.title} is the soonest fixed commitment, so it is the natural focus"
-        squeezed = [s for s in pic.signals if s.kind == "squeeze" and f"item:{e.id}" in s.refs]
+        squeezed = [s for s in pic.signals if s.kind == "squeeze" and e.ref in s.refs]
         if squeezed:
             tip += f"; {pic.labels.get(squeezed[0].refs[0], 'one deadline')} lands right after it"
     elif pic.due_soon:
-        i = pic.due_soon[0]
-        tip = f"{i.title} is due soonest ({_short(_day_of(i.due_at or i.remind_at), today)})"
+        r = pic.due_soon[0]
+        tip = f"{r.title} is due soonest ({_short(r.day, today)})"
     elif pic.overdue:
         tip = f"nothing is coming up; {pic.overdue[0].title} is the oldest overdue item"
     else:

@@ -56,7 +56,7 @@ def test_version_1_database_upgrades_to_2_keeping_every_row(tmp_path, monkeypatc
     make_v1(path, monkeypatch)
     rows_before, schema_before = dump(path)
     conn = db.connect(path)
-    assert db.schema_version(conn) == 2 == db.latest_version()
+    assert db.schema_version(conn) == db.latest_version() >= 2
     conn.close()
     rows_after, schema_after = dump(path)
     assert {t: rows_after[t] for t in rows_before} == rows_before  # old data untouched
@@ -74,7 +74,7 @@ def test_version_0_database_goes_straight_to_2(tmp_path):
     rows_before, _ = dump(path)
     db.connect(path).close()
     rows_after, _ = dump(path)
-    assert version_of(path) == 2
+    assert version_of(path) == db.latest_version()
     assert {t: rows_after[t] for t in rows_before} == rows_before
     assert [b.name.split(".bak-")[1][:2] for b in backups(path)] == ["v0"]
 

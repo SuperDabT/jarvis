@@ -4,6 +4,7 @@ import argparse
 import sys
 import textwrap
 import time
+from datetime import datetime, timedelta
 
 from jarvis import cards as cardlib
 from jarvis.briefing import build_briefing, render_briefing
@@ -222,6 +223,40 @@ def _run_add(cfg: Config, conn, text: str, plain: bool = False,
     return 0
 
 
+def _run_canvas(conn, action: str, key: str | None, days: int,
+                now: datetime | None = None) -> int:
+    """``jarvis canvas``: import the feed (the link is never printed), list what is
+    coming, or mark an entry done / not done."""
+    from jarvis import canvas
+    from jarvis.actions import human_when
+
+    if action in ("done", "undone"):
+        if not key:
+            print(f"jarvis canvas {action} needs the entry's number (see jarvis canvas list)",
+                  file=sys.stderr)
+            return 2
+        try:
+            e = canvas.set_done(conn, key, action == "done")
+        except LookupError as err:
+            print(err, file=sys.stderr)
+            return 1
+        print(f"{'done' if e.done else 'not done'}: {e.label}")
+        return 0
+    now = now or datetime.now().astimezone()
+    if action == "sync":
+        r = canvas.sync(conn, canvas.feed_url(), now)
+        print(f"Canvas: {r.summary()}", file=sys.stderr if r.error else sys.stdout)
+        if r.error:
+            return 1
+    rows = canvas.upcoming(conn, now.date(), now.date() + timedelta(days=days))
+    if not rows:
+        print(f"Nothing from Canvas in the next {days} days.")
+    for e in rows:
+        mark = " [exam/quiz]" if e.commitment else ""
+        print(f"{e.short_id:>8}  {human_when(e.when):<22} {e.label}{mark}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="jarvis")
     sub = parser.add_subparsers(dest="cmd")
@@ -255,6 +290,15 @@ def main(argv: list[str] | None = None) -> int:
                      help="save the text as a task as typed, without the model")
     ap = sub.add_parser("ask", help="ask a question about the project (answered from synced data)")
     ap.add_argument("question", nargs="+")
+    cvp = sub.add_parser("canvas", help="import your Canvas calendar feed and list what's "
+                                         "coming (feed link: JARVIS_CANVAS_ICS in "
+                                         "~/.config/jarvis/env)")
+    cvp.add_argument("action", nargs="?", default="sync",
+                     choices=["sync", "list", "done", "undone"],
+                     help="sync (default): import, then list; list: no import; "
+                          "done / undone ID: mark an entry done in Jarvis")
+    cvp.add_argument("id", nargs="?", help="done / undone: the number shown by list")
+    cvp.add_argument("--days", type=int, default=14, help="list this many days ahead")
     wp = sub.add_parser("watch", help="keep the database current (the fast loop daemon)")
     wp.add_argument("--interval", type=int, default=None,
                     help="seconds between GitHub checks (default $JARVIS_INTERVAL or 180; "
@@ -299,6 +343,8 @@ def main(argv: list[str] | None = None) -> int:
             except RefreshBusy:
                 print(f"{BUSY}; try again in a moment.", file=sys.stderr)
                 return 75  # EX_TEMPFAIL
+        elif args.cmd == "canvas":
+            return _run_canvas(conn, args.action, args.id, args.days)
         elif args.cmd == "cards":
             _run_cards(conn, args.all)
         elif args.cmd in ("card", "done"):

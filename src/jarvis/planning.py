@@ -97,6 +97,7 @@ class Brief:
     today: date
     items: dict[int, BriefItem]
     more_undated: int = 0     # undated items left out of scope (count only)
+    canvas: list[Any] = field(default_factory=list)   # canvas.CanvasEvent, today..horizon
 
     @property
     def first(self) -> date:
@@ -143,6 +144,12 @@ class Brief:
                         if before else "no day of the period comes before it")
                 out.append(f"- {day:%a} {b.when.replace('T', ' ')} {b.title} "
                            f"(item_id {b.id}); {lead}")
+        if self.canvas:
+            out.append("On Canvas (course deadlines and events: facts, not decided here; plan "
+                       "the user's time around them, an exam or quiz is a commitment to "
+                       "prepare for):")
+            for c in self.canvas:
+                out.append(f"- {_dated(c.when)} {c.label} [{'exam/quiz' if c.commitment else c.kind}]")
         out.append("Items in scope (decide every one by item_id):")
         for b in self.items.values():
             when = (f"due {_dated(b.due)}" if b.due else "no date") + (
@@ -217,7 +224,10 @@ def build_brief(conn: sqlite3.Connection, start: date, end: date, today: date) -
     for i in undated[:MAX_UNDATED]:
         scope[i.id] = BriefItem(i.id, i.title, i.kind, None, None,
                                 projects.get(i.project_id), "undated")
-    return Brief(start, end, horizon, today, scope, max(0, len(undated) - MAX_UNDATED))
+    from jarvis import canvas        # (canvas imports planning)
+
+    return Brief(start, end, horizon, today, scope, max(0, len(undated) - MAX_UNDATED),
+                 canvas.upcoming(conn, today, horizon))
 
 
 # ---------------------------------------------------------------- the plan
@@ -467,6 +477,7 @@ def check_plan(brief: Brief, raw: dict[str, Any], user_text: str,
     summary = str(raw.get("summary") or "")[:500]
     assumptions = [str(a)[:200] for a in raw.get("assumptions") or []][:5]
     known = {b.when[11:16] for b in brief.items.values() if b.when and "T" in b.when}
+    known |= {c.when[11:16] for c in brief.canvas if "T" in c.when}
     known |= {t for w in windows for t in (w.start, w.end)} | {d.time for d in decisions
                                                                 if d.time}
     texts = [("the summary", summary), *((f"suggestion {k}", f"{x['text']} {x['reason']}")
@@ -491,11 +502,13 @@ def check_plan(brief: Brief, raw: dict[str, Any], user_text: str,
 def _clash(brief: Brief, day: date, time: str, item_id: int) -> str | None:
     """The fixed commitment on record within an hour of ``day`` ``time``, if any."""
     t = int(time[:2]) * 60 + int(time[3:])
-    for b in brief.events():
-        if b.id == item_id or not b.when or "T" not in b.when or b.when[:10] != day.isoformat():
+    fixed = [(b.title, b.when) for b in brief.events() if b.id != item_id]
+    fixed += [(c.label, c.when) for c in brief.canvas if c.commitment]
+    for title, when in fixed:
+        if not when or "T" not in when or when[:10] != day.isoformat():
             continue
-        if abs(int(b.when[11:13]) * 60 + int(b.when[14:16]) - t) < 60:
-            return b.title
+        if abs(int(when[11:13]) * 60 + int(when[14:16]) - t) < 60:
+            return title
     return None
 
 
@@ -539,6 +552,10 @@ def render(brief: Brief, plan: Plan, scheduling: bool) -> str:
         out.append("**On record** (fixed): " + "; ".join(
             f"{b.title} {'overdue since' if b.status == 'overdue' else 'due'} {_when(b.due)}"
             for b in sorted(fixed, key=lambda b: b.due or "")))
+    if brief.canvas:
+        out.append("**On Canvas**: " + "; ".join(f"{c.label} {_when(c.when)}"
+                                                for c in brief.canvas[:8])
+                   + (f"; and {len(brief.canvas) - 8} more" if len(brief.canvas) > 8 else ""))
     # important items the plan gives no time: what the records say, then the model's reason
     unfitted = []
     for d in plan.decisions:

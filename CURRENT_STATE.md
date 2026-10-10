@@ -256,9 +256,18 @@ my attention" the full list, "I'm about to study" the check before studying (`st
 next commitments, what is due, overdue, one labelled suggestion). A request to plan or
 schedule keeps its planning route. Tests: `tests/test_attention.py`.
 
+Canvas (`jarvis/canvas.py`, schema version 3: table `canvas_events`): the private calendar
+feed link (`JARVIS_CANVAS_ICS` in `~/.config/jarvis/env`; never printed or logged) is imported
+hourly by `jarvis watch` and on demand by `jarvis canvas` (sync / list / done ID / undone ID).
+One row per Canvas id (re-imports update, entries that leave the feed are marked removed,
+entries older than 30 days aren't imported); the user's own items are never touched. Canvas
+entries feed the morning summary, the study check, the agenda and the planner brief (as facts,
+not decisions), with their course; an exam or quiz is a commitment. A past Canvas assignment is
+never "overdue" (the feed can't say whether it was submitted). Tests: `tests/test_canvas.py`.
+
 ## The real database
 
-The real `~/.local/share/jarvis/jarvis.db` is at version 1 (upgraded on 2026-10-09 during
+The real `~/.local/share/jarvis/jarvis.db` is at version 1 (the code is now at version 3) (upgraded on 2026-10-09 during
 step 1; pre-upgrade backup `jarvis.db.bak-v0-20261009T221204Z`). The installed `jarvis`
 commands run this checkout (editable install), so the next start of the window, the CLI or the
 service upgrades it to version 2, after a verified backup. The running service keeps its old
@@ -266,7 +275,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 1006 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 1028 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

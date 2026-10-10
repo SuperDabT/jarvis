@@ -461,10 +461,39 @@ def _v2_life_os_core(conn: sqlite3.Connection) -> None:
         {**FIRST_PROJECT, "now": now})
 
 
+CANVAS_SCHEMA = """
+CREATE TABLE canvas_events (
+    uid TEXT PRIMARY KEY CHECK (length(uid) > 0),
+    kind TEXT NOT NULL CHECK (kind IN ('assignment', 'event')),
+    title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+    course TEXT,
+    starts_at TEXT NOT NULL CHECK (
+        (starts_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(starts_at) IS starts_at)
+        OR (starts_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-2][0-9]:[0-5][0-9]'
+            AND strftime('%Y-%m-%dT%H:%M', starts_at) IS starts_at)),
+    ends_at TEXT,
+    url TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    removed_at TEXT,
+    done_at TEXT
+) STRICT;
+
+CREATE INDEX canvas_events_open ON canvas_events (starts_at)
+    WHERE removed_at IS NULL AND done_at IS NULL;
+"""
+
+
+def _v3_canvas(conn: sqlite3.Connection) -> None:
+    for stmt in _statements(CANVAS_SCHEMA):
+        conn.execute(stmt)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline: GitHub mirror, cards, briefings, checks, daemon, research, chat",
               _v1_baseline),
     Migration(2, "Life OS core: projects, items, links", _v2_life_os_core),
+    Migration(3, "Canvas calendar feed: imported assignments and events", _v3_canvas),
 )
 
 

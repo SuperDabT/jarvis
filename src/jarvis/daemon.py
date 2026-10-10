@@ -56,7 +56,7 @@ from typing import Any
 
 import httpx
 
-from jarvis import db, notify
+from jarvis import canvas, db, notify
 from jarvis.notify import new_card_message
 from jarvis.briefing import Briefing, build_briefing
 from jarvis.config import Config
@@ -86,6 +86,7 @@ DEFAULT_RESEARCH_HOURS = 6.0
 MIN_RESEARCH_HOURS = 1.0
 RESEARCH_STARTUP_DELAY_S = 120
 RESEARCH_RETRY_S = 1800
+CANVAS_RETRY_S = 900
 
 
 class Shutdown(BaseException):
@@ -449,6 +450,8 @@ class Daemon:
         research: Callable[[datetime], Any] | None = None,
         research_interval: int = int(DEFAULT_RESEARCH_HOURS * 3600),
         research_delay: float = RESEARCH_STARTUP_DELAY_S,
+        canvas_sync: Callable[[datetime], Any] | None = None,
+        canvas_interval: int = canvas.SYNC_INTERVAL_S,
     ) -> None:
         self.cfg, self.conn = cfg, conn
         self.interval = interval
@@ -466,6 +469,11 @@ class Daemon:
         self.research_interval = max(int(research_interval), int(MIN_RESEARCH_HOURS * 3600))
         self.research_delay = research_delay
         self.research_runs: list[Any] = []
+        # Canvas: ``canvas_sync(now)`` imports the calendar feed (jarvis.canvas) and
+        # returns a canvas.SyncResult; every ``canvas_interval`` seconds.
+        self.canvas_sync = canvas_sync
+        self.canvas_interval = max(int(canvas_interval), MIN_INTERVAL_S)
+        self.canvas_runs: list[Any] = []
         self.backoff = Backoff()
         self.in_model = False
         self.ticks: list[TickResult] = []
@@ -614,6 +622,28 @@ class Daemon:
                                research_summary=_short(r.summary(), 300))
         return delay
 
+    def run_canvas(self) -> float:
+        """One Canvas import under the refresh lock, logged. Returns the delay until
+        the next one (sooner after a failure)."""
+        ts = self.wall().astimezone().strftime("%H:%M:%S")
+        retry = min(CANVAS_RETRY_S, self.canvas_interval)
+        try:
+            with refresh_lock(self.cfg.db_path):
+                r = self.canvas_sync(self.wall())
+        except RefreshBusy:
+            return BUSY_RETRY_S
+        except Exception as e:  # noqa: BLE001 - the loop must survive anything
+            try:
+                self.conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            self.out(f"{ts} canvas: failed ({type(e).__name__}); retry in {_human_s(retry)}")
+            return retry
+        self.canvas_runs.append(r)
+        self.out(f"{ts} canvas: {r.summary()}"
+                 + (f"; retry in {_human_s(retry)}" if r.error else ""))
+        return retry if r.error else self.canvas_interval
+
     def _hardware_edited(self) -> bool:
         try:
             return hardware_hash(self.conn, self.cfg) != load_state(self.conn).hardware_hash
@@ -636,6 +666,7 @@ class Daemon:
         hw_sig = _file_sig(self.cfg.hardware_path)
         next_full = self.clock()
         next_research: float | None = None
+        next_canvas = self.clock() if self.canvas_sync is not None and not once else None
         if self.research is not None and not once:
             first = self.first_research_delay()
             next_research = self.clock() + first
@@ -657,6 +688,8 @@ class Daemon:
                         self.conn, interval_s=self.current_interval(),
                         next_tick_at=(self.wall() + timedelta(seconds=delay))
                         .isoformat(timespec="seconds"))
+                elif next_canvas is not None and self.clock() >= next_canvas:
+                    next_canvas = self.clock() + self.run_canvas()
                 elif next_research is not None and self.clock() >= next_research:
                     delay = self.run_research()
                     next_research = self.clock() + delay
@@ -671,7 +704,7 @@ class Daemon:
                                 hw_sig = sig  # busy: try again on the next poll
                         else:
                             hw_sig = sig
-                wake = next_full if next_research is None else min(next_full, next_research)
+                wake = min(t for t in (next_full, next_research, next_canvas) if t is not None)
                 remaining = wake - self.clock()
                 if remaining > 0 and not self.stop.is_set():
                     self.sleep(min(remaining, self.hw_poll_s))
@@ -733,9 +766,12 @@ def run_watch(cfg: Config, interval: int | None = None, once: bool = False,
         return run_research(conn, settings, repo=cfg.repo, ollama=ollama, arxiv=arxiv, gh=gh,
                             now=now, notes=[note] if note else None)
 
+    feed = canvas.feed_url()
     daemon = Daemon(cfg, conn, interval=requested, gh=gh, ollama=ollama, verbose=verbose,
                     notify=None if once else notify.send, research=research,
-                    research_interval=research_interval_from_env())
+                    research_interval=research_interval_from_env(),
+                    canvas_sync=(lambda now: canvas.sync(conn, feed, now.astimezone()))
+                    if feed else None)
     old = install_signal_handlers(daemon)
     try:
         return daemon.run(once=once)

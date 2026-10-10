@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from test_intelligence import NOW, ask, add, scratch_conn
+from test_intelligence import NOW, add, ask, scratch_conn
 
 from jarvis import attention, intent
 from jarvis import items as it
