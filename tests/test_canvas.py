@@ -90,7 +90,8 @@ def test_parse_reads_titles_courses_kinds_and_local_times():
     assert (exam.kind, exam.when, exam.commitment) == ("event", "2026-10-15T10:00", True)
     assert evs["event-assignment-502"].when == "2026-10-12"            # all day
     assert evs["event-assignment-503"].title.endswith("onto the next line")   # unfolded
-    assert not lab.commitment and lab.label == "Lab 3: Op-amp filters (ECE 201 - Fall 2026)"
+    assert not lab.commitment and lab.label == "Lab 3: Op-amp filters (ECE 201)"
+    assert lab.course == "ECE 201 - Fall 2026" and lab.course_short == "ECE 201"
     assert lab.short_id == "501"
 
 
@@ -201,9 +202,9 @@ def test_morning_summary_includes_canvas_with_courses(conn, tmp_path):
     sync(conn)
     a, model = ask(conn, tmp_path, "Good morning")
     assert not model.requests and not model.classified
-    assert a.text.splitlines()[1] == (
-        "1. Midterm exam (MATH 221 - Fall 2026) Thu Oct 15, 10:00 AM: 6 days left before it "
-        "(today, Sat, Sun, Mon, Tue, Wed).")
+    assert a.text.splitlines()[2] == (
+        "1. Midterm exam (MATH 221) Thu Oct 15, 10:00 AM: 6 days left before it "
+        "(today, Sat, Sun, Mon, Tue, Wed)")
     assert "Reading response 4 (HIST 110) is due Mon Oct 12" in a.text
     assert any(s.ref == "canvas:event-calendar-event-77" for s in a.sources)
 
@@ -217,10 +218,11 @@ def test_a_past_canvas_assignment_is_never_called_overdue(conn):
 def test_study_check_puts_the_canvas_exam_first(conn):
     sync(conn)
     add(conn, "Calculus exam", due="2026-10-16T09:00")
-    lines = attention.study_check(conn, NOW).text.splitlines()
-    assert lines[1].startswith("- Midterm exam (MATH 221 - Fall 2026), Thu Oct 15, 10:00 AM")
-    assert lines[2].startswith("- Calculus exam, Fri Oct 16, 9:00 AM")
-    assert "Lab 3: Op-amp filters (ECE 201 - Fall 2026) (Tue Oct 13)" in lines[3]
+    text = attention.study_check(conn, NOW).text
+    assert ("**Exams and fixed commitments**\n- Midterm exam (MATH 221), Thu Oct 15, 10:00 AM"
+            in text)
+    assert "\n- Calculus exam, Fri Oct 16, 9:00 AM" in text
+    assert "- **Tue Oct 13** (ECE 201)\n   - Lab 3: Op-amp filters, 11:59 PM" in text
 
 
 def test_agenda_lists_canvas_with_the_course(conn):
@@ -237,15 +239,15 @@ def test_planner_brief_has_canvas_as_facts_and_refuses_planning_over_the_exam(co
     add(conn, "Shower the dog")
     b = planning.build_brief(conn, NOW.date(), NOW.date() + timedelta(days=6), NOW.date())
     text = "\n".join(b.lines())
-    assert "- Thu 2026-10-15 10:00 Midterm exam (MATH 221 - Fall 2026) [exam]" in text
-    assert "- Tue 2026-10-13 23:59 Lab 3: Op-amp filters (ECE 201 - Fall 2026) [assignment]" in text
+    assert "- Thu 2026-10-15 10:00 Midterm exam (MATH 221) [exam]" in text
+    assert "- Tue 2026-10-13 23:59 Lab 3: Op-amp filters (ECE 201) [assignment]" in text
     dog = next(iter(b.items))
     raw = {"decisions": [{"item_id": dog, "action": "work_on", "date": "2026-10-15",
                           "time": "10:30", "reason": "free then"}],
            "availability": [{"date": "2026-10-15", "start": "08:00", "end": "18:00",
                              "quote": "Thursday 8 to 6"}], "summary": "s"}
     _, errors = planning.check_plan(b, raw, "I'm free Thursday 8 to 6")
-    assert any("is when “Midterm exam (MATH 221 - Fall 2026)” is on record" in e
+    assert any("is when “Midterm exam (MATH 221)” is on record" in e
                for e in errors)
 
 
@@ -284,7 +286,7 @@ def test_cli_list_done_and_undone(conn, tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "     501  Tue Oct 13, 11:59 PM" in out and "[exam]" in out
     assert cli._run_canvas(conn, "done", "501", 30) == 0
-    assert "done: Lab 3: Op-amp filters (ECE 201 - Fall 2026)" in capsys.readouterr().out
+    assert "done: Lab 3: Op-amp filters (ECE 201)" in capsys.readouterr().out
     assert cli._run_canvas(conn, "done", None, 30) == 2
     monkeypatch.setattr(canvas, "feed_url", lambda *a, **k: None)
     assert cli._run_canvas(conn, "sync", None, 30, NOW) == 1

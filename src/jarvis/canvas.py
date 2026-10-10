@@ -82,9 +82,20 @@ class CanvasEvent:
         return date.fromisoformat(self.when[:10])
 
     @property
+    def course_short(self) -> str | None:
+        """The course without its term or section: "ECE 201 - Fall 2026" -> "ECE 201",
+        "COMSC-230-5148" -> "COMSC-230"."""
+        if not self.course:
+            return None
+        c = re.sub(r"\s*[-–]\s*(?:fall|spring|summer|winter)\s+\d{4}\s*$", "", self.course,
+                   flags=re.I)
+        c = re.sub(r"(?<=\d)-\d{3,6}$", "", c)
+        return c.strip() or self.course
+
+    @property
     def label(self) -> str:
         """The title with its course: "Lab 3 (ECE 201)"."""
-        return f"{self.title} ({self.course})" if self.course else self.title
+        return f"{self.title} ({self.course_short})" if self.course else self.title
 
     @property
     def commitment(self) -> bool:

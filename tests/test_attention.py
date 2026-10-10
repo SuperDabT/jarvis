@@ -53,13 +53,13 @@ def test_other_requests_keep_their_routes(conn, question):
 def test_morning_summary_is_the_top_three_with_reasons_and_no_model(conn, tmp_path, week):
     a, model = ask(conn, tmp_path, "Good morning")
     assert a.tier == "direct" and a.intent == "attention" and not model.requests and not model.classified
-    assert a.text.splitlines() == [
-        "**Friday Oct 9**: what needs your attention",
-        "1. Calculus exam Mon Oct 12, 9:00 AM: 3 days left before it (today, Sat, Sun).",
-        "2. Reply to Dana: 2 days overdue (was due Wed Oct 7).",
+    assert a.text == (
+        "**Friday Oct 9**: what needs your attention\n\n"
+        "1. Calculus exam Mon Oct 12, 9:00 AM: 3 days left before it (today, Sat, Sun)\n"
+        "2. Reply to Dana: 2 days overdue (was due Wed Oct 7)\n"
         "3. Lab report is due Tue Oct 13, the day after Calculus exam: it needs time before "
-        "then too.",
-        "Nothing is due today."]
+        "then too\n\n"
+        "Nothing is due today.")
     assert {s.ref for s in a.sources} == {f"item:{week[k].id}" for k in ("exam", "dana", "lab")}
 
 
@@ -68,13 +68,13 @@ def test_the_summary_caps_and_counts_the_rest(conn, week):
         add(conn, f"Form {k}", due="2026-10-10")             # tomorrow, a cluster
     text = attention.daily_brief(conn, NOW).text
     assert text.count("\n1. ") == 1 and "\n4. " not in text
-    assert "more things to watch; ask “what needs my attention”" in text
+    assert "*1 more to watch: ask “what needs my attention” for the full list.*" in text
 
 
 def test_today_comes_first(conn, week):
     add(conn, "Dentist", due="2026-10-09T15:00")
-    first = attention.daily_brief(conn, NOW).text.splitlines()[1]
-    assert first == "1. Dentist 3:00 PM today."
+    first = attention.daily_brief(conn, NOW).text.splitlines()[2]
+    assert first == "1. Dentist 3:00 PM today"
 
 
 def test_signals(conn, week):
@@ -85,9 +85,11 @@ def test_signals(conn, week):
                  (old.id,))
     pic = attention.picture(conn, NOW)
     kinds = [s.kind for s in pic.signals]
-    assert kinds == ["event", "overdue", "squeeze", "cluster", "soon", "soon", "soon", "stale"]
+    # the three forms are listed in their group, not again one by one
+    assert kinds == ["event", "overdue", "squeeze", "cluster", "stale"]
     cluster = next(s for s in pic.signals if s.kind == "cluster")
-    assert cluster.text == "3 deadlines tomorrow: Form 0, Form 1, Form 2"
+    assert (cluster.text, cluster.details) == ("3 things due tomorrow",
+                                               ("Form 0", "Form 1", "Form 2"))
     stale = next(s for s in pic.signals if s.kind == "stale")
     assert stale.text == ("1 undated item untouched for 3+ weeks (oldest: Sort the garage, "
                           "5 weeks)")
@@ -110,29 +112,32 @@ def test_done_items_and_github_issues_are_never_signals(conn, week):
 
 
 def test_empty_list(conn):
-    assert "nothing is due, overdue or coming up" in attention.daily_brief(conn, NOW).text
+    assert "Nothing is due, overdue or coming up" in attention.daily_brief(conn, NOW).text
     assert attention.study_check(conn, NOW).text.endswith(
-        "Suggestion: nothing on your list is pressing by date: a good time for longer-term "
-        "work.")
+        "*Suggestion: nothing on your list is pressing by date: a good time for longer-term "
+        "work.*")
 
 
 def test_study_check(conn, tmp_path, week):
     a, model = ask(conn, tmp_path, "I'm about to study, anything I should know?")
     assert a.tier == "direct" and not model.requests and not model.classified
-    assert a.text.splitlines() == [
-        "**Before you study** (by the dates on your list):",
-        "- Calculus exam, Mon Oct 12, 9:00 AM: 3 days left before it (today, Sat, Sun).",
-        "- Due in the next week: Lab report (Tue Oct 13), Buy a present for Mom (Thu Oct 15).",
-        "- Overdue: Reply to Dana (2 days).",
-        "Suggestion: Calculus exam is the soonest fixed commitment, so it is the natural "
-        "focus; Lab report lands right after it."]
+    assert a.text == (
+        "**Before you study** (by the dates on your list)\n\n"
+        "**Exams and fixed commitments**\n"
+        "- Calculus exam, Mon Oct 12, 9:00 AM: 3 days left before it (today, Sat, Sun)\n\n"
+        "**Due in the next week**\n"
+        "- **Tue Oct 13**\n   - Lab report\n"
+        "- **Thu Oct 15**\n   - Buy a present for Mom\n\n"
+        "**Overdue**\n- Reply to Dana (2 days)\n\n"
+        "*Suggestion: Calculus exam is the soonest fixed commitment, so it is the natural "
+        "focus; Lab report lands right after it.*")
 
 
 def test_study_check_without_an_exam_points_at_the_soonest_deadline(conn):
     add(conn, "Lab report", due="2026-10-13")
     text = attention.study_check(conn, NOW + timedelta(hours=1)).text
-    assert "- No exam or other fixed commitment in the next 7 days." in text
-    assert text.endswith("Suggestion: Lab report is due soonest (Tue Oct 13).")
+    assert "\n\nNo exam or other fixed commitment in the next 7 days.\n\n" in text
+    assert text.endswith("*Suggestion: Lab report is due soonest (Tue Oct 13).*")
 
 
 def test_nothing_is_written(conn, week):

@@ -42,6 +42,7 @@ CLUSTER_MIN = 3         # deadlines in CLUSTER_SPAN days
 STALE_DAYS = 21         # undated and untouched this long
 BRIEF_TOP = 3           # signals in the morning summary
 FULL_TOP = 8            # signals in "what needs my attention"
+STUDY_DUE_MAX = 8       # deadlines listed in the study check
 
 # lower is more important
 RANK = {"today": 0, "event": 1, "overdue": 2, "squeeze": 3, "cluster": 4, "soon": 5,
@@ -54,15 +55,21 @@ class Signal:
     text: str                        # one line: the fact and why it matters
     refs: tuple[str, ...] = ()       # "item:12"
     when: str = ""                   # sort key inside a kind (a date)
+    details: tuple[str, ...] = ()    # sub-points, one per line under the text
 
 
 @dataclass(frozen=True)
 class Rec:
     """One dated thing on the user's plate: their own item or a Canvas entry."""
     ref: str                         # "item:12" / "canvas:event-assignment-3"
-    title: str
+    name: str                        # the title alone
     when: str                        # stored local wall clock
     event: bool                      # a fixed commitment (exam, appointment, ...)
+    course: str | None = None        # Canvas: the course, short ("COMSC-230")
+
+    @property
+    def title(self) -> str:
+        return f"{self.name} ({self.course})" if self.course else self.name
 
     @property
     def day(self) -> date:
@@ -91,6 +98,10 @@ def _short(d: date, today: date) -> str:
     return f"{d:%a %b} {d.day}"
 
 
+def _clock(when: str) -> str:
+    return human_when(when).split(", ")[-1] if "T" in when else ""
+
+
 def _before(event_day: date, today: date) -> str:
     """The days left before a commitment, by name."""
     days = [today + timedelta(days=k) for k in range((event_day - today).days)]
@@ -112,7 +123,7 @@ def _records(conn: sqlite3.Connection, today: date) -> tuple[list[Rec], list[it.
         else:
             undated.append(i)
     for e in canvas.upcoming(conn, today, today + timedelta(days=EVENT_DAYS)):
-        recs.append(Rec(e.ref, e.label, e.when, e.commitment))
+        recs.append(Rec(e.ref, e.title, e.when, e.commitment, e.course_short))
     return recs, undated
 
 
@@ -168,9 +179,17 @@ def picture(conn: sqlite3.Connection, now: datetime) -> Picture:
             last = group[-1].day
             span = (_short(r.day, today) if last == r.day
                     else f"{_short(r.day, today)} to {_short(last, today)}")
-            out.append(Signal("cluster", f"{len(group)} deadlines {span}: "
-                                         + ", ".join(r2.title for r2 in group),
-                              tuple(r2.ref for r2 in group), r.when[:10]))
+            courses = {r2.course for r2 in group}
+            shared = next(iter(courses)) if len(courses) == 1 else None
+            head = f"{len(group)} things due {span}" + (f" ({shared})" if shared else "")
+            details = tuple((r2.name if shared else r2.title)
+                            + ("" if last == r.day else f" ({r2.day:%a})")
+                            + (f", {_clock(r2.when)}" if "T" in r2.when else "")
+                            for r2 in group)
+            out.append(Signal("cluster", head, tuple(r2.ref for r2 in group), r.when[:10],
+                              details))
+    # a deadline in a cluster is listed there, not again on its own
+    out = [s for s in out if not (s.kind == "soon" and s.refs[0] in used)]
     stale = sorted((i for i in undated
                     if (today - datetime.fromisoformat(i.updated_at).date()).days >= STALE_DAYS),
                    key=lambda i: i.updated_at)
@@ -193,34 +212,38 @@ def picture(conn: sqlite3.Connection, now: datetime) -> Picture:
 def _answer(pic: Picture, lines: list[str], refs: list[str]) -> Answer:
     refs = list(dict.fromkeys(refs))
     sources = [Source(r, pic.labels.get(r, r)) for r in refs]
-    return Answer(text="\n".join(lines), sources=sources, unverified_numbers=[], notes=[],
+    return Answer(text="\n\n".join(lines), sources=sources, unverified_numbers=[], notes=[],
                   model=None, duration=0.0, tier="direct",
                   cited_sources=sources[:chat.CITED_SOURCES_MAX],
                   cited_more_count=max(0, len(sources) - chat.CITED_SOURCES_MAX))
 
 
-def _listed(pic: Picture, top: int, head: str) -> tuple[list[str], list[str]]:
+def _listed(pic: Picture, top: int) -> tuple[str, list[str]]:
+    """The top signals as a numbered Markdown list (sub-points indented under theirs)."""
     shown = pic.signals[:top]
-    lines = [head] + [f"{k}. {s.text}." for k, s in enumerate(shown, 1)]
-    refs = [r for s in shown for r in s.refs]
-    return lines, refs
+    rows = []
+    for k, sig in enumerate(shown, 1):
+        rows.append(f"{k}. {sig.text}")
+        rows += [f"   - {d}" for d in sig.details]
+    return "\n".join(rows), [r for sig in shown for r in sig.refs]
 
 
 def daily_brief(conn: sqlite3.Connection, now: datetime) -> Answer:
     """The morning summary: the three things that matter most today, by the records."""
     pic = picture(conn, now)
-    head = f"**{now:%A %b} {now.day}**: what needs your attention"
+    head = f"**{now:%A %b} {now.day}**"
     if not pic.signals:
-        return _answer(pic, [f"**{now:%A %b} {now.day}**: nothing is due, overdue or coming "
-                             "up in the next week on your list."], [])
-    lines, refs = _listed(pic, BRIEF_TOP, head)
-    if not any(s.kind == "today" for s in pic.signals):
-        lines.append("Nothing is due today.")
+        return _answer(pic, [head, "Nothing is due, overdue or coming up in the next week."],
+                       [])
+    listed, refs = _listed(pic, BRIEF_TOP)
+    parts = [f"{head}: what needs your attention", listed]
+    if not any(sig.kind == "today" for sig in pic.signals):
+        parts.append("Nothing is due today.")
     more = len(pic.signals) - BRIEF_TOP
     if more > 0:
-        lines.append(f"{more} more thing{'s' if more != 1 else ''} to watch; ask “what needs "
-                     "my attention” for the full list.")
-    return _answer(pic, lines, refs)
+        parts.append(f"*{more} more to watch: ask “what needs my attention” for the full "
+                     "list.*")
+    return _answer(pic, parts, refs)
 
 
 def attention_answer(conn: sqlite3.Connection, now: datetime) -> Answer:
@@ -228,12 +251,13 @@ def attention_answer(conn: sqlite3.Connection, now: datetime) -> Answer:
     pic = picture(conn, now)
     if not pic.signals:
         return _answer(pic, ["Nothing needs attention: nothing is overdue, due soon or "
-                             "coming up in the next week on your list."], [])
-    lines, refs = _listed(pic, FULL_TOP, "What needs your attention, most important first:")
+                             "coming up in the next week."], [])
+    listed, refs = _listed(pic, FULL_TOP)
+    parts = ["**What needs your attention**, most important first:", listed]
     more = len(pic.signals) - FULL_TOP
     if more > 0:
-        lines.append(f"(and {more} more)")
-    return _answer(pic, lines, refs)
+        parts.append(f"*and {more} more*")
+    return _answer(pic, parts, refs)
 
 
 def study_check(conn: sqlite3.Connection, now: datetime) -> Answer:
@@ -242,23 +266,37 @@ def study_check(conn: sqlite3.Connection, now: datetime) -> Answer:
     tasks are study, so this goes by dates."""
     pic = picture(conn, now)
     today = pic.today
-    lines = ["**Before you study** (by the dates on your list):"]
+    parts = ["**Before you study** (by the dates on your list)"]
     refs: list[str] = []
     upcoming = [e for e in pic.events if e.day >= today]
     if upcoming:
-        for e in upcoming[:2]:
-            lines.append(f"- {e.title}, {human_when(e.when)}: {_before(e.day, today)}.")
-            refs.append(e.ref)
+        parts.append("**Exams and fixed commitments**\n" + "\n".join(
+            f"- {e.title}, {human_when(e.when)}: {_before(e.day, today)}"
+            for e in upcoming[:2]))
+        refs += [e.ref for e in upcoming[:2]]
     else:
-        lines.append(f"- No exam or other fixed commitment in the next {EVENT_DAYS} days.")
+        parts.append(f"No exam or other fixed commitment in the next {EVENT_DAYS} days.")
     if pic.due_soon:
-        lines.append("- Due in the next week: " + ", ".join(
-            f"{r.title} ({_short(r.day, today)})" for r in pic.due_soon[:4])
-            + (f", and {len(pic.due_soon) - 4} more" if len(pic.due_soon) > 4 else "") + ".")
-        refs += [r.ref for r in pic.due_soon[:4]]
+        shown = pic.due_soon[:STUDY_DUE_MAX]
+        by_day: dict[date, list[Rec]] = {}
+        for r in shown:
+            by_day.setdefault(r.day, []).append(r)
+        rows = []
+        for day, recs in by_day.items():
+            courses = {r.course for r in recs}
+            shared = next(iter(courses)) if len(courses) == 1 else None
+            label = _short(day, today)
+            rows.append(f"- **{label[:1].upper() + label[1:]}**"
+                        + (f" ({shared})" if shared else ""))
+            rows += [f"   - {r.name if shared else r.title}"
+                     + (f", {_clock(r.when)}" if "T" in r.when else "") for r in recs]
+        more = len(pic.due_soon) - len(shown)
+        parts.append("**Due in the next week**\n" + "\n".join(rows)
+                     + (f"\n- *and {more} more*" if more > 0 else ""))
+        refs += [r.ref for r in shown]
     if pic.overdue:
-        lines.append("- Overdue: " + ", ".join(
-            f"{r.title} ({_days((today - r.day).days)})" for r in pic.overdue[:3]) + ".")
+        parts.append("**Overdue**\n" + "\n".join(
+            f"- {r.title} ({_days((today - r.day).days)})" for r in pic.overdue[:3]))
         refs += [r.ref for r in pic.overdue[:3]]
     if upcoming:
         e = upcoming[0]
@@ -268,10 +306,12 @@ def study_check(conn: sqlite3.Connection, now: datetime) -> Answer:
             tip += f"; {pic.labels.get(squeezed[0].refs[0], 'one deadline')} lands right after it"
     elif pic.due_soon:
         r = pic.due_soon[0]
-        tip = f"{r.title} is due soonest ({_short(r.day, today)})"
+        n = sum(1 for x in pic.due_soon if x.day == r.day)
+        tip = (f"{n} things are due {_short(r.day, today)}, the soonest deadlines" if n > 1
+               else f"{r.title} is due soonest ({_short(r.day, today)})")
     elif pic.overdue:
         tip = f"nothing is coming up; {pic.overdue[0].title} is the oldest overdue item"
     else:
         tip = "nothing on your list is pressing by date: a good time for longer-term work"
-    lines.append(f"Suggestion: {tip}.")
-    return _answer(pic, lines, refs)
+    parts.append(f"*Suggestion: {tip}.*")
+    return _answer(pic, parts, refs)
