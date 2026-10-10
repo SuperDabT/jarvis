@@ -12,6 +12,10 @@ Intents and their sources:
 - ``agenda``   what is due / on the user's plate for a timeframe: the user's
                own items (Jarvis's task list) and GitHub milestones due in that
                timeframe. Answered by code, no model (``assistant``).
+- ``attention`` the morning summary ("good morning", "daily summary"), "what
+               needs my attention", and the check before studying ("I'm about
+               to study"): computed from the user's items (``attention``), no
+               model. ``Route.span`` says which: brief / attention / study.
 - ``capture``  "remind me to ...", "add a task ...": handed to the existing
                capture flow, which the user confirms. Nothing is saved here.
 - ``planning`` "what should I work on", "help me organize my weekend",
@@ -37,10 +41,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
-Intent = Literal["agenda", "capture", "planning", "project", "recall", "general", "mixed"]
+Intent = Literal["agenda", "attention", "capture", "planning", "project", "recall", "general", "mixed"]
 INTENTS: tuple[str, ...] = ("agenda", "capture", "planning", "project", "recall", "general",
                             "mixed")
-PERSONAL_INTENTS = frozenset({"agenda", "planning", "recall", "mixed"})
+PERSONAL_INTENTS = frozenset({"agenda", "attention", "planning", "recall", "mixed"})
 PROJECT_INTENTS = frozenset({"planning", "project", "mixed"})
 
 # ---------------------------------------------------------------- patterns
@@ -66,6 +70,29 @@ _AGENDA_RE = re.compile("|".join([
     r"\bdue\s+(?:today|tonight|tomorrow|this|next|on)\b",
     r"\b(?:upcoming|coming\s+up)\b",
     r"\b(?:deadlines?|appointments?)\b",
+]), re.I)
+# The morning summary.
+_BRIEF_RE = re.compile("|".join([
+    r"^\s*(?:good\s+)?morning\b", r"\b(?:morning|daily)\s+(?:brief(?:ing)?|summary|update|"
+    r"rundown|overview)\b", r"\bbrief\s+me\b", r"\bcatch\s+me\s+up\b",
+    r"\bsummar(?:y|i[sz]e)\s+(?:of\s+)?(?:my|the)\s+day\b",
+    r"\bwhat(?:'s|\s+is|\s+does)\s+(?:my|the)\s+day\s+look(?:ing)?\s+like\b",
+    r"\bhow\s+(?:does|is)\s+(?:my|the)\s+day\s+look(?:ing)?\b",
+]), re.I)
+# What needs attention / what might be slipping.
+_ATTENTION_RE = re.compile("|".join([
+    r"\bneeds?\s+(?:my\s+)?attention\b", r"\bam\s+i\s+(?:forgetting|missing)\b",
+    r"\bwhat\s+am\s+i\s+(?:forgetting|missing)\b",
+    r"\banything\s+i(?:'m|\s+am)?\s+(?:forgetting|missing|should\s+(?:know|worry))\b",
+    r"\bwhat\s+should\s+i\s+(?:know|worry\s+about)\b", r"\b(?:at\s+risk|slipping)\b",
+]), re.I)
+# About to sit down and study.
+_STUDY_RE = re.compile("|".join([
+    r"\b(?:about|going|want|ready|planning|starting)\s+to\s+(?:start\s+)?(?:study|revise)\b",
+    r"\bbefore\s+(?:i\s+)?(?:study|start\s+studying|studying|revis(?:e|ing))\b",
+    r"\bwhat\s+should\s+i\s+(?:study|revise)\b",
+    r"\b(?:start(?:ing)?|begin(?:ning)?)\s+(?:to\s+)?(?:study|studying)\b",
+    r"\bstudy\s+(?:session|time)\b", r"\bsit(?:ting)?\s+down\s+to\s+study\b",
 ]), re.I)
 # Choosing what to work on: options, not a lookup.
 _PLANNING_RE = re.compile("|".join([
@@ -195,6 +222,13 @@ def route_by_rules(question: str, today: date,
     names_project = bool(slug) or bool(_PROJECT_RE.search(q))
     if _CAPTURE_RE.search(q) and not _RECALL_RE.search(q):
         return Route("capture", capture_text=capture_text(q))
+    if not names_project and not _GOAL_RE.search(q):
+        if _STUDY_RE.search(q):
+            return Route("attention", span="study")
+        if _BRIEF_RE.search(q):
+            return Route("attention", span="brief")
+        if _ATTENTION_RE.search(q):
+            return Route("attention", span="attention")
     if _RECALL_RE.search(q) and not re.search(r"\b(?:work(?:ed)?\s+on|commit|change)", q, re.I):
         return Route("recall", project=slug)
     tf = timeframe(q, today)

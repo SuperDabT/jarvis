@@ -58,7 +58,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from jarvis import agent, assistant, chat, intent
+from jarvis import agent, assistant, attention, chat, intent
 from jarvis.chat import Answer, Brevity, Context
 from jarvis.config import Config
 from jarvis.facts import NextStep, compute_next_steps
@@ -440,6 +440,9 @@ def _direct_answer(conn: sqlite3.Connection, question: str, now: datetime,
     if route.intent == "agenda":
         return assistant.agenda_answer(assistant.build_agenda(
             conn, route.start, route.end, route.span, now, project=route.project))
+    if route.intent == "attention":
+        return {"study": attention.study_check, "brief": attention.daily_brief}.get(
+            route.span, attention.attention_answer)(conn, now)
     if route.intent == "capture":
         return assistant.capture_answer(route.capture_text)
     if route.intent == "recall" and not assistant.search_memory(conn, question, now):

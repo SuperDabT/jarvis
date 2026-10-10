@@ -160,6 +160,14 @@ class Brief:
         return out
 
 
+def is_event(i: it.Item) -> bool:
+    """A fixed commitment: a timed deadline (or a timed reminder-kind item), or a
+    dated item whose title names an exam, interview, appointment and the like."""
+    when = i.due_at or i.remind_at or ""
+    return "T" in when and (i.due_at is not None or i.kind == "reminder") or bool(
+        i.due_at and _EVENT_RE.search(i.title))
+
+
 def _dated(stored: str) -> str:
     """A stored date with its weekday ("Tue 2026-10-13", "Mon 2026-10-12 09:00"), so
     the model never works out a weekday itself."""
@@ -202,9 +210,7 @@ def build_brief(conn: sqlite3.Connection, start: date, end: date, today: date) -
             status = "due_in_period" if remind <= end else "due_soon"
         else:
             continue
-        when = i.due_at or i.remind_at or ""
-        event = "T" in when and (i.due_at is not None or i.kind == "reminder") or bool(
-            i.due_at and _EVENT_RE.search(i.title))
+        event = is_event(i)
         scope[i.id] = BriefItem(i.id, i.title, i.kind, i.due_at, i.remind_at,
                                 projects.get(i.project_id), status, event)
     undated.sort(key=lambda i: (-i.priority, i.id))

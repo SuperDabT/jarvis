@@ -247,6 +247,15 @@ the answer lists what is on record. `set_due` only dates undated items. The back
 matches an existing item to an issue only by an explicit #N (fuzzy title matching is kept only
 for new items). Tests: `tests/test_agent.py`.
 
+What needs attention (`jarvis/attention.py`, no model): code computes signals from the
+user's open items (due today, exams and other fixed commitments in the next week with the days
+left, overdue, a deadline on or right after a commitment, 3+ deadlines in two days, due in 3
+days, undated items untouched for 3+ weeks), ranked. Routed by rules (`intent`, intent
+"attention"): "good morning" / "daily summary" gives the top three (`daily_brief`), "what needs
+my attention" the full list, "I'm about to study" the check before studying (`study_check`:
+next commitments, what is due, overdue, one labelled suggestion). A request to plan or
+schedule keeps its planning route. Tests: `tests/test_attention.py`.
+
 ## The real database
 
 The real `~/.local/share/jarvis/jarvis.db` is at version 1 (upgraded on 2026-10-09 during
@@ -257,7 +266,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 978 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 1006 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,
