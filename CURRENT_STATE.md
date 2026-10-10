@@ -1,6 +1,6 @@
 # Current state
 
-Updated after Phase 1, steps 7 and 8 (see ROADMAP.md).
+Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
 
 ## Database
 
@@ -105,6 +105,30 @@ Updated after Phase 1, steps 7 and 8 (see ROADMAP.md).
 - Palette (`theme.py`): forest-green near-black `#031211`, grey-green ink `#DCE8E2`, teal mint
   `#52E3A4` (the Life OS mockup); every other colour is mixed from these.
 
+## Items in the project graph (`gui/brain_data.py` build_graph)
+
+Open items only; done and deleted items leave the graph (and come back when reopened or
+restored). Rules, in order:
+
+1. Items in a project hang off that project's hub (`project:<slug>`, linked to the core), at
+   most 40 per project (`ITEMS_PER_PROJECT`), most urgent first: overdue, today, upcoming,
+   someday, then by when and priority.
+2. Items with an explicit `links` row to something in the graph (an issue or commit of this
+   repo, a project, or another shown item, followed through chains) are always shown, past
+   the cap. Relations are never hidden to save space.
+3. Everything else (no project, no link) is left out and counted in `Graph.loose`; the legend's
+   "+ unfiled" toggle shows up to 30 of them under an "unfiled" hub.
+
+Edges are drawn once (same a, b, kind dropped; "related" either way round). Items are rounded
+squares (task filled, idea an outlined diamond, reminder an outlined square with a dot): red
+when overdue, mint when due today, ink otherwise. At most 12 urgent items carry a label
+without hovering. The inspector shows an item's dates, project and links, with "edit in Tasks"
+(clears Tasks filters that would hide it) and "done". The legend's "item" filter hides them.
+
+Performance (498 nodes, 581 edges: GitHub data plus 333 items over 8 projects, this machine):
+build_graph 8 ms, layout 0.6 ms, every node's neighbours 0.1 ms (indexed once per graph),
+window reload 88 ms, paint 14 ms, hover hit test 0.2 ms.
+
 ## The real database
 
 The real `~/.local/share/jarvis/jarvis.db` is at version 1 (upgraded on 2026-10-09 during
@@ -115,9 +139,10 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 756 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 779 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,
 `tests/test_capture.py` capture and `jarvis add`, `tests/test_gui_capture.py` the overlay, `tests/test_gui_shell.py` the shell,
-`tests/test_tasks_data.py` and `tests/test_gui_life.py` Tasks and Home.
+`tests/test_tasks_data.py` and `tests/test_gui_life.py` Tasks and Home,
+`tests/test_graph_items.py` and `tests/test_gui_graph_items.py` items in the graph.

@@ -228,7 +228,7 @@ def test_items_added_elsewhere_show_up_on_reload(make, tmp_path):
 
 def test_capture_updates_tasks_and_home_at_once(make):
     brain = Brain(form(title="Buy cat food", kind="reminder", remind_phrase="today at 5pm",
-                       remind_date="2026-10-09", remind_time="17:00"))
+                       remind_date="2026-10-09", remind_time="17:00"), now=NOW, tz=LA)
     win, _ = make(capture_fn=brain)
     win.open_capture()
     win.capture.input.setText("remind me to buy cat food today at 5pm")

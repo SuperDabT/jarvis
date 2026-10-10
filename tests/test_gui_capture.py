@@ -39,10 +39,11 @@ class Brain:
     """capture_fn for the window: the real service with a scripted fake model.
     ``gate`` (optional) holds the worker until the test lets it go."""
 
-    def __init__(self, *replies):
+    def __init__(self, *replies, now=None, tz=None):
         self.model = FakeModel(*replies)
         self.gate: threading.Event | None = None
         self.calls: list[tuple[str, tuple]] = []
+        self.now, self.tz = now, tz  # a fixed clock, for captures with dates
 
     def __call__(self, cfg, text, answers):
         self.calls.append((text, answers))
@@ -50,7 +51,7 @@ class Brain:
             self.gate.wait(5)
         conn = db.connect(cfg.db_path)
         try:
-            return cap.capture(conn, text, self.model, answers=answers)
+            return cap.capture(conn, text, self.model, answers=answers, now=self.now, tz=self.tz)
         finally:
             conn.close()
 

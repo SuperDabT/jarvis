@@ -87,11 +87,12 @@ SPIN_DEG_PER_S = 300
 REFRESH_TEXT = " refresh"
 REFRESHING_TEXT = " refreshing…"
 FILTER_LABELS = {"issue": "issue", "commit": "commit", "card": "suggestion",
-                 "check": "check", "paper": "paper"}
+                 "check": "check", "paper": "paper", "item": "item"}
+SHORT_LABELS = {"card": "card"}  # a narrow graph's legend
 
 LEGEND_COLORS = {"issue": theme.DARK.ink, "commit": theme.DARK.tint(0.6),
                  "card": theme.DARK.signal, "check": theme.mix(theme.DARK.bg, theme.DARK.signal, 0.6),
-                 "paper": theme.DARK.tint(0.45)}
+                 "paper": theme.DARK.tint(0.45), "item": theme.DARK.signal_text}
 
 RefreshFn = Callable[[sqlite3.Connection, Config], Any]
 
@@ -371,6 +372,8 @@ class MainWindow(QMainWindow):
         self.inspector.done.connect(lambda c: self.mark_done(c.id))
         self.inspector.not_useful.connect(lambda c, r: self.mark_not_useful(c.id, r))
         self.inspector.open_node.connect(self.select_node)
+        self.inspector.open_item.connect(self.open_item)
+        self.inspector.complete_item.connect(self.complete_item)
         rl.addWidget(self.inspector)
         self.stream = StreamPanel()
         self.stream.open_node.connect(self.select_node)
@@ -441,7 +444,7 @@ class MainWindow(QMainWindow):
         for kind in FILTER_KINDS:
             b = QPushButton(f"● {FILTER_LABELS[kind]}")
             b.setProperty("full", b.text())
-            b.setProperty("short", FILTER_LABELS[kind])
+            b.setProperty("short", SHORT_LABELS.get(kind, FILTER_LABELS[kind]))
             b.setObjectName("filter")
             b.setCheckable(True)
             b.setChecked(True)
@@ -451,6 +454,16 @@ class MainWindow(QMainWindow):
             b.setStyleSheet(f"QPushButton#filter:checked {{ color: {LEGEND_COLORS[kind]}; }}")
             lay.addWidget(b)
             self.filter_buttons[kind] = b
+        # open items with no project or link stay out of the graph unless asked for
+        self.unfiled_btn = QPushButton("+ unfiled")
+        self.unfiled_btn.setObjectName("filter")
+        self.unfiled_btn.setCheckable(True)
+        self.unfiled_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.unfiled_btn.setProperty("full", "+ unfiled")
+        self.unfiled_btn.setProperty("short", "+")
+        self.unfiled_btn.toggled.connect(lambda _on: self.reload())
+        self.unfiled_btn.hide()
+        lay.addWidget(self.unfiled_btn)
         return w
 
     def _build_ticker(self) -> QWidget:
@@ -557,8 +570,18 @@ class MainWindow(QMainWindow):
             return
         self.home_view.set_data(home)
 
+    def open_item(self, item_id: int) -> None:
+        """Edit an item in Tasks (from the graph's inspector). Filters that would
+        hide it are cleared first."""
+        self.show_workspace("tasks")
+        tv = self.tasks_view
+        if item_id not in tv.rows:
+            tv.set_kind("all")
+            tv.set_project(None)
+        tv.select(item_id)
+
     def complete_item(self, item_id: int) -> None:
-        """Tick an item off (from Home)."""
+        """Tick an item off (from Home or the graph's inspector)."""
         from jarvis import items
 
         try:
@@ -649,7 +672,8 @@ class MainWindow(QMainWindow):
         try:
             new = load_window_data(self.conn, self.cfg.repo,
                                    hardware_path=self.cfg.hardware_path)
-            brain = load_brain(self.conn, self.cfg.repo)
+            brain = load_brain(self.conn, self.cfg.repo, self._now_fn(),
+                               loose=self.unfiled_btn.isChecked())
         except sqlite3.Error as e:
             self.set_status(f"Could not read the database: {e}", "warn", sticky=True)
             return
@@ -678,6 +702,11 @@ class MainWindow(QMainWindow):
         if bchanged("graph"):
             self.graph.set_data(brain.graph, animate=anim)
             g = brain.graph
+            shown_loose = g.count("item") and any(n.id == "hub:unfiled" for n in g.nodes)
+            self.unfiled_btn.setVisible(bool(g.loose or shown_loose))
+            self.unfiled_btn.setToolTip(
+                f"Show open items with no project or link ({g.loose} hidden)" if g.loose
+                else "Hide the unfiled items")
             self.counts.setText(f"{len(g.nodes)} nodes · {len(g.edges)} links")
             self.stage.place()
             sel = self.graph.lock_id or self.graph.hover_id
@@ -715,6 +744,7 @@ class MainWindow(QMainWindow):
         while self.status_pills.count():
             it = self.status_pills.takeAt(0)
             if it.widget():
+                it.widget().hide()  # gone now, not when the loop gets to it
                 it.widget().deleteLater()
         if b is not None:
             fails = b.graph.count("check") and sum(

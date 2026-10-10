@@ -16,7 +16,7 @@ existing project cockpit.
 | 6 | Quick capture: Ctrl+N overlay and `jarvis add "..."` | done |
 | 7 | Tasks workspace v0: Overdue / Today / Upcoming / Someday | done |
 | 8 | Home dashboard v0 from stored data | done |
-| 9 | Task items in the graph | next |
+| 9 | Task items in the graph | done |
 
 Decided for Phase 1: GitHub issues stay in Projects (not copied into tasks); in-app capture only
 (no global hotkey); reminder times are stored and shown, no notifications; School and Knowledge

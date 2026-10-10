@@ -290,6 +290,8 @@ class Inspector(Panel):
     done = Signal(object)              # Card
     not_useful = Signal(object, str)   # Card, reason
     open_node = Signal(str)            # a neighbour was clicked
+    open_item = Signal(int)            # "edit in Tasks" on an item
+    complete_item = Signal(int)        # "done" on an item
 
     FLASH_MS = 1400
     HINT = ("hover a node to inspect it · click to lock the selection · "
@@ -318,7 +320,8 @@ class Inspector(Panel):
             self.body.itemAt(0).widget().setWordWrap(True)
             return
         now = now or datetime.now(UTC)
-        kind = mono(_label(KIND_NAMES.get(node.kind, node.kind)
+        kind = mono(_label((node.sub if node.kind == "item" else
+                            KIND_NAMES.get(node.kind, node.kind))
                            + (f" · {node.status}" if node.status else "")
                            + (" · live" if node.live else ""), "inspKind"), 10, 500)
         self.body.addWidget(kind)
@@ -361,6 +364,25 @@ class Inspector(Panel):
                     self.body.addWidget(mono(_label(f"+{len(links) - 8} more", "vNote"), 10))
         if card is not None:
             self._card_actions(card)
+        if node.kind == "item" and node.item_id is not None:
+            self._item_actions(node.item_id)
+
+    def _item_actions(self, item_id: int) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.edit_btn = QPushButton("edit in Tasks")
+        self.edit_btn.setObjectName("primary")
+        self.edit_btn.setToolTip("Open it in the Tasks workspace to edit")
+        self.edit_btn.clicked.connect(lambda: self.open_item.emit(item_id))
+        self.done_btn = QPushButton("done")
+        self.done_btn.setToolTip("Mark it done (it leaves the graph)")
+        self.done_btn.clicked.connect(lambda: self.complete_item.emit(item_id))
+        for b in (self.edit_btn, self.done_btn):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            row.addWidget(b)
+        row.addStretch(1)
+        self.body.addSpacing(4)
+        self.body.addLayout(row)
 
     def _card_actions(self, card: Card) -> None:
         row = QHBoxLayout()
@@ -486,6 +508,7 @@ class StreamPanel(Panel):
         while self.list.count() > 1:
             it = self.list.takeAt(0)
             if it.widget():
+                it.widget().hide()  # gone now, not when the loop gets to it
                 it.widget().deleteLater()
         self.rows = []
         for i, item in enumerate(items):

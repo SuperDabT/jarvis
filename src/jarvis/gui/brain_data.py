@@ -4,7 +4,23 @@ vitals and the pulse. No Qt here, so it is unit-testable.
 Everything comes from data that is already synced; nothing is fetched. Links in
 the graph are only drawn where the data says so: an issue's milestone, a commit
 message naming "#N", a "may be done" match (``facts.maybe_done``), a card's
-check, the parts a check names, a paper judged against an issue.
+check, the parts a check names, a paper judged against an issue, an item's
+project, and the explicit ``links`` rows between items, projects and GitHub.
+
+Life OS items in the graph (open only; done and deleted ones are not shown):
+
+1. Items in a project are shown under that project's hub ("project:<slug>",
+   linked to the core), at most ITEMS_PER_PROJECT of them, most urgent first
+   (overdue, today, upcoming, someday; then by when and priority).
+2. Items with an explicit link to something in the graph (an issue or commit
+   of this repo, a project, or another shown item, followed transitively) are
+   always shown, beyond the cap: a relationship is never hidden.
+3. Other open items (no project, no link to the graph) are left out; their
+   number is ``Graph.loose``. ``build_graph(..., loose=True)`` shows up to
+   LOOSE_MAX of them under an "unfiled" hub.
+
+Edges are drawn once: the same (a, b, kind) twice is dropped, and "related"
+counts either way round.
 """
 from __future__ import annotations
 
@@ -14,6 +30,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from functools import cached_property, lru_cache
 from typing import Any
 
 GITHUB = "https://github.com"
@@ -22,10 +39,14 @@ PAPERS_MAX = 40
 LIVE_HOURS = 48
 STREAM_MAX = 50
 PULSE_DAYS = 60
+ITEMS_PER_PROJECT = 40   # project items shown per project (linked ones on top of this)
+LOOSE_MAX = 30           # unfiled items shown when asked for
 
-KINDS = ("core", "hub", "milestone", "issue", "commit", "card", "check", "part", "paper")
+KINDS = ("core", "hub", "milestone", "issue", "commit", "card", "check", "part", "paper",
+         "item")
 # legend / filter order (core and hubs are always shown)
-FILTER_KINDS = ("issue", "commit", "card", "check", "paper")
+FILTER_KINDS = ("issue", "commit", "card", "check", "paper", "item")
+UNDIRECTED = frozenset({"related"})
 
 _ISSUE_REF = re.compile(r"(?<![\w/])#(\d+)\b")
 
@@ -72,8 +93,10 @@ class Node:
     url: str | None = None
     when: str | None = None    # ISO time of its latest activity
     live: bool = False         # activity in the last LIVE_HOURS
-    status: str | None = None  # open / closed / pass / fail / unknown / active
+    status: str | None = None  # open / closed / pass / fail / unknown / active / overdue / ...
     card_id: int | None = None
+    sub: str = ""              # items: task / idea / reminder
+    item_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -88,19 +111,27 @@ class Edge:
 class Graph:
     nodes: tuple[Node, ...]
     edges: tuple[Edge, ...]
+    loose: int = 0   # open items left out (no project, no link to the graph)
+
+    @cached_property
+    def _by_id(self) -> dict[str, Node]:
+        return {n.id: n for n in self.nodes}
+
+    @cached_property
+    def _adjacent(self) -> dict[str, list[tuple[Edge, Node]]]:
+        by_id = self._by_id
+        adj: dict[str, list[tuple[Edge, Node]]] = {}
+        for e in self.edges:
+            if e.a in by_id and e.b in by_id:
+                adj.setdefault(e.a, []).append((e, by_id[e.b]))
+                adj.setdefault(e.b, []).append((e, by_id[e.a]))
+        return adj
 
     def node(self, node_id: str) -> Node | None:
-        return next((n for n in self.nodes if n.id == node_id), None)
+        return self._by_id.get(node_id)
 
     def neighbours(self, node_id: str) -> list[tuple[Edge, Node]]:
-        by_id = {n.id: n for n in self.nodes}
-        out = []
-        for e in self.edges:
-            if e.a == node_id and e.b in by_id:
-                out.append((e, by_id[e.b]))
-            elif e.b == node_id and e.a in by_id:
-                out.append((e, by_id[e.a]))
-        return out
+        return list(self._adjacent.get(node_id, ()))
 
     def count(self, kind: str) -> int:
         return sum(1 for n in self.nodes if n.kind == kind)
@@ -110,6 +141,7 @@ EDGE_LABELS = {
     "hub": "part of", "milestone": "in milestone", "mentions": "commit names the issue",
     "maybe": "may have closed it", "history": "previous commit", "card": "suggestion for",
     "check": "check involves", "judged": "research judged for",
+    "project": "in project", "about": "is about", "related": "related to",
 }
 
 
@@ -130,17 +162,21 @@ def _parts_of(check_id: str) -> list[str]:
     return []
 
 
-def build_graph(conn: sqlite3.Connection, repo: str, now: datetime | None = None) -> Graph:
+def build_graph(conn: sqlite3.Connection, repo: str, now: datetime | None = None,
+                loose: bool = False) -> Graph:
     now = now or datetime.now(UTC)
     live_after = now - timedelta(hours=LIVE_HOURS)
     nodes: dict[str, Node] = {}
     edges: list[Edge] = []
+    seen: set[tuple[str, str, str]] = set()
 
     def add(n: Node) -> None:
         nodes.setdefault(n.id, n)
 
     def link(a: str, b: str, kind: str, dashed: bool = False) -> None:
-        if a != b:
+        key = (min(a, b), max(a, b), kind) if kind in UNDIRECTED else (a, b, kind)
+        if a != b and key not in seen:
+            seen.add(key)
             edges.append(Edge(a, b, kind, dashed))
 
     def live(iso: str | None) -> bool:
@@ -274,7 +310,131 @@ def build_graph(conn: sqlite3.Connection, repo: str, now: datetime | None = None
                 link(pid, f"issue:{num}", "judged",
                      dashed=verdict in ("not_relevant", "irrelevant", "no"))
 
-    return Graph(tuple(nodes.values()), tuple(edges))
+    try:
+        hidden = _add_items(conn, repo, now, nodes, add, link, loose)
+    except sqlite3.OperationalError:  # a database from before the items tables
+        hidden = 0
+    return Graph(tuple(nodes.values()), tuple(edges), hidden)
+
+
+def _item_detail(item: Any, group: str, today: date, project: str | None) -> str:
+    from jarvis.gui.tasks_data import when_label
+
+    bits = []
+    if item.due_at:
+        bits.append(f"due {when_label(item.due_at, today)}")
+    if item.remind_at:
+        bits.append(f"remind {when_label(item.remind_at, today)}")
+    if item.priority:
+        bits.append("priority " + "!" * item.priority)
+    if project:
+        bits.append(f"#{project}")
+    line = " · ".join(bits) or ("no date" if group == "someday" else "")
+    return line + (f"\n\n{_short(item.body, 280)}" if item.body else "")
+
+
+def _add_items(conn: sqlite3.Connection, repo: str, now: datetime, nodes: dict[str, Node],
+               add, link, loose: bool) -> int:
+    """Open items, their project hubs and explicit links (the rules in the module
+    docstring). Returns how many open items were left out."""
+    from jarvis import items as it
+
+    local = it.local_now(now)
+    grouped = it.grouped_items(conn, local)
+    order = [(g, i) for g in it.GROUPS for i in grouped[g]]   # most urgent first
+    if not order:
+        return 0
+    group_of = {i.id: g for g, i in order}
+    by_id = {i.id: i for _, i in order}
+    projects = {p.id: p for p in it.list_projects(conn, include_archived=True)}
+    repo_l = repo.lower()
+
+    def target(kind: str, ref: str) -> str | None:
+        """A links end as a graph node id, if that node is (or may be) in the graph."""
+        if kind == "item":
+            return f"item:{ref}" if int(ref) in by_id else None
+        if kind == "project":
+            p = projects.get(int(ref))
+            return f"project:{p.slug}" if p else None
+        if kind == "issue":
+            r, _, num = ref.partition("#")
+            nid = f"issue:{num}"
+        else:  # commit
+            r, _, sha = ref.partition("@")
+            nid = f"commit:{sha[:7]}"
+        return nid if r.lower() == repo_l and nid in nodes else None
+
+    rels: list[tuple[str, str, str]] = []
+    for r in conn.execute("SELECT src_type, src_id, dst_type, dst_id, kind FROM links"):
+        a, b = target(r["src_type"], r["src_id"]), target(r["dst_type"], r["dst_id"])
+        if a and b and (a.startswith("item:") or b.startswith("item:")):
+            rels.append((a, b, r["kind"]))
+
+    shown: set[int] = set()
+    per_project: dict[int, int] = {}
+    for _, i in order:                       # rule 1: project items, capped per project
+        taken = per_project.get(i.project_id, 0)
+        if i.project_id in projects and taken < ITEMS_PER_PROJECT:
+            per_project[i.project_id] = taken + 1
+            shown.add(i.id)
+    for a, b, _ in rels:                      # rule 2: linked to the graph
+        for x, y in ((a, b), (b, a)):
+            if x.startswith("item:") and not y.startswith("item:"):
+                shown.add(int(x[5:]))
+    item_pairs = [(int(a[5:]), int(b[5:])) for a, b, _ in rels
+                  if a.startswith("item:") and b.startswith("item:")]
+    changed = True
+    while changed:                            # ... and through other shown items
+        changed = False
+        for x, y in item_pairs:
+            for p, q in ((x, y), (y, x)):
+                if p in shown and q not in shown:
+                    shown.add(q)
+                    changed = True
+    rest = [i for _, i in order if i.id not in shown]
+    filed = [i for i in rest if i.project_id is None]
+    hidden = len(rest)
+    unfiled: set[int] = set()
+    if loose:                                 # rule 3: unfiled, only when asked
+        unfiled = {i.id for i in filed[:LOOSE_MAX]}
+        hidden -= len(unfiled)
+
+    today = local.date()
+    hubs: set[int] = {by_id[i].project_id for i in shown if by_id[i].project_id is not None}
+    for a, b, _ in rels:
+        for end in (a, b):
+            if end.startswith("project:"):
+                hubs.update(p.id for p in projects.values() if f"project:{p.slug}" == end)
+    for pid in sorted(hubs):
+        p = projects[pid]
+        count = sum(1 for i in by_id.values() if i.project_id == pid)
+        add(Node(f"project:{p.slug}", "hub", p.slug, p.name,
+                 f"Your open items in {p.name}: {count}."
+                 + (f" GitHub: {p.github_repo}." if p.github_repo else ""),
+                 f"{GITHUB}/{p.github_repo}" if p.github_repo else None))
+        link(f"project:{p.slug}", "jarvis", "hub")
+    if unfiled:
+        add(Node("hub:unfiled", "hub", "unfiled", "Unfiled items",
+                 "Open items with no project and no link to the graph."))
+        link("hub:unfiled", "jarvis", "hub")
+
+    for _, i in order:
+        if i.id not in shown and i.id not in unfiled:
+            continue
+        g = group_of[i.id]
+        p = projects.get(i.project_id) if i.project_id is not None else None
+        nid = f"item:{i.id}"
+        add(Node(nid, "item", _short(i.title, 22), i.title,
+                 _item_detail(i, g, today, p.slug if p else None), None, i.updated_at,
+                 g == "today", g, sub=i.kind, item_id=i.id))
+        if p is not None and i.id in shown:
+            link(nid, f"project:{p.slug}", "project")
+        elif i.id in unfiled:
+            link(nid, "hub:unfiled", "hub")
+    for a, b, kind in rels:
+        if a in nodes and b in nodes:
+            link(a, b, kind if kind in EDGE_LABELS else "related")
+    return hidden
 
 
 def _neg_iso(iso: str | None) -> float:
@@ -285,8 +445,10 @@ def _neg_iso(iso: str | None) -> float:
 # ---------------------------------------------------------------- layout
 
 
+@lru_cache(maxsize=16384)
 def _hash01(s: str, salt: str = "") -> float:
-    """A stable pseudo-random number in [0, 1) for ``s`` (same on every run)."""
+    """A stable pseudo-random number in [0, 1) for ``s`` (same on every run;
+    cached: the graph asks for the same ones on every frame)."""
     h = hashlib.blake2s((salt + s).encode(), digest_size=8).digest()
     return int.from_bytes(h, "big") / 2**64
 
@@ -314,7 +476,7 @@ def layout(graph: Graph) -> dict[str, tuple[float, float]]:
         for a, b in ((e.a, e.b), (e.b, e.a)):
             if a in parent or a in hub_set or a == "jarvis" or a not in by_id:
                 continue
-            if b in hub_set and e.kind in ("hub", "milestone"):
+            if b in hub_set and e.kind in ("hub", "milestone", "project"):
                 parent[a] = b
     if "hub:commits" in hub_set:
         for k in _strand(graph):
@@ -322,6 +484,13 @@ def layout(graph: Graph) -> dict[str, tuple[float, float]]:
     for e in graph.edges:  # cards sit with the check or issue they are about
         if e.kind == "card" and e.a not in parent and e.b in parent:
             parent[e.a] = parent[e.b]
+    for _ in range(3):  # items without a project sit with what they are linked to
+        for e in graph.edges:
+            if e.kind not in ("about", "related"):
+                continue
+            for a, b in ((e.a, e.b), (e.b, e.a)):
+                if a.startswith("item:") and a not in parent and b in parent:
+                    parent[a] = parent[b]
     groups: dict[str, list[str]] = {h: [] for h in hubs}
     for nid, h in parent.items():
         groups[h].append(nid)
@@ -525,7 +694,8 @@ class BrainData:
     errors: tuple[str, ...] = field(default_factory=tuple)
 
 
-def load_brain(conn: sqlite3.Connection, repo: str, now: datetime | None = None) -> BrainData:
+def load_brain(conn: sqlite3.Connection, repo: str, now: datetime | None = None,
+               loose: bool = False) -> BrainData:
     """Each part fails on its own: a broken one becomes an error line."""
     now = now or datetime.now(UTC)
     errors: list[str] = []
@@ -537,7 +707,7 @@ def load_brain(conn: sqlite3.Connection, repo: str, now: datetime | None = None)
             errors.append(f"Could not read {what}: {e}")
             return default
 
-    graph = safe(lambda: build_graph(conn, repo, now), Graph((), ()), "the project graph")
+    graph = safe(lambda: build_graph(conn, repo, now, loose), Graph((), ()), "the project graph")
     stream = safe(lambda: load_stream(conn, now), (), "the stream")
     vit = safe(lambda: vitals(conn, now), (), "the vitals")
     pul = safe(lambda: pulse(conn, now.astimezone().date()),

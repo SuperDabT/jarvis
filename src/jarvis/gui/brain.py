@@ -18,6 +18,7 @@ from PySide6.QtGui import (
     QColor,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
     QRadialGradient,
@@ -33,8 +34,9 @@ from jarvis.gui.theme import Tokens
 FPS = 30
 HIT_PX = 10
 RADIUS = {"core": 7.5, "hub": 5.0, "milestone": 5.5, "issue": 3.6, "commit": 2.4, "card": 4.2,
-          "check": 3.2, "part": 3.0, "paper": 2.2}
+          "check": 3.2, "part": 3.0, "paper": 2.2, "item": 3.4}
 LABELLED = ("core", "hub", "milestone")
+ITEM_LABELS_MAX = 12  # overdue / today items labelled without hovering (most urgent first)
 
 
 def qc(hex_: str, alpha: float = 1.0) -> QColor:
@@ -163,15 +165,30 @@ class BrainGraph(QWidget):
         if p is None:
             return None
         (sx, sy), c = self._scale(), self._center()
+        x, y = self._unit(node_id, p, self._t())
+        return QPointF(c.x() + x * sx, c.y() + y * sy)
+
+    def _unit(self, node_id: str, p: tuple[float, float], t: float) -> tuple[float, float]:
+        """A node's place in the unit disc right now: drift and first-show reveal."""
         x, y = p
-        t = self._t()
         if t and node_id != "jarvis":  # a slow drift, different per node
             ph = 6.283 * _hash01(node_id, "ph")
             amp = 0.006 + 0.006 * _hash01(node_id, "amp")
             x += amp * math.sin(t * 0.35 + ph)
             y += amp * math.cos(t * 0.29 + ph * 1.3)
-        reveal = self._reveal(node_id)
-        return QPointF(c.x() + x * sx * reveal, c.y() + y * sy * reveal)
+        reveal = self._reveal(node_id) if self._progress < 1.0 else 1.0
+        return x * reveal, y * reveal
+
+    def _screen_all(self, ids) -> dict[str, QPointF]:
+        """screen_pos for many nodes, with the scale, centre and clock read once."""
+        (sx, sy), c, t = self._scale(), self._center(), self._t()
+        cx, cy, out = c.x(), c.y(), {}
+        for nid in ids:
+            p = self.pos.get(nid)
+            if p is not None:
+                x, y = self._unit(nid, p, t)
+                out[nid] = QPointF(cx + x * sx, cy + y * sy)
+        return out
 
     def _reveal(self, node_id: str) -> float:
         p = self._progress
@@ -184,13 +201,16 @@ class BrainGraph(QWidget):
     def node_at(self, x: float, y: float) -> str | None:
         """The visible node under (x, y), nearest first, within HIT_PX."""
         best, best_d = None, HIT_PX + 0.0
+        (sx, sy), c, t = self._scale(), self._center(), self._t()
+        cx, cy = c.x(), c.y()
         for n in self.graph.nodes:
-            if not self.visible(n):
+            if n.kind in self.hidden_kinds:
                 continue
-            sp = self.screen_pos(n.id)
-            if sp is None:
+            p = self.pos.get(n.id)
+            if p is None:
                 continue
-            d = math.hypot(sp.x() - x, sp.y() - y) - RADIUS.get(n.kind, 3)
+            ux, uy = self._unit(n.id, p, t)
+            d = math.hypot(cx + ux * sx - x, cy + uy * sy - y) - RADIUS.get(n.kind, 3)
             if d < best_d:
                 best, best_d = n.id, d
         return best
@@ -297,9 +317,12 @@ class BrainGraph(QWidget):
             p.drawEllipse(c, r * sx, r * sy)
 
         nodes = {n.id: n for n in self.graph.nodes if self.visible(n)}
-        pts = {nid: self.screen_pos(nid) for nid in nodes}
+        pts = self._screen_all(nodes)
         focus = self.focus_set()
         sel = self.lock_id or self.hover_id
+        urgent = [nid for nid, n in nodes.items()      # build order is most urgent first
+                  if n.kind == "item" and n.status in ("overdue", "today")]
+        urgent = set(urgent[:ITEM_LABELS_MAX])
         now = time.monotonic()
         tt = self._t()
 
@@ -330,7 +353,7 @@ class BrainGraph(QWidget):
         lf = theme.mono_font(10)
         p.setFont(lf)
         for nid, n in nodes.items():
-            pt = pts[nid]
+            pt = pts.get(nid)
             if pt is None:
                 continue
             r = RADIUS.get(n.kind, 3.0)
@@ -356,25 +379,62 @@ class BrainGraph(QWidget):
                 p.drawEllipse(pt, r * 4.2, r * 4.2)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(qc(fill, alpha))
-            if n.kind == "card":  # a ring: something to act on
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.setPen(QPen(qc(fill, alpha), 1.6))
-            p.drawEllipse(pt, r, r)
+            if n.kind == "item":  # your own items are squares, not circles
+                self._draw_item(p, n, pt, r, qc(fill, alpha))
+            else:
+                if n.kind == "card":  # a ring: something to act on
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(QPen(qc(fill, alpha), 1.6))
+                p.drawEllipse(pt, r, r)
             if nid == sel:
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(qc(t.ink, 0.9), 1.2))
                 p.drawEllipse(pt, r + 4, r + 4)
             show_label = (n.kind in LABELLED or nid == sel
-                          or (nid in focus and n.kind in ("issue", "milestone", "part"))
-                          or (n.kind == "issue" and n.live))
+                          or (nid in focus and n.kind in ("issue", "milestone", "part", "item"))
+                          or (n.kind == "issue" and n.live)
+                          or nid in urgent)
             if show_label and self._progress > 0.8:
                 p.setPen(qc(t.text if n.kind in ("core", "milestone") or nid in focus
                             else t.muted, 0.35 if dim else 0.95))
                 p.drawText(QPointF(pt.x() + r + 5, pt.y() + 4), n.label)
         p.end()
 
+    def _draw_item(self, p: QPainter, n: Node, pt: QPointF, r: float, color: QColor) -> None:
+        """Task: a filled rounded square. Idea: an outlined diamond. Reminder: an
+        outlined square with a dot."""
+        side = r * 1.9
+        box = QRectF(pt.x() - side / 2, pt.y() - side / 2, side, side)
+        if n.sub == "idea":
+            path = QPainterPath()
+            path.moveTo(pt.x(), pt.y() - r * 1.35)
+            path.lineTo(pt.x() + r * 1.35, pt.y())
+            path.lineTo(pt.x(), pt.y() + r * 1.35)
+            path.lineTo(pt.x() - r * 1.35, pt.y())
+            path.closeSubpath()
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(color, 1.4))
+            p.drawPath(path)
+        elif n.sub == "reminder":
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(color, 1.4))
+            p.drawRoundedRect(box, r * 0.4, r * 0.4)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawEllipse(pt, r * 0.38, r * 0.38)
+        else:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawRoundedRect(box, r * 0.4, r * 0.4)
+
     def _node_color(self, n: Node) -> tuple[str, float]:
         t = self.tokens
+        if n.kind == "item":
+            if n.status == "overdue":
+                return t.red, 0.95
+            if n.status == "today":
+                return t.signal, 1.0
+            return (t.ink, 0.8) if n.status == "upcoming" else (t.ink, 0.5)
         if n.live:
             return t.signal, 1.0
         if n.kind == "core":

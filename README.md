@@ -83,6 +83,10 @@ next two weeks including project milestones, the project's briefing headline, vi
 computed next steps, and recent activity. Tasks lists everything you've captured in Overdue,
 Today, Upcoming and Someday, with filters, an editor (click a row), done, delete and undo.
 Projects is the project cockpit described here; School and Knowledge are placeholders.
+Open items filed under a project (or linked to an issue, a commit or another shown item)
+appear in its graph as small squares by the project's hub; select one to see it, mark it
+done or edit it in Tasks. Items with no project or link stay out unless you press
+"+ unfiled" in the legend.
 
 "Ask Jarvis" on the right (Ctrl+K to type, Ctrl+J to show or hide) answers questions from the
 synced data with sources (issues, commits, checks), using the local model; answers stream in
