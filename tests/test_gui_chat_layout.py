@@ -217,7 +217,7 @@ def test_tasks_and_home_reflow_beside_the_chat(make):
     assert not v.filters_below
     win.show_workspace("home")
     settle(win, (1500, 940))
-    assert win.home_view.columns == 3
+    assert win.home_view.columns == 2 and not win.home_view.narrow
     win.set_chat_open(True)
     settle(win, (980, 600))
     assert win.home_view.columns == 1

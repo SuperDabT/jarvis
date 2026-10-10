@@ -14,8 +14,10 @@ Five sections, Today first and strongest:
 
 Home never ranks, schedules or changes anything by itself: it shows the user's
 data in the order they gave it, and only ticks items off (through the window)
-when asked. Three columns when there is room, two when narrow, one beside the
-chat in a small window. Data comes from home_data.build_home.
+when asked. Layout: Today is the page's main list, full height on the
+background; the other four are flat sections in one side panel, split by
+hairlines. The side panel narrows below NARROW_BELOW and drops under Today in a
+small window (beside the chat). Data comes from home_data.build_home.
 """
 from __future__ import annotations
 
@@ -40,9 +42,10 @@ from jarvis.gui.tasks_view import TaskRow
 from jarvis.gui.theme import Tokens, typeset
 from jarvis.gui.widgets import HoverRow, _clear, _label, repolish
 
-TODAY_MAX = 10
-NARROW_BELOW = 1000   # Home's own width: two columns below this
-SINGLE_BELOW = 640    # ... and one below this (a small window with the chat open)
+TODAY_MAX = 12
+NARROW_BELOW = 1000   # Home's own width: a narrower side panel below this
+SINGLE_BELOW = 640    # ... and one column below this (a small window with the chat open)
+SIDE_W = (400, 330)   # the side panel: wide, narrow
 KIND_TAG = {"milestone": "milestone", "task": "task", "idea": "idea", "reminder": "reminder"}
 
 
@@ -55,6 +58,28 @@ def _link(text: str) -> QPushButton:
 
 def _add_to_head(panel: Panel, w: QWidget) -> None:
     panel.layout().itemAt(0).layout().addWidget(w)
+
+
+ROW_INSET = 6   # hoverable rows pad their text by this; headings line up with it
+
+
+def _flat(panel: Panel, name: str, margins: tuple[int, int, int, int]) -> Panel:
+    """A Panel restyled as a flat section (no card of its own); its heading is
+    inset like the rows so text, checkboxes and headings share one edge."""
+    panel.setObjectName(name)
+    left, top, right, bottom = margins
+    panel.layout().setContentsMargins(left - ROW_INSET, top, right - ROW_INSET, bottom)
+    panel.layout().setSpacing(6)
+    panel.layout().itemAt(0).layout().setContentsMargins(ROW_INSET, 0, ROW_INSET, 0)
+    panel.body.setContentsMargins(0, 0, 0, 0)
+    return panel
+
+
+def _hairline() -> QFrame:
+    line = QFrame()
+    line.setObjectName("hairline")
+    line.setFixedHeight(1)
+    return line
 
 
 class Progress(QWidget):
@@ -89,8 +114,8 @@ class ProjectRow(HoverRow):
         self.summary = s
         self.setToolTip(f"{s.name}: open its items in Tasks")
         col = QVBoxLayout(self)
-        col.setContentsMargins(8, 7, 8, 8)
-        col.setSpacing(3)
+        col.setContentsMargins(ROW_INSET, 5, ROW_INSET, 7)
+        col.setSpacing(2)
         top = QHBoxLayout()
         top.setSpacing(8)
         name = typeset(_label(s.name, "projName"), "value")
@@ -149,23 +174,28 @@ class HomeView(QWidget):
         outer.addWidget(self.scroll)
         page = QWidget()
         self.page = QVBoxLayout(page)
-        self.page.setContentsMargins(20, 16, 20, 16)
-        self.page.setSpacing(14)
+        self.page.setContentsMargins(24, 14, 20, 16)
+        self.page.setSpacing(12)
         self.scroll.setWidget(page)
 
         # greeting row
         head = QHBoxLayout()
         head.setSpacing(12)
         titles = QVBoxLayout()
-        titles.setSpacing(2)
+        titles.setSpacing(1)
         self.greeting = _label("", "wsTitle")
         titles.addWidget(self.greeting)
+        sub = QHBoxLayout()
+        sub.setSpacing(6)
+        self.date = typeset(_label("", "homeDate"), "body")
+        sub.addWidget(self.date)
+        sub.addWidget(typeset(_label("·", "homeDate"), "body"))
         self.attention = _label("", "homeAttention", rich=True)
-        titles.addWidget(self.attention)
-        head.addLayout(titles)
-        head.addStretch(1)
-        self.date = typeset(_label("", "wsSub"), "meta")
-        head.addWidget(self.date, 0, Qt.AlignmentFlag.AlignBottom)
+        typeset(self.attention, "body")
+        sub.addWidget(self.attention)
+        sub.addStretch(1)
+        titles.addLayout(sub)
+        head.addLayout(titles, 1)
         self.capture_btn = QPushButton("+ Capture")
         self.capture_btn.setObjectName("primary")
         self.capture_btn.setToolTip("Quick capture (Ctrl+N)")
@@ -175,16 +205,15 @@ class HomeView(QWidget):
         self.page.addLayout(head)
 
         # sections
-        self.today = Panel("Today")
-        self.today.setProperty("emphasis", "true")
+        self.today = _flat(Panel("Today"), "homeMain", (ROW_INSET, 4, ROW_INSET, 0))
         typeset(self.today.head, "title")
-        self.deadlines = Panel("Upcoming", "next 14 days")
-        self.inbox = Panel("Inbox", "no date, no project")
-        self.project = Panel("Projects")
-        self.overview = Panel("Overview")
-        for p in (self.deadlines, self.inbox, self.project):
-            p.body.setSpacing(2)
-        self.today.body.setSpacing(1)
+        self.deadlines = _flat(Panel("Upcoming", "next 14 days"), "homeSection", (14, 11, 14, 11))
+        self.inbox = _flat(Panel("Inbox", "no date, no project"), "homeSection",
+                           (14, 11, 14, 11))
+        self.project = _flat(Panel("Projects"), "homeSection", (14, 11, 14, 12))
+        self.overview = _flat(Panel("Overview"), "homeSection", (14, 11, 14, 11))
+        for p in (self.deadlines, self.inbox, self.project, self.today):
+            p.body.setSpacing(0)
         self.today_link = _link("All tasks →")
         self.today_link.clicked.connect(lambda: self.open_workspace.emit("tasks"))
         _add_to_head(self.today, self.today_link)
@@ -192,62 +221,65 @@ class HomeView(QWidget):
         self.project_link.clicked.connect(lambda: self.open_workspace.emit("projects"))
         _add_to_head(self.project, self.project_link)
         self.grid = QGridLayout()
-        self.grid.setSpacing(12)
-        self.cols: list[QWidget] = []
-        for c in range(3):
-            col = QWidget()
-            lay = QVBoxLayout(col)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(12)
-            lay.addStretch(1)
-            self.grid.addWidget(col, 0, c)
-            self.cols.append(col)
-        self.page.addLayout(self.grid)
+        self.grid.setHorizontalSpacing(20)
+        self.grid.setVerticalSpacing(14)
+        # the side panel: four flat sections split by hairlines
+        self.side = QFrame()
+        self.side.setObjectName("homeSide")
+        self.side.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        side = QVBoxLayout(self.side)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(0)
+        for i, p in enumerate((self.overview, self.deadlines, self.inbox, self.project)):
+            if i:
+                side.addWidget(_hairline())
+            side.addWidget(p)
+        side.addStretch(1)
+        self.page.addLayout(self.grid, 1)
         self.errors = _label("", "fieldError", wrap=True)
         self.errors.hide()
         self.page.addWidget(self.errors)
-        self.page.addStretch(1)
         self.today_rows: list[TaskRow] = []
         self.inbox_rows: list[TaskRow] = []
         self.deadline_rows: list[QWidget] = []
         self.project_rows: list[ProjectRow] = []
         self.stats: dict[str, QWidget] = {}
-        self._place(3)
+        self._place(2)
+        self._side_width(False)
 
     # ------------------------------------------------------------ layout
 
-    def _panels(self) -> tuple[Panel, ...]:
-        return (self.today, self.deadlines, self.inbox, self.project, self.overview)
-
     def _place(self, columns: int) -> None:
-        """Panels into ``columns`` independent stacks (a short panel never leaves
-        a gap beside a tall one)."""
+        """Two columns (Today, the side panel), or one: the side panel under
+        Today. ``narrow``: the side panel at its narrower width (or below)."""
         if columns == self.columns:
             return
         self.columns = columns
-        self.narrow = columns < 3
-        for p in self._panels():
-            p.setParent(None)
-        for c, col in enumerate(self.cols):
-            col.setVisible(c < columns)
-            self.grid.setColumnStretch(c, 0)
-        stacks = {
-            1: ((self.today, self.deadlines, self.inbox, self.project, self.overview),),
-            2: ((self.today, self.inbox), (self.overview, self.deadlines, self.project)),
-            3: ((self.today,), (self.deadlines, self.inbox), (self.overview, self.project)),
-        }[columns]
-        stretch = {1: (1,), 2: (5, 4), 3: (5, 4, 3)}[columns]
-        for c, panels in enumerate(stacks):
-            lay = self.cols[c].layout()
-            for p in panels:
-                lay.insertWidget(lay.count() - 1, p)    # above the stretch
-                p.show()
-            self.grid.setColumnStretch(c, stretch[c])
+        self.grid.removeWidget(self.today)
+        self.grid.removeWidget(self.side)
+        self.grid.setColumnStretch(0, 1)
+        top = Qt.AlignmentFlag.AlignTop
+        if columns == 1:
+            self.grid.addWidget(self.today, 0, 0, top)
+            self.grid.addWidget(self.side, 1, 0, top)
+            self.side.setMinimumWidth(0)
+            self.side.setMaximumWidth(16777215)
+            self.grid.setColumnStretch(1, 0)
+        else:
+            self.grid.addWidget(self.today, 0, 0)
+            self.grid.addWidget(self.side, 0, 1)
+            self.grid.setRowStretch(0, 1)
+
+    def _side_width(self, narrow: bool) -> None:
+        self.narrow = narrow
+        if self.columns == 2:
+            self.side.setFixedWidth(SIDE_W[1] if narrow else SIDE_W[0])
 
     def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(e)
         w = self.width()
-        self._place(1 if w < SINGLE_BELOW else 2 if w < NARROW_BELOW else 3)
+        self._place(1 if w < SINGLE_BELOW else 2)
+        self._side_width(w < NARROW_BELOW)
 
     # ------------------------------------------------------------ data
 
@@ -273,6 +305,7 @@ class HomeView(QWidget):
 
     def _task(self, row, box) -> TaskRow:
         w = TaskRow(row, self.tokens, compact=True)
+        w.layout().setContentsMargins(ROW_INSET, 5, ROW_INSET, 5)
         w.toggled.connect(self.complete)
         w.selected.connect(self.open_item)
         box.addWidget(w)
@@ -306,6 +339,7 @@ class HomeView(QWidget):
             self._empty(self.today.body, "Nothing due today or overdue.",
                         "Things you give a date show up here on the day. "
                         "Capture with Ctrl+N; nothing is scheduled for you.")
+        self.today.body.addStretch(1)     # the list starts at the top of the column
 
     def _fill_deadlines(self, d: HomeData) -> None:
         _clear(self.deadlines.body)
@@ -313,11 +347,11 @@ class HomeView(QWidget):
         for dl in d.deadlines:
             row = QWidget()
             lay = QHBoxLayout(row)
-            lay.setContentsMargins(2, 4, 2, 4)
+            lay.setContentsMargins(ROW_INSET, 3, ROW_INSET, 3)
             lay.setSpacing(10)
             when = typeset(_label(dl.label + (f" {dl.time}" if dl.time else ""),
                                   "deadlineWhen"), "label")
-            when.setFixedWidth(118)
+            when.setFixedWidth(when.fontMetrics().horizontalAdvance("Wed Oct 14 12:00 PM") + 4)
             lay.addWidget(when, 0, Qt.AlignmentFlag.AlignTop)
             title = _label(dl.title, "deadlineTitle", wrap=True)
             lay.addWidget(title, 1)
@@ -364,22 +398,28 @@ class HomeView(QWidget):
             self._empty(self.overview.body, "No item data.", "")
             return
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setContentsMargins(ROW_INSET, 0, ROW_INSET, 0)
+        row.setSpacing(18)
         for key, value, label, level in (
                 ("done", o.done_week, "done · 7 days", "good" if o.done_week else ""),
                 ("open", o.open, "open", ""),
                 ("overdue", o.overdue, "overdue", "bad" if o.overdue else "")):
-            cell = QVBoxLayout()
-            cell.setSpacing(0)
-            num = typeset(_label(str(value), "statNum"), "big")
+            pair = QHBoxLayout()
+            pair.setSpacing(5)
+            num = typeset(_label(str(value), "statNum"), "title")
             num.setProperty("tone", level)
-            cell.addWidget(num)
-            cell.addWidget(typeset(_label(label, "vKey"), "meta"))
-            row.addLayout(cell, 1)
+            pair.addWidget(num, 0, Qt.AlignmentFlag.AlignBaseline)
+            pair.addWidget(typeset(_label(label, "vKey"), "meta"), 0,
+                           Qt.AlignmentFlag.AlignBaseline)
+            row.addLayout(pair)
             self.stats[key] = num
+        row.addStretch(1)
         self.overview.body.addLayout(row)
 
     def _empty(self, box, title: str, hint: str) -> None:
-        box.addWidget(_label(title, "homeEmpty", wrap=True))
-        if hint:
-            box.addWidget(_label(hint, "homeEmptyHint", wrap=True))
+        """One quiet line (and a fainter hint): an empty section stays small."""
+        for text, name, role in ((title, "homeEmpty", "body"), (hint, "homeEmptyHint", "meta")):
+            if text:
+                lb = typeset(_label(text, name, wrap=True), role)
+                lb.setContentsMargins(ROW_INSET, 0, ROW_INSET, 0)
+                box.addWidget(lb)

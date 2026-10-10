@@ -455,7 +455,7 @@ QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
 /* workspaces: Tasks + Home */
 #wsTitle {{ color: {t.text}; font-family: {sans}; font-size: 22px; font-weight: 600; }}
 #wsSub {{ color: {t.faint}; font-family: {sans}; font-size: 12px; }}
-#homeAttention {{ color: {t.muted}; font-family: {sans}; font-size: 14px; font-weight: 400; }}
+#homeAttention {{ color: {t.muted}; font-family: {sans}; font-size: 13px; font-weight: 400; }}
 #taskSection {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 10px; }}
 #sectionHead {{ color: {t.muted}; font-family: {sans}; font-size: 12px; }}
 #sectionHead[group="overdue"] {{ color: {t.red}; }}
@@ -511,8 +511,10 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 #emptyState {{ background: {t.panel}; border: 1px dashed {t.border_strong}; border-radius: 10px; }}
 #emptyTitleSm {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
 #homeHeadline {{ color: {t.text}; font-family: {sans}; font-size: 15px; font-weight: 600; }}
-#panel[emphasis="true"] {{ background: {t.tint(0.07)}; border-color: {t.tint(0.08)}; }}
-#homeGroup {{ color: {t.faint}; padding: 6px 2px 2px 2px; }}
+#homeMain, #homeSection {{ background: transparent; border: none; }}
+#homeSide {{ background: {t.panel}; border: 1px solid {t.tint(0.045)}; border-radius: 10px; }}
+#homeDate {{ color: {t.muted}; }}
+#homeGroup {{ color: {t.faint}; padding: 10px 6px 3px 6px; }}
 #homeGroup[level="late"] {{ color: {t.red}; }}
 #projName {{ color: {t.text}; }}
 #projNext {{ color: {t.muted}; }}
