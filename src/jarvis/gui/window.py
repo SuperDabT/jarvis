@@ -341,6 +341,7 @@ class MainWindow(QMainWindow):
                 w.open_node.connect(self.select_node)
                 w.open_item.connect(self.open_item)
                 w.open_project.connect(self.open_project_items)
+                w.ask.connect(self.ask_jarvis)
             else:
                 w = PlaceholderPage(ws.key, self.tokens)
                 w.open_projects.connect(lambda: self.show_workspace("projects"))
@@ -746,11 +747,29 @@ class MainWindow(QMainWindow):
         self.tasks_view.reload()
         try:
             home = build_home(self.conn, data, brain, self._now_fn(),
-                              project_name=self._project_name(), repo=self.cfg.repo)
+                              project_name=self._project_name(), repo=self.cfg.repo,
+                              name=self._user_name())
         except sqlite3.Error as e:
             self.set_status(f"Could not read Home: {e}", "warn", sticky=True)
             return
         self.home_view.set_data(home)
+
+    def _user_name(self) -> str:
+        """The greeting's name: JARVIS_NAME (environment or ~/.config/jarvis/env)."""
+        if not hasattr(self, "_name_cache"):
+            from jarvis.config import env_value
+            self._name_cache = env_value("JARVIS_NAME") or ""
+        return self._name_cache
+
+    def ask_jarvis(self, question: str) -> None:
+        """Open the chat and ask ``question`` (from Home's buttons); "" just opens it."""
+        self.set_chat_open(True, focus=not question)
+        if not question:
+            self.chat.focus_input()
+        elif self.chat.turn_busy:
+            self.set_status("Jarvis is still answering; ask again when it's done.", "warn")
+        else:
+            self.chat.ask(question)
 
     def open_item(self, item_id: int) -> None:
         """Edit an item in Tasks (from the graph's inspector). Filters that would

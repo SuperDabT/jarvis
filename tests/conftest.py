@@ -21,6 +21,13 @@ os.environ["JARVIS_REDUCE_MOTION"] = "1"
 os.environ["JARVIS_UI_SETTINGS"] = os.path.join(tempfile.mkdtemp(prefix="jarvis-ui-"),
                                                 "ui.ini")
 os.environ["JARVIS_DB"] = os.path.join(tempfile.mkdtemp(prefix="jarvis-db-"), "jarvis.db")
+# Values Jarvis reads from ~/.config/jarvis/env (the name, the Canvas link) come from an
+# empty scratch file, never the user's (which also holds their tokens).
+os.environ.pop("JARVIS_NAME", None)
+os.environ.pop("JARVIS_CANVAS_ICS", None)
+import jarvis.config as _config  # noqa: E402
+
+_config.ENV_FILE = Path(tempfile.mkdtemp(prefix="jarvis-env-")) / "env"
 
 REAL_DATA_DIR = Path("~/.local/share/jarvis").expanduser().resolve()
 _real_connect = sqlite3.connect

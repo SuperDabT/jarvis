@@ -155,11 +155,24 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   type and project, a side editor (due / remind accept dates or phrases like "tomorrow 5pm",
   worked out without a model), done / reopen, delete with Undo, and Done / Deleted sections to
   reopen or restore. New items come from quick capture. GitHub issues never appear here.
-- Home (`gui/home_view.py`, data in `gui/home_data.py`): greeting and what needs attention,
-  today (overdue first, tick off in place), upcoming deadlines (items and open milestones,
-  14 days), the project's briefing headline and vitals, the computed next steps (top 3, from
-  `WindowData.next_steps`, never the model) and recent activity. Three columns, two below
-  1000 px, one below 640 px. Each section fails on its own.
+- Home (`gui/home_view.py`, widgets in `gui/home_cards.py`, navy palette in
+  `gui/home_style.py`, data in `gui/home_data.py`): a dashboard on real data. A banner (the
+  greeting with `JARVIS_NAME`, the date, a quote of the day, a CC0 photo per day from
+  `gui/images/`, credited in `CREDITS.md`; `~/.config/jarvis/banner.jpg` overrides). Then:
+  - Today's Focus: the top three attention signals.
+  - Upcoming Deadlines: items, Canvas entries, milestones.
+  - Projects Health: progress, plus milestone risk for the GitHub project.
+  - Quick Stats: real counts; focus time, sleep and training show "Not tracked".
+  - Today at a glance: counts, the top priority with its reason, and the study check's
+    suggestion with "Plan it" (opens the chat).
+  - Weekly Overview: due per day as Study / Work / Personal.
+  - Recent Activity and Projects Snapshot.
+  - Right column: Today's Schedule (overdue, timed, any time; tick off in place; ‹ › through
+    7 days), Upcoming, Quick Actions (Add task, Ask Jarvis, Before I study, Open projects) and
+    a quote card.
+  The right column sits beside the cards from 1180 px of Home's width, under them below that.
+  No durations or invented data; each section fails on its own. Home only: the rail and
+  header keep the charcoal theme.
 - The window's `reload()` (file watcher, 30 s poll, after capture and after every write)
   refreshes Tasks and Home; each rebuilds only when its data changed. A `clock=` argument
   fixes "now" for tests and screenshots.
@@ -275,7 +288,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 1028 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 1050 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

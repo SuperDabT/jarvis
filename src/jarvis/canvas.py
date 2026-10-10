@@ -18,7 +18,6 @@ deadlines. The feed doesn't say whether something was submitted.
 """
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -28,6 +27,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jarvis import planning
+from jarvis.config import env_value
 from jarvis.db import now_iso
 
 ENV_VAR = "JARVIS_CANVAS_ICS"
@@ -39,24 +39,11 @@ KEEP_PAST_DAYS = 30         # older entries in the feed aren't imported
 _COURSE_RE = re.compile(r"\s*\[([^\[\]]{1,120})\]\s*$")
 
 
-ENV_FILE = "~/.config/jarvis/env"
-
-
-def feed_url(env: dict[str, str] | None = None, env_file: str | Path = ENV_FILE) -> str | None:
+def feed_url(env: dict[str, str] | None = None,
+             env_file: str | Path | None = None) -> str | None:
     """The feed link: ``$JARVIS_CANVAS_ICS``, else its line in the env file (which the
     service loads, but a terminal doesn't). None when it isn't set."""
-    value = (env if env is not None else os.environ).get(ENV_VAR, "").strip()
-    if value:
-        return value
-    try:
-        text = Path(env_file).expanduser().read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        key, sep, val = line.strip().removeprefix("export ").partition("=")
-        if sep and key.strip() == ENV_VAR:
-            return val.strip().strip("'\"") or None
-    return None
+    return env_value(ENV_VAR, env, env_file)
 
 
 class FeedError(RuntimeError):

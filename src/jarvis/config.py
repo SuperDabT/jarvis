@@ -17,6 +17,27 @@ DEFAULT_TTS_URL = "http://127.0.0.1:8880"   # Kokoro (kokoro-tts.service)
 DEFAULT_VOICE = "bm_george"
 
 
+ENV_FILE = Path("~/.config/jarvis/env")
+
+
+def env_value(key: str, env: dict[str, str] | None = None,
+              env_file: str | Path | None = None) -> str | None:
+    """``$key``, else its line in the env file (the service loads that file, but the
+    window and a terminal don't). None when it isn't set. Never logged."""
+    value = (env if env is not None else os.environ).get(key, "").strip()
+    if value:
+        return value
+    try:
+        text = Path(env_file or ENV_FILE).expanduser().read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        k, sep, v = line.strip().removeprefix("export ").partition("=")
+        if sep and k.strip() == key:
+            return v.strip().strip("'\"") or None
+    return None
+
+
 @dataclass(frozen=True)
 class Config:
     repo: str = DEFAULT_REPO

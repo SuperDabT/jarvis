@@ -242,37 +242,47 @@ def test_capture_updates_tasks_and_home_at_once(make):
 # ---------------------------------------------------------------- home
 
 
+def _texts(w) -> list[str]:
+    from PySide6.QtWidgets import QLabel
+    return [lb.text() for lb in w.findChildren(QLabel)]
+
+
 def test_home_populated(make):
     win, _ = make()
     h = win.home_view
-    assert h.greeting.text() == "Good afternoon."
-    assert "1 overdue" in h.attention.text() and "2 due today" in h.attention.text()
-    assert [r.row.title for r in h.today_rows] == ["late lab", "study", "filter"]
-    assert h.today.head.text() == "Today · 3"
-    dl = [r.findChildren(type(h.greeting))[1].text() for r in h.deadline_rows]
-    assert dl == ["servos", "Core demo"]
-    # the inbox: open, no date, no project
-    assert [r.row.title for r in h.inbox_rows] == ["server"]
-    assert h.inbox.head.text() == "Inbox · 1"
-    # projects: open work and the next item by date; the GitHub one has its milestone
+    assert h.greeting.text() == "Good afternoon"
+    assert h.scroll.widget().objectName() == "homePage"       # Home's own palette
+    # Today's Schedule: overdue first, then timed, then any time; ticking needs items
+    assert [r.row.title for r in h.today_rows] == ["late lab", "filter", "study"]
+    assert [r.row.time for r in h.today_rows] == ["Wed Oct 7", "6:00 PM", ""]
+    # Today's Focus follows attention.picture; the deadlines card counts what's ahead
+    assert [r.title_text for r in h.focus_rows] == [f.head for f in h.data.focus]
+    assert [r.title_text for r in h.deadline_rows] == ["servos", "Core demo"]
+    assert h.deadline_card.count.text() == "2"
+    # projects: progress and the GitHub milestone's risk
     lidar = next(r.summary for r in h.project_rows if r.summary.slug == "lidar")
-    assert (lidar.open, lidar.done, lidar.next_title) == (2, 0, "filter")
-    assert lidar.next_when == "today" and lidar.milestone == "Core demo"
-    assert lidar.milestone_due == "due Sun Oct 18"
-    # overview: real counts
-    o = h.data.overview
-    assert (o.done_week, o.open, o.overdue) == (0, 5, 1)
-    assert h.stats["overdue"].text() == "1" and h.stats["overdue"].property("tone") == "bad"
+    assert lidar.milestone == "Core demo" and lidar.milestone_due == "due Sun Oct 18"
+    # quick stats: real numbers, and what Jarvis can't know says so
+    assert h.stats["Overdue"].text() == "1"
+    assert [h.stats[k].text() for k in ("Focus time", "Sleep", "Training")] == \
+        ["Not tracked"] * 3
+    # the glance, top priority and recommendation
+    assert h.count_labels["overdue"].text() == "1 overdue item"
+    assert h.priority_title.text() == h.data.top_priority.head
+    assert h.recommend_text.text() == h.data.recommendation.text
+    assert "Weather not set up" in _texts(h.banner)
 
 
 def test_home_empty(make):
     win, _ = make(items=False, data=False)
     h = win.home_view
-    assert h.attention.text() == "Nothing due today"
-    assert h.today_rows == [] and h.deadline_rows == [] and h.inbox_rows == []
-    texts = [w.text() for w in h.findChildren(type(h.greeting)) if w.objectName() == "homeEmpty"]
-    assert "Nothing due today or overdue." in texts and "Inbox is clear." in texts
-    assert [h.stats[k].text() for k in ("done", "open", "overdue")] == ["0", "0", "0"]
+    assert h.today_rows == [] and h.focus_rows == [] and h.deadline_rows == []
+    texts = _texts(h)
+    for line in ("Nothing needs attention right now.", "Nothing due in the next two weeks.",
+                 "Nothing on this day.", "Nothing in the last week."):
+        assert line in texts
+    assert h.priority_title.text() == "Nothing pressing" and h.priority_btn.isHidden()
+    assert h.count_labels["overdue"].text() == "0 overdue items"
 
 
 def test_home_ticks_off_and_links(make, app):
@@ -280,8 +290,8 @@ def test_home_ticks_off_and_links(make, app):
     h = win.home_view
     first = h.today_rows[0]
     first.check.click()
-    assert it.get_item(conn, first.row.id).done
-    assert [r.row.title for r in win.home_view.today_rows] == ["study", "filter"]
+    assert it.get_item(conn, first.row.item_id).done
+    assert [r.row.title for r in win.home_view.today_rows] == ["filter", "study"]
     h.today_link.click()
     assert win.workspace == "tasks"
     win.show_workspace("home")
@@ -293,6 +303,30 @@ def test_home_ticks_off_and_links(make, app):
     assert win.capture.isVisible()
 
 
+def test_home_buttons_open_the_chat_with_a_request(make, app, monkeypatch):
+    win, _ = make()
+    asked: list[str] = []
+    monkeypatch.setattr(win.chat, "ask", asked.append)
+    h = win.home_view
+    h.actions["Before I study"].click()
+    h.plan_btn.click()
+    h.actions["Ask Jarvis"].click()
+    app.processEvents()
+    assert win.chat.isVisible()
+    assert asked == ["I'm about to study, what should I focus on?",
+                     h.data.recommendation.ask]
+
+
+def test_home_schedule_steps_through_days(make):
+    win, _ = make()
+    h = win.home_view
+    assert not h.prev_day.isEnabled() and h.schedule_card.title.text() == "Today's Schedule"
+    for _ in range(3):
+        h.next_day.click()
+    assert h.day_label.text() == "Mon Oct 12" and h.schedule_card.title.text() == "Schedule"
+    assert [r.row.title for r in h.today_rows] == ["servos"]
+
+
 def test_home_opens_items_and_projects_and_writes_nothing(make):
     win, conn = make()
     h = win.home_view
@@ -300,8 +334,8 @@ def test_home_opens_items_and_projects_and_writes_nothing(make):
     win.reload()
     assert conn.total_changes == before              # reading Home changes nothing
     row = next(r for r in h.today_rows if r.row.title == "study")
-    row.selected.emit(row.row.id)
-    assert win.workspace == "tasks" and win.tasks_view.selected_id == row.row.id
+    row.selected.emit(row.row.item_id)
+    assert win.workspace == "tasks" and win.tasks_view.selected_id == row.row.item_id
     win.show_workspace("home")
     next(r for r in h.project_rows if r.summary.slug == "lidar").click()
     assert win.workspace == "tasks" and win.tasks_view.project_filter == "lidar"
@@ -311,7 +345,7 @@ def test_home_done_counts_only_the_last_week(make):
     win, conn = make()
     late = it.create_item(conn, "old", now=NOW - timedelta(days=10), tz=LA)
     it.complete_item(conn, late, now=NOW - timedelta(days=9))
-    it.complete_item(conn, next(r.row.id for r in win.home_view.today_rows), now=NOW)
+    it.complete_item(conn, next(r.row.item_id for r in win.home_view.today_rows), now=NOW)
     conn.commit()
     win.reload()
     o = win.home_view.data.overview
@@ -321,12 +355,14 @@ def test_home_done_counts_only_the_last_week(make):
 def test_home_reflows_at_the_minimum_size(make, app):
     win, _ = make()
     h = win.home_view
-    assert h.narrow is False
+    assert h.narrow is False and h.columns == 2
+    x = lambda w: w.mapTo(h, w.rect().topLeft()).x()  # noqa: E731
+    assert x(h.schedule_card) > x(h.stats_card)          # the right column beside
     win.resize(980, 600)
     app.processEvents()
-    assert h.narrow is True
-    x = lambda w, pt: w.mapTo(h, pt).x()  # noqa: E731 - panels sit in column stacks
-    assert x(h.today, h.today.rect().topRight()) < x(h.project, h.project.rect().topLeft())
+    assert h.narrow is True and h.columns == 1
+    y = lambda w: w.mapTo(h, w.rect().topLeft()).y()  # noqa: E731
+    assert y(h.schedule_card) > y(h.week_card)            # ... and under the cards
     win.resize(1500, 940)
     app.processEvents()
     assert h.narrow is False
@@ -388,3 +424,16 @@ def test_chat_proposal_card_applies_or_dismisses(make, app, apply):
         assert it.get_item(conn, study.id).remind_at is None
         assert "Nothing was changed" in card.result.text()
     assert not card.apply_btn.isEnabled()
+
+
+def test_home_photos_rotate_by_day_and_fall_back(app, tmp_path):
+    from jarvis.gui import home_cards as hc
+    bundled = sorted(hc.IMAGES.glob("banner-*.jpg"))
+    assert len(bundled) >= 2 and (hc.IMAGES / "CREDITS.md").is_file()
+    for f in [*bundled, *hc.IMAGES.glob("quote-*.jpg")]:
+        assert f.name in (hc.IMAGES / "CREDITS.md").read_text()      # every photo credited
+    a = hc.photo("banner", 0, hc.IMAGES)
+    b = hc.photo("banner", 1, hc.IMAGES)
+    assert a is not None and b is not None and a.cacheKey() != b.cacheKey()
+    assert hc.photo("banner", 0, tmp_path) is None                   # none: the gradient
+    assert hc.photo("quote", 3, hc.IMAGES) is not None

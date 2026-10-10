@@ -216,3 +216,137 @@ def test_home_sections_fail_on_their_own(conn):
                                         (19, "Good evening."), (2, "Good evening.")])
 def test_greeting(hour, text):
     assert hd.greeting(datetime(2026, 10, 9, hour, tzinfo=LA)) == text
+
+
+# ---------------------------------------------------------------- the dashboard
+
+
+def _canvas(conn, *entries):
+    from jarvis import canvas
+    canvas.store(conn, [canvas.CanvasEvent(f"event-assignment-{k}", "assignment", t,
+                                           "COMSC-230-5148", w)
+                        for k, (t, w) in enumerate(entries)], NOW)
+
+
+def test_dashboard_focus_matches_the_attention_ranking(conn):
+    from jarvis import attention
+    board(conn)
+    h = hd.build_home(conn, None, None, NOW, LA)
+    sigs = attention.picture(conn, NOW).signals
+    assert [f.head for f in h.focus] == [s.head for s in sigs[:3]]
+    assert h.top_priority == h.focus[0]
+    assert (h.focus[0].head, h.focus[0].note, h.focus[0].tone) == (
+        "study", "due today", "amber")
+    assert h.top_priority.item_id is not None
+    assert h.top_why == "Due today."
+
+
+def test_dashboard_glance_and_recommendation(conn):
+    board(conn)
+    h = hd.build_home(conn, None, None, NOW, LA)
+    # overdue as the Today list counts it; due this week = today's commitments still
+    # ahead (cat food, filter) and what is due later (servos, homework)
+    assert h.glance == hd.Glance(overdue=2, due_week=4, at_risk=0, done_week=1)
+    # late call (9:00) has passed: cat food (5:00 PM) is the next fixed commitment
+    assert h.recommendation.text == ("Cat food is the soonest fixed commitment, so it is the "
+                                     "natural focus; study is due the same day.")
+    assert h.recommendation.ask == "I'm about to study, what should I focus on?"
+
+
+def test_dashboard_stats_are_real_or_say_not_tracked(conn):
+    board(conn)
+    done = mk(conn, "done thing")
+    it.complete_item(conn, done.id, now=NOW)
+    h = hd.build_home(conn, None, None, NOW, LA)
+    stats = {s.label: s for s in h.stats}
+    assert (stats["Tasks completed"].value, stats["Tasks completed"].delta) == (
+        "1", "+1 vs last week")      # board's "done one" is completed at the real clock
+    assert stats["Overdue"].value == "2" and stats["Overdue"].tone == "bad"
+    assert [stats[k].value for k in ("Focus time", "Sleep", "Training")] == [None] * 3
+
+
+def test_dashboard_week_counts_whats_due_by_category(conn):
+    board(conn)
+    _canvas(conn, ("Video Quiz 3", "2026-10-06"), ("Lab 4", "2026-10-09T23:59"))
+    h = hd.build_home(conn, None, None, NOW, LA)
+    assert [b.label for b in h.week] == ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    fri = h.week[4]
+    assert (fri.today, fri.study, fri.work, fri.personal) == (True, 1, 1, 3)
+    assert (h.week[1].study, h.week[2].personal) == (1, 1)     # Tue quiz; Wed late lab
+
+
+def test_dashboard_schedule_lists_the_day_late_timed_then_any_time(conn):
+    board(conn)
+    _canvas(conn, ("Lab 4", "2026-10-09T23:59"), ("Reading", "2026-10-09"))
+    mk(conn, "Physics midterm", due="2026-10-10T10:00")
+    h = hd.build_home(conn, None, None, NOW, LA)
+    day, slots = h.schedule[0]
+    assert day == TODAY
+    assert [(s.time, s.title, s.category, s.late) for s in slots] == [
+        ("Wed Oct 7", "late lab", "Personal", True), ("Late", "late call", "Personal", True),
+        ("5:00 PM", "cat food", "Personal", False), ("6:00 PM", "filter", "Work", False),
+        ("11:59 PM", "Lab 4 (COMSC-230)", "Study", False),
+        ("", "study", "Personal", False), ("", "Reading (COMSC-230)", "Study", False)]
+    assert [(s.time, s.title, s.category) for s in h.schedule[1][1]] == [
+        ("10:00 AM", "Physics midterm", "Exam")]
+    assert len(h.schedule) == hd.SCHEDULE_DAYS
+
+
+def test_dashboard_canvas_in_deadlines_and_upcoming(conn):
+    board(conn)
+    _canvas(conn, ("Video Quiz 3", "2026-10-13"))
+    h = hd.build_home(conn, None, None, NOW, LA)
+    quiz = next(d for d in h.deadlines if d.title == "Video Quiz 3")
+    assert (quiz.kind, quiz.project) == ("canvas", "COMSC-230")
+    assert all(d.day > TODAY for d in h.upcoming) and len(h.upcoming) <= hd.UPCOMING_MAX
+
+
+def test_dashboard_recent_activity(conn):
+    done = mk(conn, "Submit form")
+    it.complete_item(conn, done.id, now=NOW)
+    brain = SimpleNamespace(stream=(SimpleNamespace(kind="commit", when="2026-10-09T20:00:00+00:00",
+                                                    text="Fix the servo jitter"),))
+    h = hd.build_home(conn, None, brain, NOW, LA)
+    texts = [a.text for a in h.recent]
+    assert texts == ["Completed: Submit form", "Added: Submit form",
+                     "Commit: Fix the servo jitter"]
+    assert "Commit: Fix the servo jitter" in texts and len(h.recent) <= hd.RECENT_MAX
+    assert next(a for a in h.recent if a.text == "Commit: Fix the servo jitter").ago == "2h ago"
+
+
+def test_dashboard_name_quote_and_salutation(conn):
+    h = hd.build_home(conn, None, None, NOW, LA, name="Tal")
+    assert h.name == "Tal" and hd.salutation(NOW, h.name) == "Good afternoon, Tal"
+    assert hd.salutation(NOW) == "Good afternoon"
+    assert h.quote == hd.quote_of(TODAY) and h.quote != hd.quote_of(date(2026, 10, 10))
+
+
+def test_dashboard_never_states_a_duration(conn):
+    import re
+    board(conn)
+    h = hd.build_home(conn, None, None, NOW, LA)
+    text = repr(h)
+    # elapsed facts ("6 h late", "2h ago") are fine; an estimate ("2h", "1.5 hours") isn't
+    assert not re.search(r"\b\d+(?:\.\d+)?\s*(?:h|hrs?|hours?|min|minutes?)\b"
+                         r"(?! (?:ago|late))", text)
+
+
+def test_dashboard_project_progress_and_risk(conn):
+    board(conn)
+    db.upsert_milestone(conn, {"number": 1, "title": "Core demo", "state": "open",
+                               "due_on": "2026-10-12T07:00:00Z", "open_issues": 4,
+                               "closed_issues": 1})
+    conn.execute("UPDATE projects SET github_repo = 'SuperDabT/stm32-lidar-scanner'")
+    h = hd.build_home(conn, None, None, NOW, LA, repo="SuperDabT/stm32-lidar-scanner")
+    p = next(x for x in h.projects if x.slug == "lidar")
+    assert (p.milestone_closed, p.milestone_total, p.progress) == (1, 5, 0.2)
+    assert (p.risk, p.risk_tone) == ("At risk", "warn") and p.last_activity
+    assert h.glance.at_risk == 1
+
+
+def test_dashboard_empty(conn):
+    h = hd.build_home(conn, None, None, NOW, LA)
+    assert (h.focus, h.top_priority, h.recent, h.upcoming) == ((), None, (), ())
+    assert h.glance == hd.Glance(0, 0, 0, 0)
+    assert all(not slots for _, slots in h.schedule)
+    assert h.recommendation.text.startswith("Nothing on your list is pressing")

@@ -130,7 +130,7 @@ def test_study_check(conn, tmp_path, week):
         "- **Thu Oct 15**\n   - Buy a present for Mom\n\n"
         "**Overdue**\n- Reply to Dana (2 days)\n\n"
         "*Suggestion: Calculus exam is the soonest fixed commitment, so it is the natural "
-        "focus; Lab report lands right after it.*")
+        "focus; Lab report is due right after it.*")
 
 
 def test_study_check_without_an_exam_points_at_the_soonest_deadline(conn):
