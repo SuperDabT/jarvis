@@ -1,7 +1,8 @@
 """Colour tokens, fonts and the stylesheet: Jarvis's "project brain" look.
 
-Dark only. A forest-green near-black base (#031211) with grey-green ink text
-(#DCE8E2); panels are the base lifted a little. One teal mint (#52E3A4) marks
+Dark only. A neutral charcoal base (#161719) with near-white ink (#E8E8EA);
+the rail and chat sit a shade darker, cards a shade lighter, separated by tone
+rather than borders (Linear's layout, Apple's grouped surfaces). One mint (#5DDBA6) marks
 everything live: graph nodes with recent activity, status pills, sparklines,
 the orb while it listens or speaks, new arrivals, focus. A muted red is kept
 for genuinely failing checks only.
@@ -10,7 +11,7 @@ Type: Adwaita Sans (Inter's design, every weight, installed with the desktop)
 for headings, labels, values and reading, on one scale (``TYPE``, applied with
 ``typeset``); JetBrains Mono only for what is technical: issue numbers, hashes,
 paths, label tags, the graph's labels, the ticker and keyboard hints.
-Labels are lower case: the look is a terminal, not a poster.
+Headings are sentence case; mono stays lower case.
 
 Green (the mint) is for what is live, active or positive: selection, primary
 actions, good status. Headings, borders and labels stay in the ink's tints.
@@ -70,7 +71,7 @@ class Tokens:
     orb_core: str = "#f0fff7"
     orb_ring: str = "#dce8e2"
     watermark: float = 0.06
-    panel: str = "#061917"  # cockpit panels
+    panel: str = "#1d1e21"  # cockpit panels
 
     def tag(self, name: str) -> tuple[str, str, str]:
         return self.tags.get(name) or self.tags["open"]
@@ -80,11 +81,11 @@ class Tokens:
         return mix(self.bg, self.ink, k)
 
 
-# Forest-green near-black, a grey-green ink and a teal mint (the Life OS mockup).
-BG = "#031211"
-INK = "#dce8e2"
+# Neutral charcoal, a near-white ink and a mint.
+BG = "#161719"
+INK = "#e8e8ea"
 PEARL = INK  # the ink's old name, kept for older imports
-MINT = "#52e3a4"
+MINT = "#5ddba6"
 RED = "#e5787a"
 
 
@@ -92,12 +93,12 @@ def _dark() -> Tokens:
     t = lambda k: mix(BG, INK, k)  # noqa: E731 - a tint of the pair
     m = lambda k: mix(BG, MINT, k)  # noqa: E731 - towards the mint
     return Tokens(
-        name="dark", bg=BG, ink=INK, side="#041614", text=INK, muted=t(0.78),
+        name="dark", bg=BG, ink=INK, side="#111214", text=INK, muted=t(0.78),
         faint=t(0.6), border=t(0.085), border_strong=t(0.17), btn_line=t(0.28),
-        fill=t(0.045), fill2=t(0.1), inset="#061a18", hover=t(0.07), accent=INK,
+        fill=t(0.045), fill2=t(0.1), inset="#1f2023", hover=t(0.07), accent=INK,
         accent_hover="#f2fbf6", on_accent=BG, signal=MINT, signal_text=MINT,
         signal_soft=m(0.14), unsure=t(0.72), unsure_bg=t(0.1), warn=MINT, red=RED,
-        green=MINT, amber=t(0.45), shadow="#010807",
+        green=MINT, amber=t(0.45), shadow="#08080a",
         grid=(t(0.07), m(0.3), m(0.5), m(0.72), MINT),
         series=(INK, MINT, t(0.55), m(0.55)),
         tags={
@@ -110,7 +111,7 @@ def _dark() -> Tokens:
             "new": ("transparent", MINT, f"1px solid {m(0.7)}"),
             "fail": (mix(BG, RED, 0.16), RED, f"1px solid {mix(BG, RED, 0.5)}"),
         },
-        panel="#061917",
+        panel="#1d1e21",
     )
 
 
@@ -125,7 +126,7 @@ TITLE_PX = 22
 TYPE: dict[str, tuple[str, int, int]] = {
     "big": ("sans", 22, 650),      # a headline number (open issues)
     "title": ("sans", 15, 600),    # an item's name (inspector, active milestone)
-    "head": ("sans", 12, 600),     # panel and section headings
+    "head": ("sans", 13, 600),     # panel and section headings
     "value": ("sans", 13, 600),    # a vital's value
     "body": ("sans", 13, 400),     # running text
     "label": ("sans", 12, 400),    # a vital's key, a row's secondary text
@@ -291,10 +292,10 @@ QToolTip {{
 
 /* cockpit chrome */
 #topBar, #statusRow, #ticker {{ background: {t.bg}; }}
-#topBar {{ border-bottom: 1px solid {t.tint(0.06)}; }}
+#topBar {{ border-bottom: 1px solid {t.tint(0.07)}; }}
 #ticker {{ border-top: 1px solid {t.tint(0.06)}; }}
 #logo {{ color: {t.text}; }}
-#crumb {{ color: {t.muted}; }}
+#crumb {{ color: {t.faint}; }}
 #clock, #pulseText, #statusText, #tickerHint {{ color: {t.faint}; }}
 #tickerText {{ color: {t.muted}; }}
 #tickerText[level="warn"] {{ color: {t.red}; }}
@@ -307,7 +308,8 @@ QToolTip {{
 #pill[level="fail"] {{ color: {t.red}; background: {mix(t.bg, t.red, 0.16)}; }}
 
 /* panels */
-#panel {{ background: {t.panel}; border: 1px solid {t.tint(0.055)}; border-radius: 12px; }}
+#panel {{ background: {t.panel}; border: 1px solid {t.tint(0.045)}; border-radius: 10px; }}
+#graphFrame {{ background: transparent; border: none; }}
 #panelHead {{ color: {t.text}; }}
 #panelHint {{ color: {t.faint}; }}
 #vKey {{ color: {t.faint}; }}
@@ -337,8 +339,8 @@ QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; bo
 
 /* briefing HUD */
 #hud {{
-    background: {mix(t.bg, t.inset, 0.75)}; border: 1px solid {t.border};
-    border-radius: 12px;
+    background: {t.panel}; border: 1px solid {t.tint(0.07)};
+    border-radius: 10px;
 }}
 #hudHead {{ color: {t.muted}; }}
 #headline {{ color: {t.text}; }}
@@ -368,13 +370,13 @@ QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; bo
 #tag {{ border-radius: 7px; padding: 0px 7px; font-size: 11px; font-family: {mono}; }}
 
 QPushButton {{
-    color: {t.text}; background: transparent; border: 1px solid {t.btn_line};
-    border-radius: 8px; padding: 5px 12px; font-family: {sans}; font-size: 13px;
+    color: {t.text}; background: {t.tint(0.07)}; border: 1px solid {t.tint(0.1)};
+    border-radius: 7px; padding: 5px 12px; font-family: {sans}; font-size: 13px;
 }}
-QPushButton:hover {{ border-color: {t.muted}; background: {t.hover}; }}
-QPushButton:pressed {{ background: {t.fill2}; border-color: {t.text}; }}
-QPushButton:disabled {{ color: {t.faint}; border-color: {t.border_strong}; }}
-QPushButton:focus {{ border-color: {t.muted}; }}
+QPushButton:hover {{ border-color: {t.tint(0.16)}; background: {t.tint(0.11)}; }}
+QPushButton:pressed {{ background: {t.tint(0.15)}; border-color: {t.tint(0.22)}; }}
+QPushButton:disabled {{ color: {t.faint}; background: transparent; border-color: {t.border}; }}
+QPushButton:focus {{ border-color: {t.tint(0.32)}; }}
 QPushButton#primary:disabled {{ color: {t.faint}; background: {t.fill2}; border-color: {t.fill2}; }}
 QPushButton#primary:focus {{ border-color: {t.signal}; }}
 QPushButton#linkBtn:focus, QPushButton#filter:focus, QPushButton#ghost:focus {{
@@ -384,14 +386,14 @@ QPushButton#linkBtn:disabled {{ color: {t.faint}; }}
 QComboBox:hover {{ border-color: {t.btn_line}; }}
 QComboBox:focus {{ border-color: {t.muted}; }}
 QPushButton::menu-indicator {{ width: 0; image: none; }}
-QPushButton#ghost {{ border: none; color: {t.muted}; padding: 4px 8px; }}
+QPushButton#ghost {{ border: none; background: transparent; color: {t.muted}; padding: 4px 8px; }}
 QPushButton#ghost:hover {{ background: {t.hover}; color: {t.text}; }}
 QPushButton#ghost[active="true"] {{ background: {t.hover}; color: {t.signal}; }}
 QPushButton#primary {{ color: {t.on_accent}; background: {t.accent}; border: 1px solid {t.accent}; }}
 QPushButton#primary:hover {{ background: {t.accent_hover}; border-color: {t.accent_hover}; }}
 QPushButton#primary:pressed {{ background: {t.tint(0.8)}; border-color: {t.tint(0.8)}; }}
 QPushButton#primary[flash="true"] {{ color: {t.signal}; background: transparent; border-color: {t.signal}; }}
-QPushButton#filter {{ border: none; color: {t.faint}; padding: 2px 5px; font-size: 12px; }}
+QPushButton#filter {{ border: none; background: transparent; color: {t.faint}; padding: 2px 5px; font-size: 12px; }}
 QPushButton#filter:checked {{ color: {t.text}; }}
 QPushButton#filter:hover {{ color: {t.text}; background: {t.hover}; }}
 QPushButton#segment {{
@@ -438,7 +440,7 @@ QMenu::item:disabled {{ color: {t.faint}; }}
 QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
 
 /* shell: navigation rail + placeholder workspaces */
-#rail {{ background: {t.side}; border-right: 1px solid {t.tint(0.06)}; }}
+#rail {{ background: {t.side}; border-right: 1px solid {t.tint(0.05)}; }}
 #railHint {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
 #placeholder {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 14px; }}
 #placeholderTitle {{ color: {t.text}; font-family: {sans}; font-size: 22px; font-weight: 600; }}
@@ -539,7 +541,7 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 #captureStatus[level="error"] {{ color: {t.red}; }}
 
 /* chat panel */
-#chat {{ background: {t.side}; border-left: 1px solid {t.tint(0.07)}; }}
+#chat {{ background: {t.side}; border-left: 1px solid {t.tint(0.05)}; }}
 #chatTitle {{ color: {t.text}; }}
 #chatSub {{ color: {t.faint}; }}
 #emptyTitle {{ color: {t.text}; }}

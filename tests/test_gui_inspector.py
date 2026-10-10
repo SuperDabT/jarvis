@@ -76,7 +76,7 @@ def test_hub_shows_a_summary_and_folds_the_rest(setup):
     assert all("unsure" in r.note.text() or "fail" in r.note.text() for r in shown)
     assert insp.details.isHidden()
     insp.details_btn.click()
-    assert not insp.details.isHidden() and insp.details_btn.text() == "details ▾"
+    assert not insp.details.isHidden() and insp.details_btn.text() == "Details ▾"
 
 
 def test_check_shows_verified_text_source_and_next_step(setup):

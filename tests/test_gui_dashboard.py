@@ -90,8 +90,8 @@ def test_left_column_is_vitals_issues_milestones_commits(made):
     tiles = [lay.itemAt(i).widget() for i in range(lay.count()) if lay.itemAt(i).widget()]
     assert tiles == [win.vitals, win.issues, win.milestones, win.commits]
     assert not hasattr(win, "power") and not hasattr(win, "pulse")
-    assert [h.head.text() for h in tiles] == ["vitals", "issues", "milestones",
-                                              "commit activity"]
+    assert [h.head.text() for h in tiles] == ["Vitals", "Issues", "Milestones",
+                                              "Commit activity"]
 
 
 def test_vitals_issues_and_milestones_show_the_active_milestone(made):

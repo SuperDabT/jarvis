@@ -121,7 +121,7 @@ class Panel(QFrame):
         lay.setSpacing(8)
         head = QHBoxLayout()
         head.setSpacing(6)
-        self.head = typeset(_label(title, "panelHead"), "head")
+        self.head = typeset(_label(title[:1].upper() + title[1:], "panelHead"), "head")
         head.addWidget(self.head)
         head.addStretch(1)
         self.hint = typeset(_label(hint, "panelHint"), "meta")
@@ -180,18 +180,22 @@ class VitalsPanel(Panel):
                      "good" if m.total and m.closed == m.total else "default",
                      "Unconfirmed: recent commits look like the same work." if m.maybe else ""),
                     ("risk", r.label, r.why, r.tone, "")]
+        for r in range(self.grid.rowCount()):
+            self.grid.setRowMinimumHeight(r, 0)
         for i, (key, val, sub, tone, tip) in enumerate(rows):
-            kl = typeset(_label(key, "vKey"), "label")
+            kl = typeset(_label(key.capitalize(), "vKey"), "label")
             vl = typeset(_label(val, "vVal"), "value")
             vl.setProperty("tone", tone)
             sl = typeset(_label(sub, "vSub", wrap=True), "meta")
             sl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             for w in (kl, vl, sl):
                 w.setToolTip(tip)
-            self.grid.addWidget(kl, i * 2, 0, Qt.AlignmentFlag.AlignLeft)
-            self.grid.addWidget(vl, i * 2, 1, Qt.AlignmentFlag.AlignLeft)
-            self.grid.addWidget(sl, i * 2 + 1, 1)
-            self.grid.setRowMinimumHeight(i * 2 + 1, 0)
+            self.grid.addWidget(kl, i * 3, 0, Qt.AlignmentFlag.AlignLeft)
+            self.grid.addWidget(vl, i * 3, 1, Qt.AlignmentFlag.AlignLeft)
+            self.grid.addWidget(sl, i * 3 + 1, 1)
+            self.grid.setRowMinimumHeight(i * 3 + 1, 0)
+            if i < len(rows) - 1:              # air between the three answers
+                self.grid.setRowMinimumHeight(i * 3 + 2, 6)
             self.values[key], self.subs[key] = vl, sl
             if animate:
                 motion.count_up_text(vl, val)
@@ -240,7 +244,7 @@ class IssuesPanel(Panel):
         self.rows: list[IssueRowButton] = []
         self.selected_number: int | None = None
         self.count = typeset(_label("", "issueCount"), "big")
-        self.view_btn = QPushButton("view all →")
+        self.view_btn = QPushButton("View all →")
         self.view_btn.setObjectName("linkBtn")
         self.view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._url: str | None = None
@@ -266,7 +270,7 @@ class IssuesPanel(Panel):
         self.where = typeset(_label(where, "vKey"), "meta")
         self.where.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         top.addWidget(self.where, 1, Qt.AlignmentFlag.AlignBottom)
-        self.view_btn = QPushButton("view all →")
+        self.view_btn = QPushButton("View all →")
         self.view_btn.setObjectName("linkBtn")
         self.view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._url = dash.view_all_url
@@ -537,7 +541,7 @@ class BriefingHud(QFrame):
         lay.setSpacing(8)
         head = QHBoxLayout()
         head.setSpacing(8)
-        self.head = typeset(_label("briefing", "hudHead"), "head")
+        self.head = typeset(_label("Briefing", "hudHead"), "head")
         head.addWidget(self.head)
         self.source = typeset(_label("", "panelHint"), "code")
         head.addWidget(self.source)
@@ -581,7 +585,17 @@ class BriefingHud(QFrame):
                 for i, row in enumerate(self.rows):
                     motion.fade_rise(row, motion.RISE, motion.BASE + 120,
                                      delay=90 + i * motion.STAGGER)
+        self._fit_headline()
         self.adjustSize()
+
+    def _fit_headline(self) -> None:
+        """The wrapped headline at its real height (a word-wrapped label otherwise
+        asks for the height of a narrower one and floats in the gap)."""
+        m = self.layout().contentsMargins()
+        inner = self.WIDTH - m.left() - m.right()
+        self.headline.setFixedHeight(self.headline.heightForWidth(inner))
+        for row in self.rows:   # the bullet's 12 px and its 8 px gap
+            row.text_label.setFixedHeight(row.text_label.heightForWidth(inner - 20))
 
     def set_expanded(self, on: bool) -> None:
         self.expanded = bool(on)
@@ -747,7 +761,7 @@ class Inspector(Panel):
                 self.ask_btn.clicked.connect(lambda: self.ask.emit(node.id))
                 row.addWidget(self.ask_btn)
             if node.url:
-                gh = QPushButton("open ↗")
+                gh = QPushButton("Open ↗")
                 gh.setToolTip(node.url)
                 gh.clicked.connect(lambda: self.open_source.emit(node.url))
                 row.addWidget(gh)
@@ -784,7 +798,8 @@ class Inspector(Panel):
             items = groups.get(key)
             if not items:
                 continue
-            self.body.addWidget(typeset(_label(f"{head} · {len(items)}", "panelHead"), "head"))
+            self.body.addWidget(typeset(_label(f"{head.capitalize()} · {len(items)}",
+                                               "panelHead"), "head"))
             for i, (edge, other) in enumerate(items):
                 r = self._relation(edge, other)
                 if i < RELATED_PER_GROUP and shown < SUMMARY_RELATED:
@@ -820,7 +835,7 @@ class Inspector(Panel):
 
     def _details(self, widgets: list[QWidget]) -> None:
         """The rest, folded away: more relationships, full text, the raw prompt."""
-        self.details_btn = QPushButton("details ▸")
+        self.details_btn = QPushButton("Details ▸")
         self.details_btn.setObjectName("linkBtn")
         self.details_btn.setCheckable(True)
         self.details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -834,7 +849,7 @@ class Inspector(Panel):
 
         def toggle(on: bool) -> None:
             motion.reveal(self.details, on)
-            self.details_btn.setText("details ▾" if on else "details ▸")
+            self.details_btn.setText("Details ▾" if on else "Details ▸")
 
         self.details_btn.toggled.connect(toggle)
         self.body.addWidget(self.details_btn, 0, Qt.AlignmentFlag.AlignLeft)

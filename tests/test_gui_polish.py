@@ -153,7 +153,7 @@ def test_inspector_details_open_smoothly(win, motion_on):
     insp.details_btn.click()
     assert not insp.details.isHidden()
     motion.finish_all()
-    assert insp.details_btn.text() == "details ▾"
+    assert insp.details_btn.text() == "Details ▾"
 
 
 # ---------------------------------------------------------------- selection

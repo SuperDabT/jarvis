@@ -65,10 +65,10 @@ def test_rail_lists_the_five_workspaces_and_starts_on_home(win):
         "Home", "Tasks", "School", "Projects", "Knowledge"]
     assert win.workspace == "home" and win.rail.current == "home"
     assert win.stack.count() == 5
-    assert win.crumb.text() == "/ home"
+    assert win.crumb.text() == "›  Home"
     assert win.hint_label.text() == SHELL_HINT
     win.show_workspace("projects")
-    assert win.crumb.text() == "/ projects / robot"
+    assert win.crumb.text() == "›  Projects  ›  robot"
     assert win.hint_label.text() == IDLE_HINT
     assert win.rail.buttons["tasks"].toolTip() == "Tasks (Ctrl+2)"
 
@@ -80,7 +80,7 @@ def test_clicking_the_rail_switches_workspaces(win, app):
         assert win.workspace == key and win.rail.current == key
         assert win.stack.currentWidget() is win.workspaces[key]
         assert sum(b.isChecked() for b in win.rail.buttons.values()) == 1
-    assert win.crumb.text() == "/ knowledge" and win.hint_label.text() == SHELL_HINT
+    assert win.crumb.text() == "›  Knowledge" and win.hint_label.text() == SHELL_HINT
 
 
 @pytest.mark.parametrize("n", range(5))

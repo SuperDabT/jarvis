@@ -123,8 +123,8 @@ START_WORKSPACE = "home"
 BUSY_TEXT = "A refresh is already running in the background"
 SPIN_MS = 33
 SPIN_DEG_PER_S = 300
-REFRESH_TEXT = " refresh"
-REFRESHING_TEXT = " refreshing…"
+REFRESH_TEXT = " Refresh"
+REFRESHING_TEXT = " Refreshing…"
 FILTER_LABELS = {"issue": "issue", "commit": "commit", "card": "suggestion",
                  "check": "check", "paper": "paper", "item": "item"}
 SHORT_LABELS = {"card": "card"}  # a narrow graph's legend
@@ -406,7 +406,7 @@ class MainWindow(QMainWindow):
 
         # centre: the graph
         frame = QFrame()
-        frame.setObjectName("panel")
+        frame.setObjectName("graphFrame")
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(1, 1, 1, 1)
         self.graph = BrainGraph(self.tokens)
@@ -451,9 +451,9 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(18, 0, 12, 0)
         lay.setSpacing(10)
-        self.logo = mono(_label("jarvis", "logo"), 15, 700)
+        self.logo = theme.typeset(_label("Jarvis", "logo"), "title")
         lay.addWidget(self.logo)
-        self.crumb = mono(_label("", "crumb"), 12)
+        self.crumb = theme.typeset(_label("", "crumb"), "body")
         lay.addWidget(self.crumb)
         lay.addSpacing(4)
         self.state_pill = pill("idle")
@@ -475,7 +475,7 @@ class MainWindow(QMainWindow):
         self.refresh_btn.setMinimumWidth(fm.horizontalAdvance(REFRESHING_TEXT) + 44)
         self.refresh_btn.clicked.connect(self.refresh)
         lay.addWidget(self.refresh_btn)
-        self.chat_btn = QPushButton("✦ ask jarvis")
+        self.chat_btn = QPushButton("✦ Ask Jarvis")
         self.chat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chat_btn.setToolTip("Show or hide the chat (Ctrl+J; Ctrl+K to type a question)")
         self.chat_btn.clicked.connect(lambda: self.set_chat_open(not self.chat.isVisible()))
@@ -488,7 +488,7 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(row)
         lay.setContentsMargins(13, 8, 13, 0)  # lines up with the panels below
         lay.setSpacing(10)
-        self.status_text = mono(_label("", "statusText"), 11)
+        self.status_text = theme.typeset(_label("", "statusText"), "meta")
         self.status_text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.status_text.setMinimumWidth(60)
         lay.addWidget(self.status_text, 1)
@@ -502,7 +502,7 @@ class MainWindow(QMainWindow):
         st.setSpacing(0)
         self.side_buttons: dict[str, QPushButton] = {}
         for key in ("dashboard", "inspector"):
-            b = QPushButton(key)
+            b = QPushButton(key.capitalize())
             b.setObjectName("segment")
             b.setCheckable(True)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -592,12 +592,12 @@ class MainWindow(QMainWindow):
             motion.fade_in(page, motion.SWITCH)    # the new workspace settles in
         self.stack.setCurrentWidget(page)
         self.rail.select(key)
-        name = next(w.name for w in WORKSPACES if w.key == key).lower()
+        name = next(w.name for w in WORKSPACES if w.key == key)
         if key == "projects":
-            self.crumb.setText(f"/ {name} / {self.cfg.repo.split('/')[-1]}")
+            self.crumb.setText(f"›  {name}  ›  {self.cfg.repo.split('/')[-1]}")
             self.crumb.setToolTip(self.cfg.repo)
         else:
-            self.crumb.setText(f"/ {name}")
+            self.crumb.setText(f"›  {name}")
             self.crumb.setToolTip("")
         self.hint_label.setProperty("full", IDLE_HINT if key == "projects" else SHELL_HINT)
         self._fit_hint()

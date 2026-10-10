@@ -167,15 +167,15 @@ class NavButton(QAbstractButton):
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         on = self.isChecked()
         if on:
-            p.setPen(QPen(QColor(mix(t.bg, t.signal, 0.32)), 1))
-            p.setBrush(QColor(mix(t.bg, t.signal, 0.11)))
-            p.drawRoundedRect(r, 10, 10)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(t.tint(0.09)))
+            p.drawRoundedRect(r, 8, 8)
         elif self.isDown() or self._hover > 0:
             fill = QColor(t.fill2 if self.isDown() else t.hover)
             fill.setAlphaF(1.0 if self.isDown() else min(1.0, self._hover))
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(fill)
-            p.drawRoundedRect(r, 10, 10)
+            p.drawRoundedRect(r, 8, 8)
         if self.hasFocus() and not on:   # keyboard focus stays visible
             p.setPen(QPen(QColor(t.muted), 1))
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -187,11 +187,11 @@ class NavButton(QAbstractButton):
             ink = QColor(round(ink.red() + (hi.red() - ink.red()) * k),
                          round(ink.green() + (hi.green() - ink.green()) * k),
                          round(ink.blue() + (hi.blue() - ink.blue()) * k))
-        color = ink
+        color = QColor(t.text) if on else ink   # selected: white label, mint icon
         font = theme.pick_font()
         if self.wide:
             icon = QRectF(r.left() + 13, r.center().y() - 11, 22, 22)
-            paint_icon(p, self.ws.key, icon, color)
+            paint_icon(p, self.ws.key, icon, ink)
             font.setPixelSize(14)
             font.setWeight(font.Weight.DemiBold if on else font.Weight.Normal)
             p.setFont(font)
@@ -200,7 +200,7 @@ class NavButton(QAbstractButton):
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.ws.name)
         else:
             icon = QRectF(r.center().x() - 11, r.top() + 7, 22, 22)
-            paint_icon(p, self.ws.key, icon, color)
+            paint_icon(p, self.ws.key, icon, ink)
             font.setPixelSize(11)
             p.setFont(font)
             p.setPen(color)
