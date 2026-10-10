@@ -38,6 +38,11 @@ HOVER = 140   # ms, hover / press feedback on rows
 EXPAND = 200  # ms, a panel section opening or closing
 SELECT = 180  # ms, a selection settling in (graph ring, inspector content)
 SWITCH = 150  # ms, the incoming workspace fading in
+PANEL = 200   # ms, the chat panel or a dialog coming in (out: FAST)
+# The startup entrance (once): the top bar, then the rail settling in from the left,
+# then the workspace fading up into place; ~500 ms in all, nothing waits for it.
+ENTER_BAR, ENTER_RAIL, ENTER_PAGE = 160, 260, 320
+ENTER_RAIL_DELAY, ENTER_PAGE_DELAY = 60, 180
 STAGGER = 60  # ms between items of a list
 RISE = 8  # px a block rises while fading in
 
@@ -508,7 +513,7 @@ QWIDGETSIZE_MAX = (1 << 24) - 1
 
 
 __all__ = [
-    "BASE", "EXPAND", "FAST", "HOVER", "SELECT", "SLOW", "STAGGER", "SWITCH", "RISE",
+    "BASE", "EXPAND", "FAST", "HOVER", "PANEL", "SELECT", "SLOW", "STAGGER", "SWITCH", "RISE",
     "animate", "clamp01", "collapse", "count_up", "count_up_text", "created_count", "curve",
     "ease_in_out", "ease_out", "enabled", "fade_in", "fade_out", "fade_rise", "finish_all",
     "grow", "live", "number_formatter", "phase", "pulse", "reveal", "seek_all", "set_enabled",

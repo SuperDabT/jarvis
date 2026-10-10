@@ -107,6 +107,13 @@ Updated after Phase 1, step 9: Phase 1 is complete (see ROADMAP.md).
   graph lock gets a mint ring that settles in and the inspector content fades in
   (`SELECT` 180 ms; hovering doesn't fade). With `JARVIS_REDUCE_MOTION=1` (or
   `--no-animations`) all of these are instant.
+- Startup entrance, once (`MainWindow._enter`, after the first show; nothing waits for it):
+  the top bar fades in, the rail settles in from the left, then the workspace fades up
+  (~500 ms, `motion.ENTER_*`). The chat slides and fades in from the right (`PANEL` 200 ms)
+  and fades out (`FAST`); the capture dialog fades up; reopening either mid-fade settles
+  open. Qt's own menu / tooltip / combo fades follow the motion setting (the platform may
+  ignore them). Surfaces separate by tone: panels have only a faint hairline, pills are soft
+  fills, no green outlines.
 - The inspector (the right column, full height; the thought stream is no longer in
   Projects, its events stay in Home's "recent activity" and the ticker): a header (kind,
   status, title, a priority tag only when the issue's labels give one, a short summary), the
@@ -195,7 +202,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 874 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 880 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

@@ -110,7 +110,7 @@ CHAT_DOCK_FROM = 980
 CHAT_OVERLAY_W = 340
 GRAPH_MIN = 300
 TICKER_STATUS_MIN = 200  # px the ticker keeps for its status text before the hint
-HUD_FOLD_BELOW = 480     # graph width under which the briefing folds to its headline
+HUD_FOLD_BELOW = 520     # graph width under which the briefing folds to its headline
 ACTIVE_MILESTONE_KEY = "projects/active_milestone"
 POLL_MS = 30_000
 DEBOUNCE_MS = 400
@@ -267,6 +267,7 @@ class MainWindow(QMainWindow):
         self._now_fn = clock or (lambda: datetime.now().astimezone())
         self._chat_open = False
         self._chat_floating = False
+        self._entered = False
         self.side_mode = "inspector"
         self.open_url: Callable[[QUrl], Any] = QDesktopServices.openUrl   # tests swap it
         self._status_sticky = False
@@ -744,9 +745,25 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ chat
 
     def set_chat_open(self, open_: bool, focus: bool = True) -> None:
+        was = self._chat_open
         self._chat_open = bool(open_)
-        self.chat.setVisible(open_)
+        animate = motion.enabled() and self.isVisible() and was != self._chat_open
+        if open_ or not animate:
+            self.chat.setVisible(open_)
         self._place_chat()
+        if animate and open_:
+            # in from the right: a short slide and fade (the layout is already final)
+            motion.fade_in(self.chat, motion.PANEL)
+            motion.slide(self.chat, dy=0, dx=16, duration=motion.PANEL)
+        elif animate:
+            def gone() -> None:
+                if not self._chat_open:            # not reopened meanwhile
+                    self.chat.hide()
+                    self._fit_columns()
+                motion._drop_effect(self.chat)
+            motion.fade_out(self.chat, motion.FAST, on_done=gone)
+            if not self.chat_overlay:
+                return                             # columns follow when it is gone
         self._fit_columns()
         self.chat_btn.setProperty("active", "true" if open_ else "false")
         repolish(self.chat_btn)
@@ -1189,6 +1206,25 @@ class MainWindow(QMainWindow):
         super().showEvent(e)
         self._sync_spinner()
         self.stage.place()
+        if not self._entered:
+            self._entered = True
+            QTimer.singleShot(0, self._enter)
+
+    def _enter(self) -> None:
+        """The startup entrance, once: the top bar, the rail settling in from the
+        left, then the workspace fading up into place (~500 ms). Everything is
+        already built and usable; with reduced motion nothing moves."""
+        if not motion.enabled() or not self.isVisible():
+            return
+        motion.fade_in(self.topbar, motion.ENTER_BAR)
+        motion.fade_in(self.rail, motion.ENTER_RAIL, delay=motion.ENTER_RAIL_DELAY)
+        motion.slide(self.rail, dy=0, dx=-12, duration=motion.ENTER_RAIL,
+                     delay=motion.ENTER_RAIL_DELAY)
+        motion.fade_rise(self.stack.currentWidget(), 10, motion.ENTER_PAGE,
+                         delay=motion.ENTER_PAGE_DELAY)
+        motion.fade_in(self.ticker, motion.ENTER_PAGE, delay=motion.ENTER_PAGE_DELAY)
+        if self._chat_open:
+            motion.fade_in(self.chat, motion.ENTER_PAGE, delay=motion.ENTER_PAGE_DELAY)
 
     def resizeEvent(self, e) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(e)

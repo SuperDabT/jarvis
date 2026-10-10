@@ -23,6 +23,14 @@ def make_app(argv: list[str] | None = None, scheme: str | None = None) -> QAppli
         app = QApplication(argv if argv is not None else sys.argv[:1])
     app.setFont(theme.pick_font())
     theme.apply(app, scheme)
+    # the toolkit's own menu / tooltip / combo transitions follow the motion setting
+    # (the platform may ignore them)
+    from PySide6.QtCore import Qt
+
+    effects = (Qt.UIEffect.UI_General, Qt.UIEffect.UI_FadeMenu,
+               Qt.UIEffect.UI_FadeTooltip, Qt.UIEffect.UI_AnimateCombo)
+    for effect in effects:
+        QApplication.setEffectEnabled(effect, motion.enabled())
     return app
 
 

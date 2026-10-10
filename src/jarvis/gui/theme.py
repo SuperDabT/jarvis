@@ -291,8 +291,8 @@ QToolTip {{
 
 /* cockpit chrome */
 #topBar, #statusRow, #ticker {{ background: {t.bg}; }}
-#topBar {{ border-bottom: 1px solid {t.border}; }}
-#ticker {{ border-top: 1px solid {t.border}; }}
+#topBar {{ border-bottom: 1px solid {t.tint(0.06)}; }}
+#ticker {{ border-top: 1px solid {t.tint(0.06)}; }}
 #logo {{ color: {t.text}; }}
 #crumb {{ color: {t.muted}; }}
 #clock, #pulseText, #statusText, #tickerHint {{ color: {t.faint}; }}
@@ -300,15 +300,14 @@ QToolTip {{
 #tickerText[level="warn"] {{ color: {t.red}; }}
 #tickerText[level="ok"] {{ color: {t.signal}; }}
 #pill {{
-    border-radius: 9px; padding: 1px 8px; color: {t.muted};
-    border: 1px solid {t.border_strong}; background: transparent;
+    border-radius: 9px; padding: 2px 9px; color: {t.muted}; border: none;
+    background: {t.fill2};
 }}
-#pill[live="true"] {{ color: {t.signal}; border-color: {live_line}; background: {t.signal_soft}; }}
-#pill[level="fail"] {{ color: {t.red}; border-color: {mix(t.bg, t.red, 0.5)}; }}
+#pill[live="true"] {{ color: {t.signal_text}; background: {t.signal_soft}; }}
+#pill[level="fail"] {{ color: {t.red}; background: {mix(t.bg, t.red, 0.16)}; }}
 
 /* panels */
-#panel {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 10px; }}
-#panel[live="true"] {{ border-color: {mix(t.border, t.signal, 0.25)}; }}
+#panel {{ background: {t.panel}; border: 1px solid {t.tint(0.055)}; border-radius: 12px; }}
 #panelHead {{ color: {t.text}; }}
 #panelHint {{ color: {t.faint}; }}
 #vKey {{ color: {t.faint}; }}
@@ -338,8 +337,8 @@ QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; bo
 
 /* briefing HUD */
 #hud {{
-    background: {mix(t.bg, t.inset, 0.6)}; border: 1px solid {t.border_strong};
-    border-radius: 10px;
+    background: {mix(t.bg, t.inset, 0.75)}; border: 1px solid {t.border};
+    border-radius: 12px;
 }}
 #hudHead {{ color: {t.muted}; }}
 #headline {{ color: {t.text}; }}
@@ -370,7 +369,7 @@ QPushButton#issueRow:hover, QPushButton#msRow:hover {{ background: {t.hover}; bo
 
 QPushButton {{
     color: {t.text}; background: transparent; border: 1px solid {t.btn_line};
-    border-radius: 6px; padding: 4px 10px; font-family: {sans}; font-size: 13px;
+    border-radius: 8px; padding: 5px 12px; font-family: {sans}; font-size: 13px;
 }}
 QPushButton:hover {{ border-color: {t.muted}; background: {t.hover}; }}
 QPushButton:pressed {{ background: {t.fill2}; border-color: {t.text}; }}
@@ -439,7 +438,7 @@ QMenu::item:disabled {{ color: {t.faint}; }}
 QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
 
 /* shell: navigation rail + placeholder workspaces */
-#rail {{ background: {t.side}; border-right: 1px solid {t.border}; }}
+#rail {{ background: {t.side}; border-right: 1px solid {t.tint(0.06)}; }}
 #railHint {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
 #placeholder {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 14px; }}
 #placeholderTitle {{ color: {t.text}; font-family: {sans}; font-size: 22px; font-weight: 600; }}
@@ -522,7 +521,8 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 
 /* quick capture (Ctrl+N) */
 #capture {{
-    background: {mix(t.bg, t.inset, 0.6)}; border: 1px solid {live_line}; border-radius: 12px;
+    background: {mix(t.bg, t.inset, 0.75)}; border: 1px solid {t.border_strong};
+    border-radius: 14px;
 }}
 #captureHead {{ color: {t.signal}; font-family: {sans}; font-size: 12px; }}
 #captureHint {{ color: {t.faint}; font-family: {mono}; font-size: 10px; }}
@@ -539,7 +539,7 @@ QLineEdit#field:focus, QPlainTextEdit#fieldBody:focus {{ border-color: {live_lin
 #captureStatus[level="error"] {{ color: {t.red}; }}
 
 /* chat panel */
-#chat {{ background: {t.side}; border-left: 1px solid {t.border}; }}
+#chat {{ background: {t.side}; border-left: 1px solid {t.tint(0.07)}; }}
 #chatTitle {{ color: {t.text}; }}
 #chatSub {{ color: {t.faint}; }}
 #emptyTitle {{ color: {t.text}; }}

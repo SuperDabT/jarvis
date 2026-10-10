@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from jarvis import db
 from jarvis.config import Config
+from jarvis.gui import motion
 from jarvis.gui.widgets import _clear, _label, repolish
 
 # capture_fn(cfg, text, answers) and plain_fn(cfg, text) -> capture.CaptureResult
@@ -152,14 +153,29 @@ class CaptureOverlay(QFrame):
     # ------------------------------------------------------------ open / close
 
     def open(self) -> None:
+        opening = self.isHidden()
+        self._closing = False
         self.show()
         self.raise_()
-        self.input.setFocus()
+        self.input.setFocus()           # typing works straight away; the fade is cosmetic
         self.input.selectAll()
+        if opening:
+            motion.fade_rise(self, 6, motion.PANEL)
 
     def close_overlay(self) -> None:
-        self.hide()
         self.closed.emit()
+        if not motion.enabled() or self.isHidden():
+            self.hide()
+            return
+        self._closing = True
+
+        def gone() -> None:
+            if self._closing:               # not reopened meanwhile
+                self._closing = False
+                self.hide()
+            motion._drop_effect(self)
+
+        motion.fade_out(self, motion.FAST, on_done=gone)
 
     @property
     def busy(self) -> bool:
