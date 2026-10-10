@@ -227,14 +227,17 @@ the commit. Proposals are stored in the assistant message's `chat_messages.sourc
 (`proposal`, `proposal_status`) and applied at most once. `cfg.agent_model`
 (`JARVIS_AGENT_MODEL`) changes the loop's model; default gemma4:26b. Agenda, capture, recall
 and project questions keep their single-pass paths; voice doesn't use the loop. Each turn
-first fixes its goal (`agent.Goal`: schedule / plan / answer and the days, one `chat_json`
-call, or carried over from Jarvis's previous loop turn via `pending_goal` in that message's
-metadata, so a reply continues the same request). Plans and schedules get the agenda for the
-period plus 7 days and the open items fetched by code before the model starts
-(`required_context`); a schedule turn ends with a proposal or one question (one reminder for
-prose, a prose question becomes the clarification, otherwise a note says none was proposed);
-known deadlines an answer leaves out get a note. `set_due` only dates undated items: existing
-deadlines are planned with reminders, never moved. Tests: `tests/test_agent.py`.
+first fixes its goal (`agent.Goal`: schedule / plan / answer, the days, and what the user said
+for it; one `chat_json` call, or carried over from Jarvis's previous loop turn via
+`pending_goal` in that message's metadata, so a reply continues the same request). Plans and
+schedules are structured (`jarvis/planning.py`): code picks the items in scope (overdue, due in
+the period or the 7 days after, undated) and gives them as a brief; the model answers with
+`submit_plan` (a decision per item id, availability quoted from the user, suggestions that
+aren't tasks); `check_plan` refuses dropped items, work after a deadline, moved deadlines and
+any time not inside a window the user stated, and the model fixes it. The accepted plan ends
+the turn and is rendered by code; a schedule's set_due / timed work become a proposal. Plans
+never ask; schedules may ask once per goal. Without a valid plan the answer lists what is on
+record. `set_due` only dates undated items. Tests: `tests/test_agent.py`.
 
 ## The real database
 
@@ -246,7 +249,7 @@ code until restarted and works with either version.
 
 ## Tests
 
-`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 960 pass.
+`QT_QPA_PLATFORM=offscreen JARVIS_REDUCE_MOTION=1 uv run pytest -q`: 954 pass.
 `tests/conftest.py` refuses any SQLite connection inside `~/.local/share/jarvis` during tests
 and fails the run if one was attempted. `tests/test_migrations.py` covers the upgrade machinery,
 `tests/test_life_os_schema.py` the version 2 tables, `tests/test_items.py` the item service,

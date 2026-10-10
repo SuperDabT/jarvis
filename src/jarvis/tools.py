@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from jarvis import actions, assistant
+from jarvis import actions, assistant, planning
 from jarvis import items as it
 from jarvis.chat import Source
 from jarvis.config import Config
@@ -40,7 +40,11 @@ class ToolContext:
     evidence: list[str] = field(default_factory=list)       # tool results, for validation
     proposal: actions.Proposal | None = None
     clarification: dict[str, Any] | None = None
-    refused: list[str] = field(default_factory=list)        # propose_changes' last refusals
+    refused: list[str] = field(default_factory=list)        # the last refusals (plan/proposal)
+    brief: planning.Brief | None = None    # plan / schedule turns: what must be decided
+    scheduling: bool = False               # a schedule goal: an accepted plan is proposed
+    user_text: str = ""                    # everything the user said for this goal
+    plan: planning.Plan | None = None      # the accepted plan
     calls: list[str] = field(default_factory=list)          # tool names, in order
 
 
@@ -166,6 +170,34 @@ def propose_changes(ctx: ToolContext, changes: list, summary: str = "",
                     else "No valid change; fix the refused ones or answer without changes."}
 
 
+def submit_plan(ctx: ToolContext, decisions: list, summary: str = "",
+                availability: list | None = None, suggestions: list | None = None,
+                assumptions: list | None = None) -> dict:
+    if ctx.brief is None:
+        raise ValueError("submit_plan is only for plans and schedules")
+    plan, errors = planning.check_plan(ctx.brief, {
+        "decisions": decisions, "summary": summary, "availability": availability or [],
+        "suggestions": suggestions or [], "assumptions": assumptions or []}, ctx.user_text)
+    proposal = None
+    if plan is not None and ctx.scheduling and (changes := planning.changes_for(ctx.brief,
+                                                                                 plan)):
+        left = [{"item_id": d.item_id, "reason": d.reason} for d in plan.decisions
+                if d.action in ("leave", "exclude")]
+        proposal, errors = actions.build_proposal(
+            ctx.conn, changes, ctx.now, ctx.now.tzinfo, question=ctx.question,
+            summary=plan.summary, unscheduled=left, assumptions=plan.assumptions,
+            allow_backlog=ctx.allow_backlog)
+        if errors:
+            plan = None
+    if plan is None:
+        ctx.refused = list(errors)
+        return {"accepted": False, "errors": errors,
+                "note": "Fix these and call submit_plan again with the whole plan."}
+    ctx.plan, ctx.proposal, ctx.refused = plan, proposal, []
+    return {"accepted": True, "saved": False,
+            "proposed_changes": [c.describe() for c in proposal.changes] if proposal else []}
+
+
 def ask_user(ctx: ToolContext, question: str, missing: list | None = None) -> dict:
     ctx.clarification = {"question": str(question)[:400],
                          "missing": [str(m)[:80] for m in missing or []][:5]}
@@ -232,6 +264,34 @@ TOOLS: dict[str, tuple[dict, Callable[..., dict]]] = {
          "assumptions": {"type": "array", "items": {"type": "string"},
                          "description": "every assumption the dates rest on"}},
         ["changes"]), propose_changes),
+    "submit_plan": (_fn(
+        "submit_plan", "Your answer to a plan or schedule request, as structure. Decide EVERY "
+        "item in the brief by item_id: set_due (an undated item gets a date), work_on (a "
+        "suggested day to work on it, on or before its deadline; a time only inside "
+        "availability the user stated), leave (as it is) or exclude (not in this plan); "
+        "each with a reason from the records or the user's words. Saves nothing.",
+        {"summary": {"type": "string",
+                     "description": "2-3 sentences: what matters most in this period and why"},
+         "decisions": {"type": "array", "items": {"type": "object", "properties": {
+             "item_id": {"type": "integer"},
+             "action": {"type": "string", "enum": list(planning.DECISIONS)},
+             "date": {"type": "string", "description": "YYYY-MM-DD (set_due, work_on)"},
+             "time": {"type": "string", "description": "HH:MM, only inside a stated window"},
+             "reason": {"type": "string"}}, "required": ["item_id", "action", "reason"]}},
+         "availability": {"type": "array", "items": {"type": "object", "properties": {
+             "date": {"type": "string"}, "start": {"type": "string"},
+             "end": {"type": "string"},
+             "quote": {"type": "string", "description": "the user's exact words"}},
+             "required": ["date", "start", "end", "quote"]},
+             "description": "only windows the user stated, one per day; empty if they "
+                            "didn't. An open-ended one ('after 3pm') ends at 23:59, one "
+                            "with no start ('until noon') starts at 00:00"},
+         "suggestions": {"type": "array", "items": {"type": "object", "properties": {
+             "text": {"type": "string"}, "reason": {"type": "string"}}},
+             "description": "ideas that are not existing tasks (e.g. keep time before an "
+                            "exam); never detailed study plans"},
+         "assumptions": {"type": "array", "items": {"type": "string"}}},
+        ["summary", "decisions"]), submit_plan),
     "ask_user": (_fn(
         "ask_user", "Ask the user one specific question when a fact you can't look up "
         "(usually when they are free) would change the result. Never ask what the other "
@@ -242,8 +302,12 @@ TOOLS: dict[str, tuple[dict, Callable[..., dict]]] = {
 }
 
 
-def schemas() -> list[dict]:
-    return [spec for spec, _ in TOOLS.values()]
+READ_TOOLS = ("get_agenda", "list_items", "search_memory", "project_status", "list_projects")
+
+
+def schemas(names: tuple[str, ...] | list[str] | None = None) -> list[dict]:
+    """The tool schemas offered to the model (all of them, or only ``names``)."""
+    return [spec for n, (spec, _) in TOOLS.items() if names is None or n in names]
 
 
 def run_tool(ctx: ToolContext, name: str, arguments: Any, required: bool = False) -> str:
