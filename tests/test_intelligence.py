@@ -256,6 +256,11 @@ def test_general_question_gets_no_stored_data(conn, tmp_path):
     ("What tasks do I have this week?", "agenda"),
     ("what do I have tomorrow?", "agenda"),
     ("any tasks today?", "agenda"),
+    ("homework due friday?", "agenda"),
+    ("got any quizzes this week", "agenda"),
+    ("deadlines next week", "agenda"),
+    ("how many things left today", "agenda"),
+    ("help me plan my tasks for tomorrow", "planning"),
     ("What should I work on?", "planning"),
     ("How should I prioritize the open issues?", "planning"),
     ("What is left on the LiDAR project?", "project"),
@@ -269,6 +274,18 @@ def test_general_question_gets_no_stored_data(conn, tmp_path):
 def test_rules_route_clear_requests(conn, question, expected):
     r = intent.route_by_rules(question, NOW.date(), conn)
     assert r is not None and r.intent == expected, (question, r)
+
+
+def test_requests_to_change_items_are_not_lookups(conn):
+    for q in ("move my tasks to friday", "postpone my homework to next week",
+              "mark my quiz done today"):
+        r = intent.route_by_rules(q, NOW.date(), conn)
+        assert r is None or r.intent != "agenda", (q, r)
+
+
+def test_the_classifier_prompt_has_examples():
+    assert '"what tasks i have for today?" -> agenda' in intent.CLASSIFY_SYSTEM
+    assert '"help me plan my week" -> planning' in intent.CLASSIFY_SYSTEM
 
 
 def test_agenda_timeframes():

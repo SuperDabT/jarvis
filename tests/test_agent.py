@@ -346,6 +346,10 @@ def test_a_clear_new_question_is_not_taken_as_the_answer(conn, tmp_path, week):
     m = Script()
     b = run(conn, tmp_path, "What do I need to do today?", m, session_id="s1")
     assert b.tier == "direct" and m.requests == []
+    for q in ("what tasks i have for today?", "homework due friday?"):   # looser wordings
+        m = Script()
+        c = run(conn, tmp_path, q, m, session_id="s1")
+        assert c.tier == "direct" and c.route_by != "followup" and m.requests == [], q
 
 
 def test_a_prose_question_in_a_schedule_turn_is_the_clarification(conn, tmp_path, week):

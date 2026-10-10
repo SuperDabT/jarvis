@@ -75,6 +75,14 @@ _AGENDA_RE = re.compile("|".join([
     r"\b(?:upcoming|coming\s+up)\b",
     r"\b(?:deadlines?|appointments?)\b",
 ]), re.I)
+# The looser agenda rule: a word for the user's own items plus a time word (see
+# timeframe) is a lookup, unless the message asks to change something.
+_ITEM_WORD_RE = re.compile(
+    r"\b(?:tasks?|to-?dos?|due|deadlines?|homework|assignments?|quiz(?:zes)?|exams?|"
+    r"reminders?|errands|appointments?|plans?|stuff|things)\b", re.I)
+_CHANGE_RE = re.compile(
+    r"\b(?:move|moving|push|postpone|delay|reschedule|cancel|delete|remove|drop|mark|"
+    r"finish(?:ed)?|complete[ds]?|add|create|change|rename)\b", re.I)
 # The morning summary.
 _BRIEF_RE = re.compile("|".join([
     r"^\s*(?:good\s+)?morning\b", r"\b(?:morning|daily)\s+(?:brief(?:ing)?|summary|update|"
@@ -238,11 +246,14 @@ def route_by_rules(question: str, today: date,
     tf = timeframe(q, today)
     if _GOAL_RE.search(q):
         return Route("planning", *(tf or (None, None, "")), project=slug)
-    if _AGENDA_RE.search(q) and not _PLANNING_RE.search(q):
+    if _AGENDA_RE.search(q) and not _PLANNING_RE.search(q) and not _CHANGE_RE.search(q):
         if names_project and not re.search(r"\bmy\s+(?:tasks?|to-?dos?|day|agenda)\b", q, re.I):
             return Route("project", project=slug)
         start, end, span = tf or (today, today, "today")
         return Route("agenda", start, end, span, project=slug)
+    if (tf and not names_project and _ITEM_WORD_RE.search(q) and not _PLANNING_RE.search(q)
+            and not _CHANGE_RE.search(q)):
+        return Route("agenda", *tf)
     if _PLANNING_RE.search(q):
         return Route("planning", *(tf or (None, None, "")), project=slug)
     if names_project:
@@ -263,6 +274,18 @@ intent is one of:
 - recall: what the user said, asked or decided in an earlier conversation
 - general: general knowledge, definitions, small talk; nothing stored is needed
 - mixed: none of these clearly
+Examples:
+"what tasks i have for today?" -> agenda
+"anything due friday" -> agenda
+"homework this week?" -> agenda
+"is tomorrow busy" -> agenda
+"help me plan my week" -> planning
+"what should I study first" -> planning
+"remind me to call mom at 6" -> capture
+"buy milk tomorrow" -> capture
+"is #31 fixed" -> project
+"what did I say about the bracket" -> recall
+"how does a capacitor work" -> general
 """
 CLASSIFY_SCHEMA = {"type": "object", "properties": {"intent": {"type": "string",
                                                                "enum": list(INTENTS)}},
